@@ -371,9 +371,10 @@ def choose_unregistered_account(page, side: str) -> None:
 
     # Find the Non-registered account with the highest CAD balance.
     # There are often multiple Non-registered accounts — pick the richest one.
+    # Click by pixel coordinates at the right edge of the row (where the radio button is).
     account_labels = ["Non-registered", "Unregistered", "Personal"]
     best_balance = -1.0
-    best_el = None
+    best_box = None
 
     for label in account_labels:
         try:
@@ -388,26 +389,23 @@ def choose_unregistered_account(page, side: str) -> None:
                     m = re.search(r'\$([0-9,]+\.?\d*)\s*CAD', text)
                     bal = float(m.group(1).replace(",", "")) if m else 0.0
                     if bal > best_balance:
-                        best_balance = bal
-                        best_el = el
+                        box = el.bounding_box()
+                        if box:
+                            best_balance = bal
+                            best_box = box
                 except Exception:
                     pass
         except Exception:
             pass
 
-    if best_el is not None:
-        try:
-            # Try clicking the radio button inside the row first
-            radio = best_el.locator('input[type="radio"]').first
-            if radio.is_visible(timeout=500):
-                radio.click()
-            else:
-                best_el.click()
-            print(f"  Selected Non-registered account (${best_balance:.2f} CAD)")
-            page.wait_for_timeout(700)
-            return
-        except Exception:
-            pass
+    if best_box is not None:
+        # Click near the right edge of the row — that's where the radio button circle lives
+        x = best_box["x"] + best_box["width"] - 20
+        y = best_box["y"] + best_box["height"] / 2
+        page.mouse.click(x, y)
+        print(f"  Clicked radio button for Non-registered ${best_balance:.2f} CAD account")
+        page.wait_for_timeout(700)
+        return
 
     snap(page, f"{side}_acct_fail")
     raise RuntimeError(f"Unregistered account not found - see data/screen_{side}_acct_fail.png")
