@@ -477,18 +477,22 @@ def place_order(
 
     if confirm:
         print("Placing order (confirm)...")
-        confirmed = click_first(page, [
-            'button:has-text("Place order")',
-            'button:has-text("Place Order")',
-            'button:has-text("Confirm")',
-            'button:has-text("Submit")',
-            '[data-testid*="confirm"]',
-            '[data-testid*="submit"]',
-        ], timeout=6000)
-        if not confirmed:
+        # Use JS click to bypass chat-widget overlay that intercepts pointer events
+        submitted_via_js = page.evaluate("""
+            () => {
+                const texts = ['Submit order', 'Place order', 'Place Order', 'Confirm', 'Submit'];
+                const buttons = [...document.querySelectorAll('button')];
+                for (const text of texts) {
+                    const btn = buttons.find(b => b.textContent.trim() === text || b.textContent.trim().startsWith(text));
+                    if (btn) { btn.click(); return true; }
+                }
+                return false;
+            }
+        """)
+        if not submitted_via_js:
             snap(page, f"{side}_confirm_fail")
-            raise RuntimeError(f"Confirm button not found - see data/screen_{side}_confirm_fail.png")
-        page.wait_for_timeout(2500)
+            raise RuntimeError(f"Submit button not found - see data/screen_{side}_confirm_fail.png")
+        page.wait_for_timeout(3000)
         snap(page, f"{side}_done")
         print("  Order submitted.")
         submitted = True
