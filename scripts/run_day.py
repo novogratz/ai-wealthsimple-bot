@@ -52,10 +52,10 @@ def notify(msg: str, event: str = "info") -> None:
 
 
 def _next_entry_window() -> datetime:
-    """Return the next 09:30 ET on a weekday, skipping weekends."""
+    """Return the next 09:31 ET on a weekday, skipping weekends."""
     from datetime import timedelta
     now = now_et()
-    candidate = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    candidate = now.replace(hour=9, minute=31, second=0, microsecond=0)
     if now >= candidate:
         candidate += timedelta(days=1)
     while candidate.weekday() >= 5:
@@ -72,21 +72,20 @@ def wait_for_entry() -> None:
             log(f"Weekend — next entry window {nxt:%a %b %d %H:%M} ET ({secs/3600:.1f}h away). Sleeping 30 min...")
             time.sleep(1800)
             continue
-        target = now.replace(hour=9, minute=30, second=0, microsecond=0)
-        latest = now.replace(hour=9, minute=35, second=0, microsecond=0)
+        target = now.replace(hour=9, minute=31, second=0, microsecond=0)
+        latest = now.replace(hour=9, minute=36, second=0, microsecond=0)
         if now < target:
             secs = (target - now).total_seconds()
             log(f"Market opens in {secs/60:.1f} min — waiting...")
             time.sleep(min(secs, 300))
             continue
         if now > latest:
-            # Past today's window — wait overnight for tomorrow
             nxt = _next_entry_window()
             secs = (nxt - now).total_seconds()
             log(f"Today's entry window closed. Next window {nxt:%a %b %d %H:%M} ET ({secs/3600:.1f}h away). Sleeping 30 min...")
             time.sleep(1800)
             continue
-        log("Entry window open (09:30–09:35 ET) — proceeding.")
+        log("Entry window open (09:31–09:36 ET) — proceeding.")
         return
 
 
@@ -179,7 +178,7 @@ def run_buy(symbol: str, price: float, shares_est: int) -> None:
         "time": now_et().isoformat(),
     }
     POS_FILE.write_text(json.dumps(pos))
-    log(f"Buy submitted: {actual_qty} shares @ ${price:.2f} (cost ${actual_cost:.2f}). Holding until 15:55 ET.")
+    log(f"Buy submitted: {actual_qty} shares @ ${price:.2f} (cost ${actual_cost:.2f}). Holding until 15:55 ET.")  # sell time from settings.toml
 
     from fashion_bot.cli import _get_total_pnl
     all_time_pnl = _get_total_pnl()
@@ -268,8 +267,17 @@ def run_watch() -> None:
     sys.exit(1)
 
 
-def run_overnight_analysis() -> None:
-    """Scan for tomorrow's pick every hour between market close and 9:30 ET open."""
+_SCAN_LABELS = {
+    "startup":   ("🚀", "Startup scan"),
+    "5pm":       ("🌆", "5 PM post-close scan"),
+    "6am":       ("🌅", "6 AM pre-market confirmation"),
+}
+
+
+def run_overnight_analysis(slot: str) -> None:
+    """Scan the universe and send the top pick to Telegram. slot is one of startup/5pm/6am."""
+    emoji, label = _SCAN_LABELS.get(slot, ("🔍", slot))
+    log(f"{label}: scanning universe for tomorrow's pick...")
     settings = load_settings(ROOT / "config" / "settings.toml")
     universe = load_universe(ROOT / "config" / "universe.csv")
     strategy = FashionStrategy(
@@ -277,23 +285,72 @@ def run_overnight_analysis() -> None:
         universe=universe,
         market_data=YFinanceMarketData(),
     )
-
-    log("Overnight analysis: scanning universe for tomorrow's pick...")
     try:
         picks = strategy.rank(cash=1000)
-        if picks:
-            top = picks[0]
-            log(f"Overnight top pick: {top.symbol} | score {top.score:.2f} | {top.reason}")
-            notify(
-                f"🌙 <b>Overnight scan — top pick: <code>{top.symbol}</code></b>\n\n"
-                f"📊 Score: {top.score:.2f}  |  {top.reason}\n"
-                f"💵 Last price: ${top.last_price:.2f} CAD",
-                event="scan_top",
-            )
-        else:
-            log("Overnight scan: no candidates found.")
+        if not picks:
+            log(f"{label}: no candidates found.")
+            notify(f"{emoji} <b>{label}</b> — no candidates passed filters.", event="scan_top")
+            return
+        top = picks[0]
+        others = ", ".join(f"<code>{p.symbol}</code>" for p in picks[1:4]) or "—"
+        log(f"{label} top pick: {top.symbol} | score {top.score:.2f} | {top.reason}")
+        notify(
+            f"{emoji} <b>{label}</b>\n\n"
+            f"🏆 Top pick: <code>{top.symbol}</code>\n"
+            f"💵 Last price: <b>${top.last_price:.2f} CAD</b>\n"
+            f"📊 Score: <b>{top.score:.2f}</b>  |  {top.reason}\n\n"
+            f"Also watching: {others}",
+            event="scan_top",
+        )
     except Exception as e:
-        log(f"Overnight scan error: {e}")
+        log(f"{label} error: {e}")
+
+
+def _passed(now: "datetime", hour: int, minute: int) -> bool:
+    """True if wall-clock time has reached or passed hour:minute today."""
+    t = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return now >= t
+
+
+def wait_for_open_with_scans(scans_done: set[str]) -> None:
+    """
+    Sleep until the 09:30 ET entry window, firing scheduled scans along the way.
+    scans_done tracks which slots have already fired this cycle (mutated in place).
+    """
+    # Immediate startup scan if we haven't done one this cycle
+    if "startup" not in scans_done:
+        run_overnight_analysis("startup")
+        scans_done.add("startup")
+
+    while True:
+        now = now_et()
+        # Within 5 min of 9:31 on a weekday → stop waiting, go buy
+        target_open = now.replace(hour=9, minute=31, second=0, microsecond=0)
+        secs_to_open = (target_open - now).total_seconds()
+        if now.weekday() < 5 and 0 <= secs_to_open <= 300:
+            break
+
+        # 5 PM post-close scan
+        if _passed(now, 17, 0) and "5pm" not in scans_done:
+            run_overnight_analysis("5pm")
+            scans_done.add("5pm")
+
+        # 6 AM pre-market confirmation
+        if _passed(now, 6, 0) and "6am" not in scans_done:
+            run_overnight_analysis("6am")
+            scans_done.add("6am")
+
+        # Reset slots at midnight so they fire again next cycle
+        if now.hour == 0 and now.minute < 1:
+            scans_done.discard("5pm")
+            scans_done.discard("6am")
+
+        # Log status every 30 min
+        if now.minute % 30 == 0 and now.second < 60:
+            nxt = _next_entry_window()
+            log(f"Waiting for market open — next entry {nxt:%a %b %d %H:%M} ET")
+
+        time.sleep(60)
 
 
 def main() -> None:
@@ -339,38 +396,28 @@ def main() -> None:
         run_watch()
         POS_FILE.unlink(missing_ok=True)
 
-    # Main loop — runs forever: overnight scan → wait for 9:30 → buy → sell → repeat
+    # Main loop — runs forever: overnight scans → wait for 9:30 → buy → sell → repeat
     skip_wait = args.now
-    last_overnight_scan: float = 0.0
+    scans_done: set[str] = set()
 
     while True:
-        # Overnight analysis: scan every hour while waiting for market open
         if not skip_wait:
-            while True:
-                now = now_et()
-                target = now.replace(hour=9, minute=30, second=0, microsecond=0)
-                # If we're within 5 min of open, stop scanning and go buy
-                if now.weekday() < 5 and (target - now).total_seconds() <= 300:
-                    break
-                # Run overnight scan at most once per hour
-                if time.monotonic() - last_overnight_scan >= 3600:
-                    run_overnight_analysis()
-                    last_overnight_scan = time.monotonic()
-                # Sleep in 5-min chunks so we catch the open precisely
-                time.sleep(300)
+            wait_for_open_with_scans(scans_done)
             wait_for_entry()
 
         skip_wait = False  # only skip on the very first iteration if --now passed
+        # Reset scan slots for the next overnight cycle after each trading day
+        scans_done.clear()
 
-        # Hard guard: never buy outside 9:30–9:35 ET
+        # Hard guard: never buy outside 9:31–9:36 ET
         _now = now_et()
-        _open = _now.replace(hour=9, minute=30, second=0, microsecond=0)
-        _close = _now.replace(hour=9, minute=35, second=0, microsecond=0)
+        _open = _now.replace(hour=9, minute=31, second=0, microsecond=0)
+        _close = _now.replace(hour=9, minute=36, second=0, microsecond=0)
         if not (_open <= _now <= _close):
-            log(f"Outside 09:30–09:35 entry window ({_now:%H:%M} ET) — waiting for next open.")
+            log(f"Outside 09:31–09:36 entry window ({_now:%H:%M} ET) — waiting for next open.")
             notify(
                 f"⚠️ <b>Buy skipped</b> — {_now:%H:%M} ET is outside entry window.\n"
-                f"Scanning overnight and retrying tomorrow at 09:30.",
+                f"Scanning overnight and retrying tomorrow at 09:31.",
                 event="error",
             )
             continue
@@ -385,7 +432,7 @@ def main() -> None:
         notify(
             f"🤖 <b>Fashion Bot — new trading day</b>\n\n"
             f"💼 Budget: <b>${balance:.2f} CAD</b>\n"
-            f"⏰ Entry: <b>09:30–09:35 ET</b>  |  🏁 Auto-sell: <b>15:55 ET</b>\n\n"
+            f"⏰ Entry: <b>09:31 ET</b>  |  🏁 Auto-sell: <b>15:55 ET</b>\n\n"
             f"{at_color} All-time PnL: <b>${all_time_pnl:+.2f} CAD</b>",
             event="info",
         )
