@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""
+Full trading day in one command: scan -> buy -> hold -> sell at 15:55 ET.
+
+Usage:
+    python scripts/run_day.py                  # waits for 09:30 ET then goes
+    python scripts/run_day.py --now            # skip the wait, run immediately
+    python scripts/run_day.py --balance 50     # override cash amount
+"""
+import argparse
+import json
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from fashion_bot.config import load_settings, load_universe
+from fashion_bot.market_data import YFinanceMarketData
+from fashion_bot.strategy import FashionStrategy
+from fashion_bot.telegram import TelegramConfigError, send_message, trade_message
+
+DATA = ROOT / "data"
+POS_FILE = DATA / "open_position.json"
+AUTO_SCRIPT = ROOT / "scripts" / "wealthsimple_auto.py"
+PYTHON = sys.executable
+TZ = ZoneInfo("America/Toronto")
+
+DATA.mkdir(exist_ok=True)
+
+
+def now_et() -> datetime:
+    return datetime.now(TZ)
+
+
+def log(msg: str) -> None:
+    print(f"[{now_et():%H:%M:%S} ET] {msg}", flush=True)
+
+
+def notify(msg: str) -> None:
+    try:
+        send_message(trade_message("info", message=msg))
+    except (TelegramConfigError, RuntimeError, Exception):
+        pass
+
+
+def wait_for_entry() -> None:
+    while True:
+        now = now_et()
+        if now.weekday() >= 5:
+            log("Weekend - sleeping 10 min...")
+            time.sleep(600)
+            continue
+        target = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        latest = now.replace(hour=9, minute=35, second=0, microsecond=0)
+        if now < target:
+            secs = (target - now).total_seconds()
+            log(f"Market opens in {secs / 60:.1f} min - waiting...")
+            time.sleep(min(secs, 300))
+            continue
+        if now > latest:
+            log("Entry window missed (past 09:35 ET). Use --now to override.")
+            sys.exit(1)
+        log("Entry window open - proceeding.")
+        return
+
+
+def run_scan(balance: float) -> tuple[str, float, int]:
+    settings = load_settings(ROOT / "config" / "settings.toml")
+    universe = load_universe(ROOT / "config" / "universe.csv")
+    strategy = FashionStrategy(
+        settings=settings,
+        universe=universe,
+        market_data=YFinanceMarketData(),
+    )
+
+    log(f"Scanning TSX with ${balance:.2f} budget...")
+    picks = strategy.rank(cash=balance)
+    if not picks:
+        log("No candidates passed filters - markets may be closed or universe too narrow.")
+        sys.exit(1)
+
+    pick = picks[0]
+    log(f"TOP PICK : {pick.symbol}")
+    log(f"Price    : ${pick.last_price:.2f}")
+    log(f"Shares   : {pick.shares}")
+    log(f"Score    : {pick.score:.2f}")
+    log(f"Reason   : {pick.reason}")
+    notify(f"Scan done. Buying {pick.symbol} @ ${pick.last_price:.2f} ({pick.shares} shares)")
+    return pick.symbol, pick.last_price, pick.shares
+
+
+def run_buy(symbol: str, price: float, shares: int) -> None:
+    log(f"Opening Wealthsimple to buy {symbol} (max dollars)...")
+    result = subprocess.run(
+        [PYTHON, str(AUTO_SCRIPT), "buy", "--symbol", symbol, "--max-dollars"],
+        cwd=ROOT,
+    )
+    if result.returncode != 0:
+        log("Buy automation failed.")
+        notify(f"Buy FAILED for {symbol}")
+        sys.exit(1)
+
+    pos = {
+        "symbol": symbol,
+        "buyPrice": price,
+        "shares": shares,
+        "estimatedCost": price * shares,
+        "sellAll": True,
+        "time": now_et().isoformat(),
+    }
+    POS_FILE.write_text(json.dumps(pos))
+    log(f"Buy submitted. Holding until 15:55 ET.")
+    notify(f"Bought {symbol}. Will auto-sell at 15:55 ET.")
+
+
+def run_watch() -> None:
+    log("Watch loop started - checking price every 60s...")
+    result = subprocess.run(
+        [PYTHON, "-m", "fashion_bot", "watch", "--position-file", str(POS_FILE)],
+        cwd=ROOT,
+    )
+    if result.returncode != 0:
+        log("Watch/sell loop exited with an error.")
+        sys.exit(1)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Full trading day: scan -> buy -> hold -> sell at 15:55 ET"
+    )
+    parser.add_argument("--balance", type=float, default=17.24, help="Cash to deploy in CAD")
+    parser.add_argument("--now", action="store_true", help="Skip the 09:30 ET wait")
+    args = parser.parse_args()
+
+    log("=== Fashion Bot - Full Day ===")
+    log(f"Balance: ${args.balance:.2f} CAD | Auto-sell at: 15:55 ET")
+
+    if not args.now:
+        wait_for_entry()
+
+    symbol, price, shares = run_scan(args.balance)
+    run_buy(symbol, price, shares)
+    run_watch()
+    log("Done. Check data/screen_sell_done.png to verify the sell.")
+
+
+if __name__ == "__main__":
+    main()
