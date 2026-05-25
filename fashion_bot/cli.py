@@ -142,6 +142,37 @@ def cmd_quote(args: argparse.Namespace) -> int:
     return 0
 
 
+def _get_total_pnl() -> float:
+    pnl_file = ROOT / "data" / "pnl_ledger.json"
+    if not pnl_file.exists():
+        return 0.0
+    try:
+        trades = json.loads(pnl_file.read_text())
+        return sum(t.get("realizedPnl", 0) for t in trades)
+    except Exception:
+        return 0.0
+
+
+def _record_and_get_total_pnl(symbol: str, buy_cost: float, sell_value: float, quantity: float) -> float:
+    pnl_file = ROOT / "data" / "pnl_ledger.json"
+    trades = []
+    if pnl_file.exists():
+        try:
+            trades = json.loads(pnl_file.read_text())
+        except Exception:
+            trades = []
+    trades.append({
+        "symbol": symbol,
+        "quantity": quantity,
+        "buyCost": buy_cost,
+        "sellValue": sell_value,
+        "realizedPnl": sell_value - buy_cost,
+        "time": __import__("datetime").datetime.now().isoformat(),
+    })
+    pnl_file.write_text(json.dumps(trades, indent=2))
+    return sum(t.get("realizedPnl", 0) for t in trades)
+
+
 def cmd_watch(args: argparse.Namespace) -> int:
     strategy = build_strategy()
     trading = strategy.settings.trading
@@ -168,6 +199,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
     except (TelegramConfigError, RuntimeError):
         pass
 
+    last_telegram_update = 0.0  # epoch seconds of last periodic update
+
     while True:
         now = now_in_market_tz(trading)
 
@@ -188,15 +221,16 @@ def cmd_watch(args: argparse.Namespace) -> int:
             time.sleep(60)
             continue
 
+        unrealized_pnl = shares * last_price - buy_cost
+        pnl_pct = unrealized_pnl / buy_cost * 100
+
         if should_force_exit(now, trading):
-            estimated_sell_value = shares * last_price
-            pnl = estimated_sell_value - buy_cost
             print(f"\nSELL SIGNAL: force exit near close  (${last_price:.2f})", flush=True)
-            print(f"Price: ${last_price:.2f}  Estimated PnL: ${pnl:.2f}", flush=True)
+            print(f"Price: ${last_price:.2f}  Estimated PnL: ${unrealized_pnl:.2f}", flush=True)
 
             try:
-                text = trade_message("info", message=f"Force-exiting {symbol} near close")
-                send_message(text)
+                send_message(trade_message("sell_preparing", symbol=symbol,
+                    message=f"Force-exiting {symbol} near close @ ${last_price:.2f}\nUnrealized PnL: ${unrealized_pnl:+.2f} CAD"))
             except (TelegramConfigError, RuntimeError):
                 pass
 
@@ -206,7 +240,6 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 "sell",
                 "--symbol", symbol,
                 "--sell-all",
-                "--confirm",
             ]
 
             print(f"Running: {' '.join(sell_args)}", flush=True)
@@ -215,23 +248,42 @@ def cmd_watch(args: argparse.Namespace) -> int:
             if result.returncode != 0:
                 print(f"Sell automation failed (exit {result.returncode})", flush=True)
                 try:
-                    text = trade_message("error", message=f"Sell automation failed for {symbol}")
-                    send_message(text)
+                    send_message(trade_message("error", message=f"Sell automation failed for {symbol}"))
                 except (TelegramConfigError, RuntimeError):
                     pass
                 return 1
 
-            print(f"\nPosition closed. PnL: ${pnl:.2f}", flush=True)
+            # Record PnL
+            all_time_pnl = _record_and_get_total_pnl(symbol, buy_cost, shares * last_price, shares)
+
+            print(f"\nPosition closed. PnL: ${unrealized_pnl:+.2f}", flush=True)
             try:
-                text = trade_message("info", symbol=symbol, shares=shares, price=last_price,
-                                     message=f"Sold {symbol}. PnL: ${pnl:.2f}")
-                send_message(text)
+                send_message(trade_message("sell_submitted", symbol=symbol, shares=shares, price=last_price,
+                    message=(
+                        f"Sold {symbol} @ ${last_price:.2f}\n"
+                        f"Trade PnL: ${unrealized_pnl:+.2f} CAD\n"
+                        f"All-time PnL: ${all_time_pnl:+.2f} CAD"
+                    )))
             except (TelegramConfigError, RuntimeError):
                 pass
             return 0
 
-        pnl_pct = (last_price - entry_price) / entry_price * 100
-        print(f"{now:%H:%M} ET | ${last_price:.2f} ({pnl_pct:+.2f}%)", flush=True)
+        print(f"{now:%H:%M} ET | ${last_price:.2f} ({pnl_pct:+.2f}%) | unrealized ${unrealized_pnl:+.2f}", flush=True)
+
+        # Send Telegram update every 15 minutes
+        if time.time() - last_telegram_update >= 900:
+            all_time_pnl = _get_total_pnl()
+            try:
+                send_message(trade_message("info", symbol=symbol,
+                    message=(
+                        f"Holding {symbol} @ ${last_price:.2f}\n"
+                        f"Unrealized PnL: ${unrealized_pnl:+.2f} CAD ({pnl_pct:+.2f}%)\n"
+                        f"All-time realized PnL: ${all_time_pnl:+.2f} CAD"
+                    )))
+            except (TelegramConfigError, RuntimeError):
+                pass
+            last_telegram_update = time.time()
+
         time.sleep(args.interval)
 
 
