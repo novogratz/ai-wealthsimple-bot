@@ -368,26 +368,33 @@ def choose_unregistered_account(page, side: str) -> None:
 
     page.wait_for_timeout(900)
     snap(page, f"{side}_acct_picker")
+    
+    # Try to find the account row by name
     selected = False
-    for text in ["$100.00 CAD", "$100.00", "100.00 CAD"]:
+    account_names = ["Unregistered", "Non-registered", "Personal"]
+    for name in account_names:
         try:
-            click_account_row_by_balance(page, text)
-            selected = True
-            break
+            # Look for a button or role="option" that contains the name
+            el = page.locator(f'button:has-text("{name}"), [role="option"]:has-text("{name}"), li:has-text("{name}")').first
+            if el.is_visible(timeout=2000):
+                el.click()
+                selected = True
+                print(f"  Selected account by name: {name}")
+                break
         except Exception:
             pass
+            
     if not selected:
-        selected = click_first(page, [
-            'text="$100.00 CAD"',
-            'text="$100.00"',
-            'text="100.00 CAD"',
-            'button:has-text("Unregistered"):has-text("$100")',
-            'li:has-text("Unregistered"):has-text("$100")',
-            '[role="option"]:has-text("Unregistered"):has-text("$100")',
-            'button:has-text("Unregistered")',
-            'li:has-text("Unregistered")',
-            '[role="option"]:has-text("Unregistered")',
-        ], timeout=4000)
+        # Fallback to the balance-based clicks if name search fails
+        for text in ["$111.11", "$100.64", "$100.00", "CAD"]:
+            try:
+                if click_account_row_by_balance(page, text):
+                    selected = True
+                    print(f"  Selected account by balance text: {text}")
+                    break
+            except Exception:
+                pass
+
     if not selected:
         snap(page, f"{side}_acct_fail")
         raise RuntimeError(f"Unregistered account not found - see data/screen_{side}_acct_fail.png")
