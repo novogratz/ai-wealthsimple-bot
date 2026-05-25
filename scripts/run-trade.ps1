@@ -1,15 +1,13 @@
 <#
 .SYNOPSIS
-    Full trading day: scan TSX -> browser buy 9:30-9:35 ET -> hold -> auto-sell before close.
-    Uses Playwright automation with DOM selectors.
+    Full trading day: scan TSX -> browser buy 9:30-9:35 ET -> hold -> auto-sell at 15:55 ET.
+    Uses Playwright automation with DOM selectors. Orders are always submitted automatically.
 
 .EXAMPLE
-    .\scripts\run-trade.ps1 -Balance 17.24                      # full day, review only
-    .\scripts\run-trade.ps1 -Balance 17.24 -BuyOnly             # morning buy only, review only
-    .\scripts\run-trade.ps1 -SellOnly                           # close open position, review only
-    .\scripts\run-trade.ps1 -AutoDay -Confirm                   # wait for entry, buy, auto-sell (full automation)
+    .\scripts\run-trade.ps1 -AutoDay                            # full automation: wait, scan, buy, hold, sell
+    .\scripts\run-trade.ps1 -Balance 17.24 -BuyOnly             # morning buy only
+    .\scripts\run-trade.ps1 -SellOnly                           # close open position now
     .\scripts\run-trade.ps1 -Balance 17.24 -DryRun              # scan only, no browser
-    .\scripts\run-trade.ps1 -Balance 17.24 -Confirm             # submit real orders
 
     First-time setup (saves Wealthsimple session):
         python scripts/wealthsimple_auto.py setup
@@ -17,7 +15,6 @@
 param(
     [double]$Balance = 17.24,
     [switch]$DryRun,
-    [switch]$Confirm,
     [switch]$AutoDay,
     [switch]$AllowLateEntry,
     [switch]$BuyOnly,
@@ -311,12 +308,6 @@ if (-not $SellOnly) {
         "--symbol", $Symbol,
         "--max-dollars"
     )
-    if ($Confirm) {
-        $buyArgs += "--confirm"
-        Write-Host "    Confirm mode enabled: this will submit the buy order."
-    } else {
-        Write-Host "    Review mode: stopping before final buy submit."
-    }
     Send-TradeNotification -Event "buy_preparing" -Symbol $Symbol -Shares $Shares -Price $Price -Message "Next move: planning to buy $Symbol with Dollars Max in the Non-registered account."
     $buyRun = Invoke-Automation -CommandArgs $buyArgs
 
@@ -342,21 +333,12 @@ if (-not $SellOnly) {
     }
     $pos | ConvertTo-Json | Set-Content $posFile -Encoding utf8
     Write-Host ""
-    if ($Confirm) {
-        Write-Host "[OK] BUY submitted: $Shares x $Symbol @ `$$Price"
-        $msg = "Buy automation submitted the order."
-        if ($estimatedQuantity -and $estimatedCost) {
-            $msg += "`nEstimated quantity: $estimatedQuantity shares`nEstimated cost: `$$($estimatedCost.ToString('0.00')) CAD"
-        }
-        Send-TradeNotification -Event "buy_submitted" -Symbol $Symbol -Shares $Shares -Price $Price -Message $msg
-    } else {
-        Write-Host "[OK] BUY review prepared: $Shares x $Symbol @ `$$Price"
-        $msg = "Buy ticket is ready for manual review."
-        if ($estimatedQuantity -and $estimatedCost) {
-            $msg += "`nEstimated quantity: $estimatedQuantity shares`nEstimated cost: `$$($estimatedCost.ToString('0.00')) CAD"
-        }
-        Send-TradeNotification -Event "buy_review" -Symbol $Symbol -Shares $Shares -Price $Price -Message $msg
+    Write-Host "[OK] BUY submitted: $Shares x $Symbol @ `$$Price"
+    $msg = "Buy automation submitted the order."
+    if ($estimatedQuantity -and $estimatedCost) {
+        $msg += "`nEstimated quantity: $estimatedQuantity shares`nEstimated cost: `$$($estimatedCost.ToString('0.00')) CAD"
     }
+    Send-TradeNotification -Event "buy_submitted" -Symbol $Symbol -Shares $Shares -Price $Price -Message $msg
     Write-Host "     Position saved: $posFile"
 }
 
@@ -387,8 +369,6 @@ if ($AutoDay -and -not $SellOnly) {
     Send-TradeNotification -Event "info" -Symbol $Symbol -Shares $Shares -Message ("Holding $Symbol until close.`nEntry: `$$($pos.buyPrice) CAD`nShares: $Shares`nAll-time P/L before: " + (Format-Money $AllTimePnlBefore) + " CAD")
 
     $watchArgs = @("-m", "fashion_bot", "watch", "--position-file", $posFile)
-    if ($Confirm) { $watchArgs += "--confirm" }
-
     $watchRun = Invoke-Automation -CommandArgs $watchArgs
 
     if ($watchRun.exit -ne 0) {
@@ -408,9 +388,7 @@ if ($AutoDay -and -not $SellOnly) {
     if ($null -eq $sellValue) { $sellValue = $sellQuantity * [double]$pos.buyPrice }
 
     $tradePnl = $sellValue - $BuyCost
-    if ($Confirm) {
-        Add-RealizedPnl -Symbol $Symbol -BuyCost $BuyCost -SellValue $sellValue -Quantity $sellQuantity
-    }
+    Add-RealizedPnl -Symbol $Symbol -BuyCost $BuyCost -SellValue $sellValue -Quantity $sellQuantity
 
     Remove-Item $posFile -ErrorAction SilentlyContinue
     $allTimeAfter = Get-AllTimePnl
@@ -481,12 +459,6 @@ $sellArgs = @(
     "--symbol", $Symbol,
     "--sell-all"
 )
-if ($Confirm) {
-    $sellArgs += "--confirm"
-    Write-Host "    Confirm mode enabled: this will submit the sell order."
-} else {
-    Write-Host "    Review mode: stopping before final sell submit."
-}
 Send-TradeNotification -Event "sell_preparing" -Symbol $Symbol -Shares $Shares -Message $planningMessage
 $sellRun = Invoke-Automation -CommandArgs $sellArgs
 
@@ -504,27 +476,16 @@ $tradePnl = $null
 $allTimeAfter = $AllTimePnlBefore
 if ($null -ne $sellValue -and $null -ne $BuyCost) {
     $tradePnl = $sellValue - $BuyCost
-    if ($Confirm) {
-        Add-RealizedPnl -Symbol $Symbol -BuyCost $BuyCost -SellValue $sellValue -Quantity $sellQuantity
-        $allTimeAfter = Get-AllTimePnl
-    }
+    Add-RealizedPnl -Symbol $Symbol -BuyCost $BuyCost -SellValue $sellValue -Quantity $sellQuantity
+    $allTimeAfter = Get-AllTimePnl
 }
 
 Remove-Item $posFile -ErrorAction SilentlyContinue
 Write-Host ""
-if ($Confirm) {
-    Write-Host "[OK] SELL submitted: all available $Symbol. Position closed."
-    $msg = "Sell-all automation submitted the order."
-    if ($null -ne $sellValue) { $msg += "`nEstimated proceeds: `$$($sellValue.ToString('0.00')) CAD" }
-    if ($null -ne $tradePnl) { $msg += "`nEstimated trade P/L: $(Format-Money $tradePnl) CAD" }
-    $msg += "`nAll-time realized P/L: $(Format-Money $allTimeAfter) CAD"
-    Send-TradeNotification -Event "sell_submitted" -Symbol $Symbol -Shares $Shares -Message $msg
-} else {
-    Write-Host "[OK] SELL review prepared: all available $Symbol."
-    $msg = "Sell-all ticket is ready for manual review."
-    if ($null -ne $sellValue) { $msg += "`nEstimated proceeds: `$$($sellValue.ToString('0.00')) CAD" }
-    if ($null -ne $tradePnl) { $msg += "`nEstimated trade P/L: $(Format-Money $tradePnl) CAD" }
-    $msg += "`nAll-time realized P/L before this sell: $(Format-Money $AllTimePnlBefore) CAD"
-    Send-TradeNotification -Event "sell_review" -Symbol $Symbol -Shares $Shares -Message $msg
-}
+Write-Host "[OK] SELL submitted: all available $Symbol. Position closed."
+$msg = "Sell-all automation submitted the order."
+if ($null -ne $sellValue) { $msg += "`nEstimated proceeds: `$$($sellValue.ToString('0.00')) CAD" }
+if ($null -ne $tradePnl) { $msg += "`nEstimated trade P/L: $(Format-Money $tradePnl) CAD" }
+$msg += "`nAll-time realized P/L: $(Format-Money $allTimeAfter) CAD"
+Send-TradeNotification -Event "sell_submitted" -Symbol $Symbol -Shares $Shares -Message $msg
 Write-Host "     Check data\screen_sell_done.png to verify."
