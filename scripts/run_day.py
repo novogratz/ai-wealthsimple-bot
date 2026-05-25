@@ -137,8 +137,19 @@ def run_buy(symbol: str, price: float, shares_est: int) -> None:
         print(f"  {line}", flush=True)
 
     if result.returncode != 0:
+        combined = result.stdout + result.stderr
+        if "session expired" in combined.lower() or "log in" in combined.lower():
+            msg = (
+                "❌ <b>Wealthsimple session expired</b>\n\n"
+                "Run this to fix it:\n"
+                "<code>python scripts/wealthsimple_auto.py setup</code>\n\n"
+                "Then restart the bot."
+            )
+            notify(msg, event="error")
+            log("SESSION EXPIRED — run: python scripts/wealthsimple_auto.py setup")
+        else:
+            notify(f"❌ Buy FAILED for {symbol}", event="error")
         log("Buy automation failed.")
-        notify(f"❌ Buy FAILED for {symbol}", event="error")
         sys.exit(1)
 
     # Use actual fill from ORDER_RESULT_JSON if available.
@@ -290,6 +301,19 @@ def main() -> None:
 
     if not args.now:
         wait_for_entry()
+
+    # Hard guard: never buy outside 9:30–9:35 ET regardless of --now
+    _now = now_et()
+    _open = _now.replace(hour=9, minute=30, second=0, microsecond=0)
+    _close = _now.replace(hour=9, minute=35, second=0, microsecond=0)
+    if not (_open <= _now <= _close):
+        log(f"Current time {_now:%H:%M} ET is outside the 09:30–09:35 entry window — aborting buy.")
+        notify(
+            f"⚠️ <b>Buy aborted</b> — it's <b>{_now:%H:%M} ET</b>, market entry window is 09:30–09:35 only.\n"
+            f"Restart the bot and it will wait for tomorrow's open.",
+            event="error",
+        )
+        sys.exit(1)
 
     symbol, price, shares = run_scan(balance)
     run_buy(symbol, price, shares)
