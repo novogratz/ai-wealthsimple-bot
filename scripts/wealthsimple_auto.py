@@ -123,17 +123,16 @@ def switch_buy_in_to_dollars(page) -> None:
 def use_max_dollars(page) -> None:
     switch_buy_in_to_dollars(page)
     print("Clicking Max...")
-    clicked = page.evaluate("""
-        () => {
-            const els = [...document.querySelectorAll('button, [role="button"]')];
-            const btn = els.find(el => el.textContent.trim() === 'Max');
-            if (btn) { btn.click(); return true; }
-            return false;
-        }
-    """)
-    if not clicked:
-        raise RuntimeError("Max button not found — account may not be selected yet")
-    page.wait_for_timeout(700)
+    # Use a real Playwright click (not JS) so React state updates properly
+    try:
+        btn = page.get_by_text("Max", exact=True).first
+        btn.wait_for(state="visible", timeout=4000)
+        btn.click()
+        page.wait_for_timeout(800)
+        return
+    except Exception:
+        pass
+    raise RuntimeError("Max button not found — account may not be selected yet")
 
 
 def use_max_shares(page) -> None:
