@@ -91,27 +91,45 @@ def trade_message(
     timestamp: datetime | None = None,
 ) -> str:
     labels = {
-        "scan_candidates": "Potential purchase candidates",
-        "scan_top": "Top scan candidate",
-        "buy_preparing": "Preparing buy ticket",
-        "buy_review": "Buy ticket ready for review",
-        "buy_submitted": "Buy order submitted",
-        "sell_preparing": "Preparing sell ticket",
-        "sell_review": "Sell ticket ready for review",
-        "sell_submitted": "Sell order submitted",
-        "error": "Trading assistant error",
-        "info": "Trading assistant update",
+        "scan_candidates": "🔍 Potential purchase candidates",
+        "scan_top": "💎 Top scan candidate",
+        "buy_preparing": "📝 Preparing buy ticket",
+        "buy_review": "👀 Buy ticket ready for review",
+        "buy_submitted": "🟢 Buy order submitted",
+        "sell_preparing": "📝 Preparing sell ticket",
+        "sell_review": "👀 Sell ticket ready for review",
+        "sell_submitted": "🔴 Sell order submitted",
+        "error": "⚠️ Trading assistant error",
+        "info": "ℹ️ Trading assistant update",
     }
+    
+    # Custom headers for big moves if the message contains win/loss keywords
+    custom_header = None
+    if message:
+        if "PnL: +$" in message or "BIG WIN" in message.upper():
+            custom_header = "🚀 💰 BIG WIN! 💰 🚀"
+        elif "PnL: -$" in message or "BIG LOSE" in message.upper():
+            custom_header = "📉 ⚠️ BIG LOSE! ⚠️ 📉"
+
     label = labels.get(event, event.replace("_", " ").title())
     when = (timestamp or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
 
-    lines = [f"{label}", f"Time: {when}"]
+    lines = []
+    if custom_header:
+        lines.append(custom_header)
+        lines.append("")
+    
+    lines.extend([f"**{label}**", f"⏰ Time: {when}"])
+    
     if symbol:
-        lines.append(f"Symbol: {symbol}")
+        lines.append(f"🎫 Symbol: {symbol}")
     if shares is not None:
-        lines.append(f"Shares: {shares}")
+        lines.append(f"🔢 Shares: {shares}")
     if price is not None:
-        lines.append(f"Reference price: ${price:.2f} CAD")
+        lines.append(f"💵 Reference price: ${price:.2f} CAD")
+    
     if message:
-        lines.append(message)
+        lines.append("")
+        lines.append(f"💬 {message}")
+        
     return "\n".join(lines)

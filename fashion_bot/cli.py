@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -236,6 +237,66 @@ def cmd_watch(args: argparse.Namespace) -> int:
         time.sleep(args.interval)
 
 
+def cmd_balance(args: argparse.Namespace) -> int:
+    auto_script = ROOT / "scripts" / "wealthsimple_auto.py"
+    print("Fetching live balance from Wealthsimple...", flush=True)
+    
+    result = subprocess.run(
+        [sys.executable or "python", str(auto_script), "balance"],
+        capture_output=True,
+        text=True,
+        timeout=120
+    )
+    
+    if result.returncode != 0:
+        print(f"Failed to fetch balance: {result.stderr}")
+        return 1
+    
+    match = re.search(r"LIVE_BALANCE_CAD:([0-9,.]+)", result.stdout)
+    if not match:
+        print("Could not parse balance from output.")
+        print(f"STDOUT: {result.stdout}")
+        return 1
+        
+    balance = float(match.group(1))
+    print(f"Live Balance: ${balance:.2f} CAD")
+    
+    msg = f"Current Portfolio Status:\n💵 Unregistered Cash: ${balance:.2f} CAD\n✅ Live from Wealthsimple"
+    try:
+        send_message(trade_message("info", message=msg))
+        print("Telegram notification sent.")
+    except Exception as e:
+        print(f"Failed to send Telegram: {e}")
+        
+    return 0
+
+
+def cmd_pnl(args: argparse.Namespace) -> int:
+    pnl_file = ROOT / "data" / "pnl_ledger.json"
+    if not pnl_file.exists():
+        print("No PnL history found.")
+        return 0
+    
+    try:
+        trades = json.loads(pnl_file.read_text())
+        total_pnl = sum(trade.get("realizedPnl", 0) for trade in trades)
+        trade_count = len(trades)
+        
+        print(f"Total Realized PnL: ${total_pnl:.2f} CAD ({trade_count} trades)")
+        
+        if args.notify:
+            status = "🚀 BIG WIN" if total_pnl > 0 else "📉 BIG LOSE" if total_pnl < 0 else "ℹ️ INFO"
+            msg = f"{status}\n\n📊 **Overall Portfolio Performance**\n💰 Total Realized PnL: ${total_pnl:+.2f} CAD\n🔢 Total Trades: {trade_count}"
+            send_message(trade_message("info", message=msg))
+            print("Telegram notification sent.")
+            
+    except Exception as e:
+        print(f"Error calculating PnL: {e}")
+        return 1
+        
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="fashion_bot")
     sub = parser.add_subparsers(required=True)
@@ -282,6 +343,13 @@ def main() -> None:
     quote.add_argument("--symbol", required=True)
     quote.add_argument("--json", action="store_true", help="print machine-readable JSON")
     quote.set_defaults(func=cmd_quote)
+
+    balance = sub.add_parser("balance", help="fetch live balance and notify telegram")
+    balance.set_defaults(func=cmd_balance)
+
+    pnl = sub.add_parser("pnl", help="calculate total realized pnl")
+    pnl.add_argument("--notify", action="store_true", help="send result to telegram")
+    pnl.set_defaults(func=cmd_pnl)
 
     watch = sub.add_parser("watch", help="hold a live position and auto-sell near close")
     watch.add_argument("--position-file", type=Path, default=ROOT / "data" / "open_position.json")

@@ -209,6 +209,12 @@ def parse_review_details(page, side: str, submitted: bool) -> dict:
     if order_match:
         order_type = order_match.group(1).strip()
 
+    # Try to find current balance if visible on the page
+    balance = None
+    balance_match = re.search(r"Available to trade\s+\$?([0-9,.]+)", text, flags=re.IGNORECASE)
+    if balance_match:
+        balance = parse_money(balance_match.group(1))
+
     return {
         "side": side,
         "submitted": submitted,
@@ -216,7 +222,71 @@ def parse_review_details(page, side: str, submitted: bool) -> dict:
         "estimated_value": value,
         "account": account,
         "order_type": order_type,
+        "balance": balance,
     }
+
+
+def get_live_balance(page) -> float | None:
+    print("Fetching live balance...")
+    page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
+    page.wait_for_timeout(6000)
+    snap(page, "balance_check_home")
+    
+    # Try multiple strategies to find the balance
+    text = page.locator("body").inner_text()
+    
+    # Strategy 1: Look for "Unregistered" followed by a dollar amount
+    # Patterns to try:
+    patterns = [
+        r"Unregistered.*?\$([0-9,.]+)",
+        r"Non-registered.*?\$([0-9,.]+)",
+        r"Personal.*?\$([0-9,.]+)",
+        r"Available to trade.*?\$([0-9,.]+)",
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.DOTALL | re.IGNORECASE)
+        if match:
+            val = parse_money(match.group(1))
+            if val is not None and val > 0:
+                print(f"  Found balance using pattern '{pattern}': ${val}")
+                return val
+
+    # Strategy 2: Look for specific data-testids or roles if available
+    try:
+        # Wealthsimple often uses specific components for account rows
+        rows = page.locator('[data-testid*="account-row"], [role="link"]:has-text("Unregistered")').all()
+        for row in rows:
+            row_text = row.inner_text()
+            if "Unregistered" in row_text or "Non-registered" in row_text:
+                match = re.search(r"\$([0-9,.]+)", row_text)
+                if match:
+                    val = parse_money(match.group(1))
+                    if val is not None:
+                        print(f"  Found balance in account row: ${val}")
+                        return val
+    except Exception:
+        pass
+
+    return None
+
+
+def cmd_balance(_args) -> None:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser, ctx, page = open_browser(p)
+        try:
+            balance = get_live_balance(page)
+            if balance is not None:
+                print(f"LIVE_BALANCE_CAD:{balance:.2f}")
+                print(f"[OK] Live balance fetched: ${balance:.2f} CAD")
+            else:
+                print("[ERROR] Could not find balance on page.")
+                snap(page, "balance_fail")
+                sys.exit(1)
+        finally:
+            browser.close()
 
 
 def open_browser(p):
@@ -492,6 +562,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("setup", help="First-time login: save session to data/ws_auth.json")
+    sub.add_parser("balance", help="Fetch live balance from Wealthsimple")
 
     buy_p = sub.add_parser("buy", help="Prepare a buy order")
     buy_p.add_argument("--symbol", required=True, help="e.g. SHOP or SHOP.TO")
@@ -513,7 +584,7 @@ def main() -> None:
         parser.error("buy requires --shares unless --max-dollars is used")
     if args.cmd == "sell" and not args.sell_all and args.shares is None:
         parser.error("sell requires --shares unless --sell-all is used")
-    {"setup": cmd_setup, "buy": cmd_buy, "sell": cmd_sell}[args.cmd](args)
+    {"setup": cmd_setup, "buy": cmd_buy, "sell": cmd_sell, "balance": cmd_balance}[args.cmd](args)
 
 
 if __name__ == "__main__":
