@@ -19,6 +19,9 @@ PROFILE_DIR = DATA / "browser_profile"  # persistent browser profile — keeps d
 WS_HOME = "https://my.wealthsimple.com/app/home"
 CDP_URL = "http://localhost:9222"
 
+# Use the real system Edge — stable, familiar UI, not "Chrome for Testing"
+EDGE_EXE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+
 DATA.mkdir(exist_ok=True)
 
 
@@ -532,28 +535,21 @@ def cmd_setup(_args) -> None:
 
     PROFILE_DIR.mkdir(exist_ok=True)
 
-    # Kill any leftover Chrome using our profile so we can launch fresh
+    # Kill any leftover Edge/Chrome using our profile so we can launch fresh
     import psutil
     for proc in psutil.process_iter(["pid", "name", "cmdline"]):
         try:
-            if proc.info["name"] and "chrome" in proc.info["name"].lower():
+            name = (proc.info["name"] or "").lower()
+            if "msedge" in name or "chrome" in name:
                 cmdline = " ".join(proc.info["cmdline"] or [])
                 if "browser_profile" in cmdline or "9222" in cmdline:
                     proc.kill()
         except Exception:
             pass
 
-    import shutil
-    chrome_exe = shutil.which("chrome") or shutil.which("chromium")
-    if not chrome_exe:
-        # Use Playwright's bundled Chromium
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            chrome_exe = p.chromium.executable_path
-
     subprocess.Popen([
-        chrome_exe,
-        f"--remote-debugging-port=9222",
+        EDGE_EXE,
+        "--remote-debugging-port=9222",
         f"--user-data-dir={PROFILE_DIR}",
         "--no-first-run",
         "--no-default-browser-check",
@@ -564,7 +560,7 @@ def cmd_setup(_args) -> None:
     print("=" * 55)
     print("  WEALTHSIMPLE LOGIN")
     print("=" * 55)
-    print("  1. A Chrome window just opened.")
+    print("  1. A Microsoft Edge window just opened.")
     print("  2. Log in to Wealthsimple normally.")
     print("  3. Wait until you can see your HOME page / portfolio.")
     print("  4. Come back here and press ENTER.")

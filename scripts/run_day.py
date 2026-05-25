@@ -52,12 +52,12 @@ def build_status_telegram(balance: float | None) -> str:
             pass
 
     total_pnl  = sum(t.get("realizedPnl", 0) for t in trades)
-    total_cost = sum(t.get("buyCost", 0) for t in trades)
     wins       = sum(1 for t in trades if t.get("realizedPnl", 0) > 0)
     losses     = sum(1 for t in trades if t.get("realizedPnl", 0) < 0)
     n          = len(trades)
     win_rate   = (wins / n * 100) if n else 0.0
-    roi        = (total_pnl / total_cost * 100) if total_cost else 0.0
+    # ROI = all-time profit as % of current account balance
+    roi        = (total_pnl / balance * 100) if balance else 0.0
     pnl_emoji  = "🟢" if total_pnl >= 0 else "🔴"
     pnl_sign   = "+" if total_pnl >= 0 else ""
 
@@ -72,7 +72,7 @@ def build_status_telegram(balance: float | None) -> str:
         except Exception:
             pos_line = "Error reading position"
 
-    bal_str = f"<b>${balance:.2f} CAD</b>" if balance is not None else "<i>unknown</i>"
+    bal_str = f"<b>${balance:.2f} CAD</b>" if balance is not None else "<i>fetching...</i>"
 
     recent = ""
     for t in trades[-5:]:
@@ -113,7 +113,10 @@ def build_status_telegram(balance: float | None) -> str:
 
 
 def notify_status(balance: float | None) -> None:
-    """Send status update to Telegram."""
+    """Send status update to Telegram. Fetches live balance if not provided."""
+    if balance is None:
+        log("Fetching live balance for status update...")
+        balance = fetch_live_balance(retries=2)
     try:
         send_message(build_status_telegram(balance))
         log("  Status sent to Telegram.")
@@ -133,12 +136,11 @@ def print_status_banner(balance: float | None) -> None:
             pass
 
     total_pnl   = sum(t.get("realizedPnl", 0) for t in trades)
-    total_cost  = sum(t.get("buyCost", 0) for t in trades)
     wins        = sum(1 for t in trades if t.get("realizedPnl", 0) > 0)
     losses      = sum(1 for t in trades if t.get("realizedPnl", 0) < 0)
     n           = len(trades)
     win_rate    = (wins / n * 100) if n else 0.0
-    roi         = (total_pnl / total_cost * 100) if total_cost else 0.0
+    roi         = (total_pnl / balance * 100) if balance else 0.0
     pnl_arrow   = "^" if total_pnl >= 0 else "v"
     pnl_sign    = "+" if total_pnl >= 0 else ""
 
