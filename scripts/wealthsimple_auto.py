@@ -15,8 +15,9 @@ from typing import Optional
 ROOT = Path(__file__).parent.parent
 DATA = ROOT / "data"
 AUTH = DATA / "ws_auth.json"
-PROFILE_DIR = DATA / "firefox_profile"  # persistent browser profile — keeps device trust
+PROFILE_DIR = DATA / "browser_profile"  # persistent browser profile — keeps device trust
 WS_HOME = "https://my.wealthsimple.com/app/home"
+CDP_URL = "http://localhost:9222"
 
 DATA.mkdir(exist_ok=True)
 
@@ -272,56 +273,35 @@ def cmd_balance(_args) -> None:
 
     with sync_playwright() as p:
         ctx, page = open_browser(p)
-        try:
-            page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
-            page.wait_for_timeout(2000)
-            if page.locator('input[type="password"], input[placeholder*="Password" i]').first.is_visible(timeout=1500):
-                print("SESSION_EXPIRED: Wealthsimple session expired - run: python scripts/wealthsimple_auto.py setup")
-                sys.exit(1)
+        page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
+        page.wait_for_timeout(2000)
 
-            balance = get_live_balance(page)
-            if balance is not None:
-                print(f"LIVE_BALANCE_CAD:{balance:.2f}")
-                print(f"[OK] Live balance fetched: ${balance:.2f} CAD")
-            else:
-                print("[ERROR] Could not find balance on page.")
-                snap(page, "balance_fail")
-                sys.exit(1)
-        finally:
-            save_session(ctx)
-            try:
-                ctx.close()
-            except Exception:
-                pass
+        if page.locator('input[type="password"], input[placeholder*="Password" i]').first.is_visible(timeout=1500):
+            print("SESSION_EXPIRED: Wealthsimple session expired - run: python scripts/wealthsimple_auto.py setup")
+            sys.exit(1)
 
-
-_FF_PREFS = {
-    # Disable private/incognito mode — Playwright's Firefox defaults to it
-    "browser.privatebrowsing.autostart": False,
-    # Never clear cookies/sessions on close
-    "privacy.sanitize.sanitizeOnShutdown": False,
-    "privacy.clearOnShutdown.cookies": False,
-    "privacy.clearOnShutdown.sessions": False,
-    "privacy.clearOnShutdown.cache": False,
-    "privacy.clearOnShutdown.history": False,
-    # Keep cookies across restarts
-    "network.cookie.lifetimePolicy": 0,
-}
+        balance = get_live_balance(page)
+        if balance is not None:
+            print(f"LIVE_BALANCE_CAD:{balance:.2f}")
+            print(f"[OK] Live balance fetched: ${balance:.2f} CAD")
+        else:
+            print("[ERROR] Could not find balance on page.")
+            snap(page, "balance_fail")
+            sys.exit(1)
 
 
 def open_browser(p):
-    if not PROFILE_DIR.exists() and not AUTH.exists():
-        print("No session found. Run first: python scripts/wealthsimple_auto.py setup")
-        sys.exit(1)
-    PROFILE_DIR.mkdir(exist_ok=True)
-    ctx = p.firefox.launch_persistent_context(
-        str(PROFILE_DIR),
-        headless=False,
-        slow_mo=60,
-        firefox_user_prefs=_FF_PREFS,
-    )
-    page = ctx.new_page()
-    return ctx, page
+    # Connect to the already-running Chrome (launched by setup) via remote debugging.
+    # This reuses the live logged-in session without ever closing/reopening the browser.
+    try:
+        browser = p.chromium.connect_over_cdp(CDP_URL)
+        ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        return ctx, page
+    except Exception:
+        pass
+    print("No running browser found. Run first: python scripts/wealthsimple_auto.py setup")
+    sys.exit(1)
 
 
 def save_session(ctx) -> None:
@@ -548,50 +528,61 @@ def place_order(
 
 
 def cmd_setup(_args) -> None:
-    from playwright.sync_api import sync_playwright
+    import subprocess
 
-    with sync_playwright() as p:
-        PROFILE_DIR.mkdir(exist_ok=True)
-        ctx = p.firefox.launch_persistent_context(
-            str(PROFILE_DIR),
-            headless=False,
-            slow_mo=50,
-            firefox_user_prefs=_FF_PREFS,
-        )
-        page = ctx.new_page()
-        page.goto(WS_HOME)
-        print()
-        print("=" * 55)
-        print("  WEALTHSIMPLE LOGIN")
-        print("=" * 55)
-        print("  1. A Firefox window just opened.")
-        print("  2. Log in to Wealthsimple normally.")
-        print("  3. Wait until you can see your HOME page / portfolio.")
-        print("  4. Come back here and press ENTER.")
-        print("=" * 55)
+    PROFILE_DIR.mkdir(exist_ok=True)
+
+    # Kill any leftover Chrome using our profile so we can launch fresh
+    import psutil
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
         try:
-            input("  >> Press ENTER when you are on the home page: ")
-        except EOFError:
-            # Non-interactive terminal — wait until the page lands on home
-            print("  (non-interactive mode — waiting for home page...)")
-            for _ in range(120):
-                try:
-                    if "home" in page.url or "portfolio" in page.url:
-                        break
-                    page.wait_for_timeout(5000)
-                except Exception:
-                    break
-        save_session(ctx)
-        print(f"\n  Session saved -> {PROFILE_DIR}")
-        try:
-            snap(page, "setup_done")
+            if proc.info["name"] and "chrome" in proc.info["name"].lower():
+                cmdline = " ".join(proc.info["cmdline"] or [])
+                if "browser_profile" in cmdline or "9222" in cmdline:
+                    proc.kill()
         except Exception:
             pass
-        try:
-            ctx.close()
-        except Exception:
-            pass
-    print("  Done. Run the bot normally now.")
+
+    import shutil
+    chrome_exe = shutil.which("chrome") or shutil.which("chromium")
+    if not chrome_exe:
+        # Use Playwright's bundled Chromium
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            chrome_exe = p.chromium.executable_path
+
+    subprocess.Popen([
+        chrome_exe,
+        f"--remote-debugging-port=9222",
+        f"--user-data-dir={PROFILE_DIR}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        WS_HOME,
+    ])
+
+    print()
+    print("=" * 55)
+    print("  WEALTHSIMPLE LOGIN")
+    print("=" * 55)
+    print("  1. A Chrome window just opened.")
+    print("  2. Log in to Wealthsimple normally.")
+    print("  3. Wait until you can see your HOME page / portfolio.")
+    print("  4. Come back here and press ENTER.")
+    print("=" * 55)
+    try:
+        input("  >> Press ENTER when you are on the home page: ")
+    except EOFError:
+        print("  (non-interactive mode — waiting...)")
+        import time
+        import urllib.request
+        for _ in range(60):
+            try:
+                urllib.request.urlopen(f"{CDP_URL}/json", timeout=2)
+                break
+            except Exception:
+                time.sleep(2)
+    print("  Done. Chrome will stay open — the bot connects to it for all operations.")
+    print(f"  Keep that Chrome window running in the background.")
 
 
 def cmd_buy(args) -> None:
@@ -619,11 +610,6 @@ def cmd_buy(args) -> None:
             print(f"\n[ERROR] Buy failed: {e}")
         finally:
             print("ORDER_RESULT_JSON:" + json.dumps(result, sort_keys=True))
-            save_session(ctx)
-            try:
-                ctx.close()
-            except Exception:
-                pass
     if not result.get("submitted"):
         sys.exit(1)
 
@@ -644,11 +630,6 @@ def cmd_sell(args) -> None:
             print(f"\n[ERROR] Sell failed: {e}")
         finally:
             print("ORDER_RESULT_JSON:" + json.dumps(result, sort_keys=True))
-            save_session(ctx)
-            try:
-                ctx.close()
-            except Exception:
-                pass
     if not result.get("submitted"):
         sys.exit(1)
 
