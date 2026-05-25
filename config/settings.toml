@@ -1,0 +1,16 @@
+[trading]
+timezone = "America/Toronto"
+market_open = "09:30"
+market_close = "16:00"
+latest_entry = "10:00"
+force_exit = "15:45"
+
+[risk]
+max_cash_per_trade = 17.24
+cash_buffer = 0.25
+stop_loss_pct = 0.0125
+take_profit_pct = 0.025
+trailing_stop_pct = 0.01
+min_price = 1.00
+max_price = 25.00
+min_avg_volume = 100000
