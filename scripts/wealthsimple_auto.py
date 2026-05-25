@@ -295,18 +295,30 @@ def cmd_balance(_args) -> None:
                 pass
 
 
+_FF_PREFS = {
+    # Disable private/incognito mode — Playwright's Firefox defaults to it
+    "browser.privatebrowsing.autostart": False,
+    # Never clear cookies/sessions on close
+    "privacy.sanitize.sanitizeOnShutdown": False,
+    "privacy.clearOnShutdown.cookies": False,
+    "privacy.clearOnShutdown.sessions": False,
+    "privacy.clearOnShutdown.cache": False,
+    "privacy.clearOnShutdown.history": False,
+    # Keep cookies across restarts
+    "network.cookie.lifetimePolicy": 0,
+}
+
+
 def open_browser(p):
     if not PROFILE_DIR.exists() and not AUTH.exists():
         print("No session found. Run first: python scripts/wealthsimple_auto.py setup")
         sys.exit(1)
     PROFILE_DIR.mkdir(exist_ok=True)
-    # Persistent context keeps the full Firefox profile on disk (cookies, device
-    # trust tokens, fingerprints). Wealthsimple sees the same "device" every run,
-    # so the 30-day OTP trust is preserved across restarts.
     ctx = p.firefox.launch_persistent_context(
         str(PROFILE_DIR),
         headless=False,
         slow_mo=60,
+        firefox_user_prefs=_FF_PREFS,
     )
     page = ctx.new_page()
     return ctx, page
@@ -540,7 +552,12 @@ def cmd_setup(_args) -> None:
 
     with sync_playwright() as p:
         PROFILE_DIR.mkdir(exist_ok=True)
-        ctx = p.firefox.launch_persistent_context(str(PROFILE_DIR), headless=False, slow_mo=50)
+        ctx = p.firefox.launch_persistent_context(
+            str(PROFILE_DIR),
+            headless=False,
+            slow_mo=50,
+            firefox_user_prefs=_FF_PREFS,
+        )
         page = ctx.new_page()
         page.goto(WS_HOME)
         print()
