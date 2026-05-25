@@ -524,14 +524,41 @@ def cmd_setup(_args) -> None:
         page = ctx.new_page()
         page.goto(WS_HOME)
         print()
-        print("A Firefox window has opened.")
-        print("Log in to Wealthsimple, navigate to your home page,")
-        print("then come back here and press ENTER.")
-        input()
-        save_session(ctx)
-        snap(page, "setup_done")
-        browser.close()
-    print(f"Session saved -> {AUTH}")
+        print("=" * 55)
+        print("  WEALTHSIMPLE LOGIN")
+        print("=" * 55)
+        print("  1. A Firefox window just opened.")
+        print("  2. Log in to Wealthsimple normally.")
+        print("  3. Wait until you can see your HOME page / portfolio.")
+        print("  4. Come back here and press ENTER.")
+        print("=" * 55)
+        try:
+            input("  >> Press ENTER when you are on the home page: ")
+        except EOFError:
+            # Non-interactive terminal — wait until the page lands on home
+            print("  (non-interactive mode — waiting for home page...)")
+            for _ in range(120):
+                try:
+                    if "home" in page.url or "portfolio" in page.url:
+                        break
+                    page.wait_for_timeout(5000)
+                except Exception:
+                    break
+        try:
+            save_session(ctx)
+            print(f"\n  Session saved -> {AUTH}")
+        except Exception as e:
+            print(f"\n  [ERROR] Could not save session: {e}")
+            sys.exit(1)
+        try:
+            snap(page, "setup_done")
+        except Exception:
+            pass
+        try:
+            browser.close()
+        except Exception:
+            pass
+    print("  Done. Run the bot normally now.")
 
 
 def cmd_buy(args) -> None:

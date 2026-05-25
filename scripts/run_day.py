@@ -204,6 +204,16 @@ def fetch_live_balance() -> float | None:
         text=True,
         timeout=120,
     )
+    combined = result.stdout + result.stderr
+    if "session expired" in combined.lower() or "log in" in combined.lower():
+        notify(
+            "❌ <b>Wealthsimple session expired</b>\n\n"
+            "Fix it now:\n"
+            "<code>python scripts/wealthsimple_auto.py setup</code>\n\n"
+            "Log in to Wealthsimple in the Firefox window, then press ENTER. Restart the bot after.",
+            event="error",
+        )
+        log("SESSION EXPIRED — run: python scripts/wealthsimple_auto.py setup")
     for line in result.stdout.splitlines():
         if line.startswith("LIVE_BALANCE_CAD:"):
             try:
