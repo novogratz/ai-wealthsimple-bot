@@ -268,92 +268,136 @@ def run_watch() -> None:
     sys.exit(1)
 
 
+def run_overnight_analysis() -> None:
+    """Scan for tomorrow's pick every hour between market close and 9:30 ET open."""
+    settings = load_settings(ROOT / "config" / "settings.toml")
+    universe = load_universe(ROOT / "config" / "universe.csv")
+    strategy = FashionStrategy(
+        settings=settings,
+        universe=universe,
+        market_data=YFinanceMarketData(),
+    )
+
+    log("Overnight analysis: scanning universe for tomorrow's pick...")
+    try:
+        picks = strategy.rank(cash=1000)
+        if picks:
+            top = picks[0]
+            log(f"Overnight top pick: {top.symbol} | score {top.score:.2f} | {top.reason}")
+            notify(
+                f"🌙 <b>Overnight scan — top pick: <code>{top.symbol}</code></b>\n\n"
+                f"📊 Score: {top.score:.2f}  |  {top.reason}\n"
+                f"💵 Last price: ${top.last_price:.2f} CAD",
+                event="scan_top",
+            )
+        else:
+            log("Overnight scan: no candidates found.")
+    except Exception as e:
+        log(f"Overnight scan error: {e}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Full trading day: scan -> buy -> hold -> sell at 15:55 ET"
+        description="Full trading day: scan -> buy -> hold -> sell at 15:55 ET — loops overnight"
     )
     parser.add_argument("--balance", type=float, default=None, help="Cash to deploy in CAD (default: fetch live from Wealthsimple)")
     parser.add_argument("--now", action="store_true", help="Skip the 09:30 ET wait")
     args = parser.parse_args()
 
-    log("=== Fashion Bot - Full Day ===")
+    log("=== Fashion Bot — running continuously (sells 15:55, scans overnight, buys 09:30) ===")
     cleanup_screenshots()
 
-    if args.balance is not None:
-        balance = args.balance
-        log(f"Balance: ${balance:.2f} CAD (manual override)")
-    else:
-        balance = fetch_live_balance()
-        if balance is None:
-            log("Could not fetch live balance — defaulting to $17.24 CAD")
-            balance = 17.24
-
-    # Persist so periodic Telegram updates can show estimated account value
-    (DATA / "session_info.json").write_text(
-        json.dumps({"startingBalance": balance, "startTime": now_et().isoformat()})
-    )
-    log(f"Budget: ${balance:.2f} CAD | Auto-sell at: 15:55 ET")
-
     from fashion_bot.cli import _get_total_pnl
-    all_time_pnl = _get_total_pnl()
-    at_color = "🟢" if all_time_pnl >= 0 else "🔴"
 
-    # Resume existing position instead of re-buying on restart
+    # Resume an existing open position on restart before entering the main loop
     if POS_FILE.exists():
+        balance = args.balance or fetch_live_balance() or 17.24
+        (DATA / "session_info.json").write_text(
+            json.dumps({"startingBalance": balance, "startTime": now_et().isoformat()})
+        )
         pos = json.loads(POS_FILE.read_text())
         symbol = pos["symbol"]
         entry = float(pos.get("buyPrice", 0))
         cost = float(pos.get("estimatedCost", 0))
         shares = float(pos.get("shares", 0))
-        # If shares looks like a bad integer estimate, re-derive from cost/price
         if shares < 1.01 and cost > 0 and entry > 0:
             derived = cost / entry
             if derived > shares * 1.05:
                 shares = derived
-                log(f"Corrected share count from position file: {shares:.4f} ({cost:.2f}/{entry:.2f})")
+                log(f"Corrected share count: {shares:.4f} ({cost:.2f}/{entry:.2f})")
+        all_time_pnl = _get_total_pnl()
+        at_color = "🟢" if all_time_pnl >= 0 else "🔴"
         log(f"Resuming existing position: {symbol} {shares:.4f} shares @ ${entry:.2f}")
         notify(
             f"▶️ <b>Bot restarted — resuming position</b>\n\n"
             f"🎫 <code>{symbol}</code>\n"
-            f"🔢 Shares held: <b>{shares:.4f}</b>\n"
-            f"💵 Entry: <b>${entry:.2f} CAD</b>  |  💰 Invested: <b>${cost:.2f} CAD</b>\n"
-            f"⏰ Will sell at 15:55 ET\n\n"
-            f"{at_color} All-time realized PnL: <b>${all_time_pnl:+.2f} CAD</b>",
+            f"🔢 Shares: <b>{shares:.4f}</b>  |  💵 Entry: <b>${entry:.2f}</b>  |  💰 Cost: <b>${cost:.2f}</b>\n"
+            f"⏰ Auto-sell at 15:55 ET\n\n"
+            f"{at_color} All-time PnL: <b>${all_time_pnl:+.2f} CAD</b>",
             event="info",
         )
         run_watch()
-        log("Done.")
-        return
+        POS_FILE.unlink(missing_ok=True)
 
-    notify(
-        f"🤖 <b>Fashion Bot started</b>\n\n"
-        f"💼 Budget: <b>${balance:.2f} CAD</b>\n"
-        f"⏰ Entry window: <b>09:30–09:35 ET</b>\n"
-        f"🏁 Auto-sell at: <b>15:55 ET</b>\n\n"
-        f"{at_color} All-time realized PnL: <b>${all_time_pnl:+.2f} CAD</b>",
-        event="info",
-    )
+    # Main loop — runs forever: overnight scan → wait for 9:30 → buy → sell → repeat
+    skip_wait = args.now
+    last_overnight_scan: float = 0.0
 
-    if not args.now:
-        wait_for_entry()
+    while True:
+        # Overnight analysis: scan every hour while waiting for market open
+        if not skip_wait:
+            while True:
+                now = now_et()
+                target = now.replace(hour=9, minute=30, second=0, microsecond=0)
+                # If we're within 5 min of open, stop scanning and go buy
+                if now.weekday() < 5 and (target - now).total_seconds() <= 300:
+                    break
+                # Run overnight scan at most once per hour
+                if time.monotonic() - last_overnight_scan >= 3600:
+                    run_overnight_analysis()
+                    last_overnight_scan = time.monotonic()
+                # Sleep in 5-min chunks so we catch the open precisely
+                time.sleep(300)
+            wait_for_entry()
 
-    # Hard guard: never buy outside 9:30–9:35 ET regardless of --now
-    _now = now_et()
-    _open = _now.replace(hour=9, minute=30, second=0, microsecond=0)
-    _close = _now.replace(hour=9, minute=35, second=0, microsecond=0)
-    if not (_open <= _now <= _close):
-        log(f"Current time {_now:%H:%M} ET is outside the 09:30–09:35 entry window — aborting buy.")
-        notify(
-            f"⚠️ <b>Buy aborted</b> — it's <b>{_now:%H:%M} ET</b>, market entry window is 09:30–09:35 only.\n"
-            f"Restart the bot and it will wait for tomorrow's open.",
-            event="error",
+        skip_wait = False  # only skip on the very first iteration if --now passed
+
+        # Hard guard: never buy outside 9:30–9:35 ET
+        _now = now_et()
+        _open = _now.replace(hour=9, minute=30, second=0, microsecond=0)
+        _close = _now.replace(hour=9, minute=35, second=0, microsecond=0)
+        if not (_open <= _now <= _close):
+            log(f"Outside 09:30–09:35 entry window ({_now:%H:%M} ET) — waiting for next open.")
+            notify(
+                f"⚠️ <b>Buy skipped</b> — {_now:%H:%M} ET is outside entry window.\n"
+                f"Scanning overnight and retrying tomorrow at 09:30.",
+                event="error",
+            )
+            continue
+
+        # Fetch fresh balance and buy
+        balance = args.balance or fetch_live_balance() or 17.24
+        (DATA / "session_info.json").write_text(
+            json.dumps({"startingBalance": balance, "startTime": now_et().isoformat()})
         )
-        sys.exit(1)
+        all_time_pnl = _get_total_pnl()
+        at_color = "🟢" if all_time_pnl >= 0 else "🔴"
+        notify(
+            f"🤖 <b>Fashion Bot — new trading day</b>\n\n"
+            f"💼 Budget: <b>${balance:.2f} CAD</b>\n"
+            f"⏰ Entry: <b>09:30–09:35 ET</b>  |  🏁 Auto-sell: <b>15:55 ET</b>\n\n"
+            f"{at_color} All-time PnL: <b>${all_time_pnl:+.2f} CAD</b>",
+            event="info",
+        )
+        log(f"Budget: ${balance:.2f} CAD")
 
-    symbol, price, shares = run_scan(balance)
-    run_buy(symbol, price, shares)
-    run_watch()
-    log("Done. Check data/screen_sell_done.png to verify the sell.")
+        symbol, price, shares = run_scan(balance)
+        run_buy(symbol, price, shares)
+        run_watch()
+        POS_FILE.unlink(missing_ok=True)
+
+        cleanup_screenshots()
+        log("Day complete — entering overnight scan loop for next trading day.")
 
 
 if __name__ == "__main__":
