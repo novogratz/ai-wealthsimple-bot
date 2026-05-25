@@ -181,7 +181,20 @@ def _pnl_arrow(pnl: float) -> str:
     return "📈" if pnl >= 0 else "📉"
 
 
-def _msg_holding_start(symbol: str, entry: float, shares: int, cost: float, all_time_pnl: float, exit_time: str) -> str:
+def _get_trade_stats() -> dict:
+    pnl_file = ROOT / "data" / "pnl_ledger.json"
+    if not pnl_file.exists():
+        return {"count": 0, "wins": 0, "losses": 0, "total_pnl": 0.0}
+    try:
+        trades = json.loads(pnl_file.read_text())
+        total_pnl = sum(t.get("realizedPnl", 0) for t in trades)
+        wins = sum(1 for t in trades if t.get("realizedPnl", 0) >= 0)
+        return {"count": len(trades), "wins": wins, "losses": len(trades) - wins, "total_pnl": total_pnl}
+    except Exception:
+        return {"count": 0, "wins": 0, "losses": 0, "total_pnl": 0.0}
+
+
+def _msg_holding_start(symbol: str, entry: float, shares: float, cost: float, all_time_pnl: float, exit_time: str) -> str:
     at_color = _pnl_color(all_time_pnl)
     lines = [
         f"🛒 <b>Position opened</b>",
@@ -197,28 +210,35 @@ def _msg_holding_start(symbol: str, entry: float, shares: int, cost: float, all_
     return "\n".join(lines)
 
 
-def _msg_update(symbol: str, entry: float, price: float, shares: int, pos_value: float,
+def _msg_update(symbol: str, entry: float, price: float, shares: float, pos_value: float,
                 unreal_pnl: float, pnl_pct: float, all_time_pnl: float) -> str:
     trade_color = _pnl_color(unreal_pnl)
     at_color = _pnl_color(all_time_pnl)
     arrow = _pnl_arrow(unreal_pnl)
+    stats = _get_trade_stats()
+    win_rate = (stats["wins"] / stats["count"] * 100) if stats["count"] > 0 else 0.0
     lines = [
         f"{trade_color} <b>Portfolio Update</b>",
         f"",
         f"🎫 <code>{symbol}</code>  |  {arrow} ${price:.2f} CAD",
-        f"🔢 Shares held: <b>{shares}</b>",
+        f"🔢 Shares held: <b>{shares:.4f}</b>",
         f"💵 Entry: ${entry:.2f}  →  Now: ${price:.2f}",
         f"💼 Position value: <b>${pos_value:.2f} CAD</b>",
         f"",
         f"{arrow} Unrealized PnL: <b>${unreal_pnl:+.2f} CAD ({pnl_pct:+.2f}%)</b>",
         f"{at_color} All-time realized PnL: <b>${all_time_pnl:+.2f} CAD</b>",
         f"",
+        f"━━━━━━━━━━━━━━━━━━━━",
+        f"📊 <b>Account Stats</b>",
+        f"🔢 Total trades: <b>{stats['count']}</b>  |  🏆 Win rate: <b>{win_rate:.0f}%</b>",
+        f"✅ Wins: {stats['wins']}  |  ❌ Losses: {stats['losses']}",
+        f"",
         f"{'🚀 Account GREEN since launch!' if all_time_pnl >= 0 else '⚠️ Account RED — need to recover'}",
     ]
     return "\n".join(lines)
 
 
-def _msg_selling(symbol: str, price: float, shares: int, unreal_pnl: float, pnl_pct: float) -> str:
+def _msg_selling(symbol: str, price: float, shares: float, unreal_pnl: float, pnl_pct: float) -> str:
     arrow = _pnl_arrow(unreal_pnl)
     lines = [
         f"⏳ <b>Closing position now</b>",
@@ -231,24 +251,28 @@ def _msg_selling(symbol: str, price: float, shares: int, unreal_pnl: float, pnl_
     return "\n".join(lines)
 
 
-def _msg_sold(symbol: str, price: float, shares: int, cost: float,
+def _msg_sold(symbol: str, price: float, shares: float, cost: float,
               trade_pnl: float, pnl_pct: float, all_time_pnl: float) -> str:
     trade_color = _pnl_color(trade_pnl)
     at_color = _pnl_color(all_time_pnl)
     proceeds = shares * price
+    stats = _get_trade_stats()
+    win_rate = (stats["wins"] / stats["count"] * 100) if stats["count"] > 0 else 0.0
     lines = [
         f"{'🚀' if trade_pnl >= 0 else '📉'} <b>Position closed — {symbol}</b>",
         f"",
         f"🎫 <code>{symbol}</code>",
         f"💵 Exit price: <b>${price:.2f} CAD</b>",
-        f"🔢 Shares sold: <b>{shares}</b>",
+        f"🔢 Shares sold: <b>{shares:.4f}</b>",
         f"💰 Total invested: ${cost:.2f} CAD",
         f"💰 Proceeds: <b>${proceeds:.2f} CAD</b>",
         f"",
         f"{trade_color} Trade PnL: <b>${trade_pnl:+.2f} CAD ({pnl_pct:+.2f}%)</b>",
         f"",
         f"━━━━━━━━━━━━━━━━━━━━",
-        f"{at_color} <b>All-time realized PnL: ${all_time_pnl:+.2f} CAD</b>",
+        f"📊 <b>Account Stats</b>",
+        f"{at_color} All-time realized PnL: <b>${all_time_pnl:+.2f} CAD</b>",
+        f"🔢 Total trades: <b>{stats['count']}</b>  |  🏆 Win rate: <b>{win_rate:.0f}%</b>",
         f"{'🟢 Account is GREEN since launch 🚀' if all_time_pnl >= 0 else '🔴 Account is RED — keep grinding 💪'}",
     ]
     return "\n".join(lines)
@@ -266,12 +290,12 @@ def cmd_watch(args: argparse.Namespace) -> int:
     pos = json.loads(pos_file.read_text())
     symbol = pos["symbol"]
     entry_price = float(pos.get("buyPrice", 0))
-    shares = int(pos.get("shares", 0))
+    shares = float(pos.get("shares", 0))
     buy_cost = float(pos.get("estimatedCost", entry_price * shares))
 
     auto_script = ROOT / "scripts" / "wealthsimple_auto.py"
 
-    print(f"Holding {symbol}:  entry=${entry_price:.2f}  shares={shares}", flush=True)
+    print(f"Holding {symbol}:  entry=${entry_price:.2f}  shares={shares:.4f}", flush=True)
     print(f"  Selling after {trading.force_exit} ET", flush=True)
 
     all_time_pnl = _get_total_pnl()
@@ -328,6 +352,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 return 1
 
             all_time_pnl = _record_and_get_total_pnl(symbol, buy_cost, shares * last_price, shares)
+            pos_file.unlink(missing_ok=True)
             print(f"\nPosition closed. Trade PnL: ${unrealized_pnl:+.2f}  All-time: ${all_time_pnl:+.2f}", flush=True)
             try:
                 send_message(_msg_sold(symbol, last_price, shares, buy_cost, unrealized_pnl, pnl_pct, all_time_pnl))
