@@ -15,7 +15,7 @@ class Pick:
     reason: str
 
 
-class FashionStrategy:
+class KzerStrategy:
     """Momentum scanner with conservative liquidity and affordability filters."""
 
     def __init__(self, settings: Settings, universe: list[Ticker], market_data: MarketData):

@@ -19,10 +19,10 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from fashion_bot.config import load_settings, load_universe
-from fashion_bot.market_data import YFinanceMarketData
-from fashion_bot.strategy import FashionStrategy
-from fashion_bot.telegram import TelegramConfigError, send_message, trade_message
+from kzer_bot.config import load_settings, load_universe
+from kzer_bot.market_data import YFinanceMarketData
+from kzer_bot.strategy import KzerStrategy
+from kzer_bot.telegram import TelegramConfigError, send_message, trade_message
 
 DATA = ROOT / "data"
 POS_FILE = DATA / "open_position.json"
@@ -96,7 +96,7 @@ def build_status_telegram(balance: float | None) -> str:
         next_event = f"Buy at {nxt:%a %b %d %H:%M} ET"
 
     lines = [
-        "📊 <b>Fashion Bot — Status</b>",
+        "📊 <b>kzeR Wealthsimple Bot — Status</b>",
         "",
         f"💰 Balance:      {bal_str}",
         f"{pnl_emoji} All-time PnL:  <b>{pnl_sign}{total_pnl:.2f} CAD</b>  ({roi:+.2f}% ROI)",
@@ -186,7 +186,7 @@ def print_status_banner(balance: float | None) -> None:
 
     print(flush=True)
     print(sep, flush=True)
-    print(center_row("  FASHION BOT  --  STATUS"), flush=True)
+    print(center_row("  kzeR WEALTHSIMPLE BOT  --  STATUS"), flush=True)
     print(sep, flush=True)
     print(row("Account balance", bal_str), flush=True)
     print(row("All-time PnL", f"{pnl_arrow} {pnl_sign}{total_pnl:.2f} CAD  ({roi:+.2f}% ROI)"), flush=True)
@@ -263,7 +263,7 @@ def wait_for_entry() -> None:
 def run_scan(balance: float) -> tuple[str, float, int]:
     settings = load_settings(ROOT / "config" / "settings.toml")
     universe = load_universe(ROOT / "config" / "universe.csv")
-    strategy = FashionStrategy(
+    strategy = KzerStrategy(
         settings=settings,
         universe=universe,
         market_data=YFinanceMarketData(),
@@ -351,7 +351,7 @@ def run_buy(symbol: str, price: float, shares_est: int) -> None:
     POS_FILE.write_text(json.dumps(pos))
     log(f"Buy submitted: {actual_qty} shares @ ${price:.2f} (cost ${actual_cost:.2f}). Holding until 15:55 ET.")  # sell time from settings.toml
 
-    from fashion_bot.cli import _get_total_pnl
+    from kzer_bot.cli import _get_total_pnl
     all_time_pnl = _get_total_pnl()
     at_color = "🟢" if all_time_pnl >= 0 else "🔴"
     notify(
@@ -421,7 +421,7 @@ def run_watch() -> None:
     log("Watch loop started - checking price every 60s, selling at 15:55 ET...")
     for attempt in range(1, 4):
         result = subprocess.run(
-            [PYTHON, "-m", "fashion_bot", "watch", "--position-file", str(POS_FILE)],
+            [PYTHON, "-m", "kzer_bot", "watch", "--position-file", str(POS_FILE)],
             cwd=ROOT,
         )
         if result.returncode == 0:
@@ -451,7 +451,7 @@ def run_overnight_analysis(slot: str) -> None:
     log(f"{label}: scanning universe for tomorrow's pick...")
     settings = load_settings(ROOT / "config" / "settings.toml")
     universe = load_universe(ROOT / "config" / "universe.csv")
-    strategy = FashionStrategy(
+    strategy = KzerStrategy(
         settings=settings,
         universe=universe,
         market_data=YFinanceMarketData(),
@@ -542,10 +542,10 @@ def main() -> None:
     parser.add_argument("--now", action="store_true", help="Skip the 09:30 ET wait")
     args = parser.parse_args()
 
-    log("=== Fashion Bot — running continuously (sells 15:55, scans overnight, buys 09:31) ===")
+    log("=== kzeR Wealthsimple Bot — running continuously (sells 15:55, scans overnight, buys 09:31) ===")
     cleanup_screenshots()
 
-    from fashion_bot.cli import _get_total_pnl
+    from kzer_bot.cli import _get_total_pnl
 
     # Show status dashboard immediately on start
     _startup_balance = fetch_live_balance() if args.balance is None else args.balance
@@ -616,7 +616,7 @@ def main() -> None:
         all_time_pnl = _get_total_pnl()
         at_color = "🟢" if all_time_pnl >= 0 else "🔴"
         notify(
-            f"🤖 <b>Fashion Bot — new trading day</b>\n\n"
+            f"🤖 <b>kzeR Wealthsimple Bot — new trading day</b>\n\n"
             f"💼 Budget: <b>${balance:.2f} CAD</b>\n"
             f"⏰ Entry: <b>09:31 ET</b>  |  🏁 Auto-sell: <b>15:55 ET</b>\n\n"
             f"{at_color} All-time PnL: <b>${all_time_pnl:+.2f} CAD</b>",

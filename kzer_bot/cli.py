@@ -13,17 +13,17 @@ from .market_data import YFinanceMarketData
 from .paper import PaperBroker
 from .runner import run_paper_once
 from .schedule import now_in_market_tz, is_weekday, is_market_session, should_force_exit
-from .strategy import FashionStrategy
+from .strategy import KzerStrategy
 from .telegram import TelegramConfigError, send_message, trade_message
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def build_strategy() -> FashionStrategy:
+def build_strategy() -> KzerStrategy:
     settings = load_settings(ROOT / "config" / "settings.toml")
     universe = load_universe(ROOT / "config" / "universe.csv")
-    return FashionStrategy(settings=settings, universe=universe, market_data=YFinanceMarketData())
+    return KzerStrategy(settings=settings, universe=universe, market_data=YFinanceMarketData())
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
@@ -566,7 +566,7 @@ def cmd_pnl(args: argparse.Namespace) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="fashion_bot")
+    parser = argparse.ArgumentParser(prog="kzer_bot")
     sub = parser.add_subparsers(required=True)
 
     scan = sub.add_parser("scan", help="rank Canadian-stock candidates")

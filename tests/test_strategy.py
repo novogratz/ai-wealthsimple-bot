@@ -1,8 +1,8 @@
 import unittest
 
-from fashion_bot.config import RiskSettings, Settings, Ticker, TradingSettings
-from fashion_bot.market_data import Snapshot
-from fashion_bot.strategy import FashionStrategy
+from kzer_bot.config import RiskSettings, Settings, Ticker, TradingSettings
+from kzer_bot.market_data import Snapshot
+from kzer_bot.strategy import KzerStrategy
 
 
 class FakeMarketData:
@@ -21,7 +21,7 @@ class StrategyTests(unittest.TestCase):
         )
 
     def test_affordable_liquid_positive_momentum_candidate(self):
-        strategy = FashionStrategy(
+        strategy = KzerStrategy(
             settings=self.settings(),
             universe=[Ticker("AAA.TO", "AAA"), Ticker("BBB.TO", "BBB")],
             market_data=FakeMarketData(

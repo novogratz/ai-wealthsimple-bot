@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from .paper import PaperBroker
 from .schedule import can_open_position, now_in_market_tz, should_force_exit
-from .strategy import FashionStrategy
+from .strategy import KzerStrategy
 
 
-def run_paper_once(strategy: FashionStrategy, broker: PaperBroker, cash: float) -> str:
+def run_paper_once(strategy: KzerStrategy, broker: PaperBroker, cash: float) -> str:
     now = now_in_market_tz(strategy.settings.trading)
 
     if broker.position is not None:

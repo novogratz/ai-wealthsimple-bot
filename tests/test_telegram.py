@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from urllib.parse import parse_qs
 
-from fashion_bot.telegram import TelegramConfig, load_dotenv, send_message, trade_message
+from kzer_bot.telegram import TelegramConfig, load_dotenv, send_message, trade_message
 
 
 class FakeResponse:

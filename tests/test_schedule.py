@@ -2,8 +2,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import unittest
 
-from fashion_bot.config import TradingSettings
-from fashion_bot.schedule import can_open_position, is_market_session, should_force_exit
+from kzer_bot.config import TradingSettings
+from kzer_bot.schedule import can_open_position, is_market_session, should_force_exit
 
 
 class ScheduleTests(unittest.TestCase):
