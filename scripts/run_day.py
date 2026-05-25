@@ -116,17 +116,21 @@ def run_buy(symbol: str, price: float, shares_est: int) -> None:
         notify(f"❌ Buy FAILED for {symbol}", event="error")
         sys.exit(1)
 
-    # Use actual fill from ORDER_RESULT_JSON if available
+    # Use actual fill from ORDER_RESULT_JSON if available.
+    # For dollar-based orders Wealthsimple may omit estimated_quantity, so derive
+    # shares from estimated_value / price when the quantity field is missing.
     actual_qty: float = float(shares_est)
     actual_cost: float = price * shares_est
     for line in result.stdout.splitlines():
         if line.startswith("ORDER_RESULT_JSON:"):
             try:
                 data = json.loads(line[len("ORDER_RESULT_JSON:"):])
-                if data.get("estimated_quantity"):
-                    actual_qty = float(data["estimated_quantity"])
                 if data.get("estimated_value"):
                     actual_cost = float(data["estimated_value"])
+                if data.get("estimated_quantity"):
+                    actual_qty = float(data["estimated_quantity"])
+                elif actual_cost > 0 and price > 0:
+                    actual_qty = actual_cost / price
             except Exception:
                 pass
 

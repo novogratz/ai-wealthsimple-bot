@@ -252,9 +252,9 @@ def _msg_update(symbol: str, entry: float, price: float, shares: float, pos_valu
         f"",
         f"━━━━━━━━━━━━━━━━━━━━",
         f"📊 <b>Account Stats</b>",
-        f"{today_color} Today's realized PnL: <b>${stats['today_pnl']:+.2f} CAD ({stats['today_pnl_pct']:+.2f}%)</b>",
-        f"{at_color} All-time realized PnL: <b>${all_time_pnl:+.2f} CAD ({stats['total_pnl_pct']:+.2f}%)</b>",
-        f"🔢 Total trades: <b>{stats['count']}</b>  |  🏆 Win rate: <b>{win_rate:.0f}%</b>",
+        f"{today_color} Today: <b>${stats['today_pnl']:+.2f} CAD ({stats['today_pnl_pct']:+.2f}%)</b>",
+        f"{at_color} All-time: <b>${all_time_pnl:+.2f} CAD ({stats['total_pnl_pct']:+.2f}%)</b>",
+        f"🏆 Record: <b>{stats['wins']}W / {stats['losses']}L</b>  ({win_rate:.0f}% win rate)",
         f"",
         f"{'🚀 Account GREEN since launch!' if all_time_pnl >= 0 else '⚠️ Account RED — need to recover'}",
     ]
@@ -297,7 +297,7 @@ def _msg_sold(symbol: str, price: float, shares: float, cost: float,
         f"📊 <b>Account Stats</b>",
         f"{today_color} Today: <b>${stats['today_pnl']:+.2f} CAD ({stats['today_pnl_pct']:+.2f}%)</b>  [{stats['today_count']} trade(s)]",
         f"{at_color} All-time: <b>${all_time_pnl:+.2f} CAD ({stats['total_pnl_pct']:+.2f}%)</b>",
-        f"🔢 Total trades: <b>{stats['count']}</b>  |  🏆 Win rate: <b>{win_rate:.0f}%</b>",
+        f"🏆 Record: <b>{stats['wins']}W / {stats['losses']}L</b>  ({win_rate:.0f}% win rate)",
         f"{'🟢 Account is GREEN since launch 🚀' if all_time_pnl >= 0 else '🔴 Account is RED — keep grinding 💪'}",
     ]
     return "\n".join(lines)
