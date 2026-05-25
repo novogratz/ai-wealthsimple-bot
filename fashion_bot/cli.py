@@ -182,16 +182,38 @@ def _pnl_arrow(pnl: float) -> str:
 
 
 def _get_trade_stats() -> dict:
+    from datetime import date as _date
+    empty = {"count": 0, "wins": 0, "losses": 0, "total_pnl": 0.0, "total_pnl_pct": 0.0,
+             "today_pnl": 0.0, "today_pnl_pct": 0.0, "today_count": 0}
     pnl_file = ROOT / "data" / "pnl_ledger.json"
     if not pnl_file.exists():
-        return {"count": 0, "wins": 0, "losses": 0, "total_pnl": 0.0}
+        return empty
     try:
         trades = json.loads(pnl_file.read_text())
+        today = _date.today().isoformat()
+        today_trades = [t for t in trades if t.get("time", "").startswith(today)]
+
         total_pnl = sum(t.get("realizedPnl", 0) for t in trades)
+        total_cost = sum(t.get("buyCost", 0) for t in trades)
+        total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0.0
+
+        today_pnl = sum(t.get("realizedPnl", 0) for t in today_trades)
+        today_cost = sum(t.get("buyCost", 0) for t in today_trades)
+        today_pnl_pct = (today_pnl / today_cost * 100) if today_cost > 0 else 0.0
+
         wins = sum(1 for t in trades if t.get("realizedPnl", 0) >= 0)
-        return {"count": len(trades), "wins": wins, "losses": len(trades) - wins, "total_pnl": total_pnl}
+        return {
+            "count": len(trades),
+            "wins": wins,
+            "losses": len(trades) - wins,
+            "total_pnl": total_pnl,
+            "total_pnl_pct": total_pnl_pct,
+            "today_pnl": today_pnl,
+            "today_pnl_pct": today_pnl_pct,
+            "today_count": len(today_trades),
+        }
     except Exception:
-        return {"count": 0, "wins": 0, "losses": 0, "total_pnl": 0.0}
+        return empty
 
 
 def _msg_holding_start(symbol: str, entry: float, shares: float, cost: float, all_time_pnl: float, exit_time: str) -> str:
@@ -200,7 +222,7 @@ def _msg_holding_start(symbol: str, entry: float, shares: float, cost: float, al
         f"🛒 <b>Position opened</b>",
         f"",
         f"🎫 Symbol: <code>{symbol}</code>",
-        f"🔢 Shares held: <b>{shares}</b>",
+        f"🔢 Shares held: <b>{shares:.4f}</b>",
         f"💵 Entry price: <b>${entry:.2f} CAD</b>",
         f"💰 Total invested: <b>${cost:.2f} CAD</b>",
         f"⏰ Auto-sell at: <b>{exit_time} ET</b>",
@@ -217,6 +239,7 @@ def _msg_update(symbol: str, entry: float, price: float, shares: float, pos_valu
     arrow = _pnl_arrow(unreal_pnl)
     stats = _get_trade_stats()
     win_rate = (stats["wins"] / stats["count"] * 100) if stats["count"] > 0 else 0.0
+    today_color = _pnl_color(stats["today_pnl"])
     lines = [
         f"{trade_color} <b>Portfolio Update</b>",
         f"",
@@ -226,12 +249,12 @@ def _msg_update(symbol: str, entry: float, price: float, shares: float, pos_valu
         f"💼 Position value: <b>${pos_value:.2f} CAD</b>",
         f"",
         f"{arrow} Unrealized PnL: <b>${unreal_pnl:+.2f} CAD ({pnl_pct:+.2f}%)</b>",
-        f"{at_color} All-time realized PnL: <b>${all_time_pnl:+.2f} CAD</b>",
         f"",
         f"━━━━━━━━━━━━━━━━━━━━",
         f"📊 <b>Account Stats</b>",
+        f"{today_color} Today's realized PnL: <b>${stats['today_pnl']:+.2f} CAD ({stats['today_pnl_pct']:+.2f}%)</b>",
+        f"{at_color} All-time realized PnL: <b>${all_time_pnl:+.2f} CAD ({stats['total_pnl_pct']:+.2f}%)</b>",
         f"🔢 Total trades: <b>{stats['count']}</b>  |  🏆 Win rate: <b>{win_rate:.0f}%</b>",
-        f"✅ Wins: {stats['wins']}  |  ❌ Losses: {stats['losses']}",
         f"",
         f"{'🚀 Account GREEN since launch!' if all_time_pnl >= 0 else '⚠️ Account RED — need to recover'}",
     ]
@@ -245,7 +268,7 @@ def _msg_selling(symbol: str, price: float, shares: float, unreal_pnl: float, pn
         f"",
         f"🎫 <code>{symbol}</code>",
         f"💵 Exit price: <b>${price:.2f} CAD</b>",
-        f"🔢 Selling: <b>{shares} shares</b>",
+        f"🔢 Selling: <b>{shares:.4f} shares</b>",
         f"{arrow} Estimated PnL: <b>${unreal_pnl:+.2f} CAD ({pnl_pct:+.2f}%)</b>",
     ]
     return "\n".join(lines)
@@ -258,6 +281,7 @@ def _msg_sold(symbol: str, price: float, shares: float, cost: float,
     proceeds = shares * price
     stats = _get_trade_stats()
     win_rate = (stats["wins"] / stats["count"] * 100) if stats["count"] > 0 else 0.0
+    today_color = _pnl_color(stats["today_pnl"])
     lines = [
         f"{'🚀' if trade_pnl >= 0 else '📉'} <b>Position closed — {symbol}</b>",
         f"",
@@ -271,7 +295,8 @@ def _msg_sold(symbol: str, price: float, shares: float, cost: float,
         f"",
         f"━━━━━━━━━━━━━━━━━━━━",
         f"📊 <b>Account Stats</b>",
-        f"{at_color} All-time realized PnL: <b>${all_time_pnl:+.2f} CAD</b>",
+        f"{today_color} Today: <b>${stats['today_pnl']:+.2f} CAD ({stats['today_pnl_pct']:+.2f}%)</b>  [{stats['today_count']} trade(s)]",
+        f"{at_color} All-time: <b>${all_time_pnl:+.2f} CAD ({stats['total_pnl_pct']:+.2f}%)</b>",
         f"🔢 Total trades: <b>{stats['count']}</b>  |  🏆 Win rate: <b>{win_rate:.0f}%</b>",
         f"{'🟢 Account is GREEN since launch 🚀' if all_time_pnl >= 0 else '🔴 Account is RED — keep grinding 💪'}",
     ]

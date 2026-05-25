@@ -93,7 +93,7 @@ def run_scan(balance: float) -> tuple[str, float, int]:
     log(f"Shares   : {pick.shares}")
     log(f"Score    : {pick.score:.2f}")
     log(f"Reason   : {pick.reason}")
-    notify(f"Scan done. Buying {pick.symbol} @ ${pick.last_price:.2f} ({pick.shares} shares)", event="scan_top")
+    notify(f"Scan done. Buying {pick.symbol} @ ${pick.last_price:.2f} (max dollars, ~{pick.shares} shares est.)", event="scan_top")
     return pick.symbol, pick.last_price, pick.shares
 
 
