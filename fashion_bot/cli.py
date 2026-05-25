@@ -182,24 +182,44 @@ def _pnl_arrow(pnl: float) -> str:
 
 
 def _get_trade_stats() -> dict:
-    from datetime import date as _date
-    empty = {"count": 0, "wins": 0, "losses": 0, "total_pnl": 0.0, "total_pnl_pct": 0.0,
-             "today_pnl": 0.0, "today_pnl_pct": 0.0, "today_count": 0}
+    import datetime as _dt
+    empty = {
+        "count": 0, "wins": 0, "losses": 0,
+        "total_pnl": 0.0, "total_pnl_pct": 0.0,
+        "h24_pnl": 0.0, "h24_pnl_pct": 0.0, "h24_count": 0,
+        "starting_balance": 0.0,
+    }
     pnl_file = ROOT / "data" / "pnl_ledger.json"
+    session_file = ROOT / "data" / "session_info.json"
+
+    starting_balance = 0.0
+    if session_file.exists():
+        try:
+            starting_balance = float(json.loads(session_file.read_text()).get("startingBalance", 0))
+        except Exception:
+            pass
+
     if not pnl_file.exists():
-        return empty
+        return {**empty, "starting_balance": starting_balance}
     try:
         trades = json.loads(pnl_file.read_text())
-        today = _date.today().isoformat()
-        today_trades = [t for t in trades if t.get("time", "").startswith(today)]
+        cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=24)
+
+        def _parse_time(t: str):
+            try:
+                return _dt.datetime.fromisoformat(t).astimezone(_dt.timezone.utc)
+            except Exception:
+                return None
+
+        h24_trades = [t for t in trades if (_parse_time(t.get("time", "")) or _dt.datetime.min.replace(tzinfo=_dt.timezone.utc)) >= cutoff]
 
         total_pnl = sum(t.get("realizedPnl", 0) for t in trades)
         total_cost = sum(t.get("buyCost", 0) for t in trades)
         total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0.0
 
-        today_pnl = sum(t.get("realizedPnl", 0) for t in today_trades)
-        today_cost = sum(t.get("buyCost", 0) for t in today_trades)
-        today_pnl_pct = (today_pnl / today_cost * 100) if today_cost > 0 else 0.0
+        h24_pnl = sum(t.get("realizedPnl", 0) for t in h24_trades)
+        h24_cost = sum(t.get("buyCost", 0) for t in h24_trades)
+        h24_pnl_pct = (h24_pnl / h24_cost * 100) if h24_cost > 0 else 0.0
 
         wins = sum(1 for t in trades if t.get("realizedPnl", 0) >= 0)
         return {
@@ -208,12 +228,13 @@ def _get_trade_stats() -> dict:
             "losses": len(trades) - wins,
             "total_pnl": total_pnl,
             "total_pnl_pct": total_pnl_pct,
-            "today_pnl": today_pnl,
-            "today_pnl_pct": today_pnl_pct,
-            "today_count": len(today_trades),
+            "h24_pnl": h24_pnl,
+            "h24_pnl_pct": h24_pnl_pct,
+            "h24_count": len(h24_trades),
+            "starting_balance": starting_balance,
         }
     except Exception:
-        return empty
+        return {**empty, "starting_balance": starting_balance}
 
 
 def _msg_holding_start(symbol: str, entry: float, shares: float, cost: float, all_time_pnl: float, exit_time: str) -> str:
@@ -239,24 +260,34 @@ def _msg_update(symbol: str, entry: float, price: float, shares: float, pos_valu
     arrow = _pnl_arrow(unreal_pnl)
     stats = _get_trade_stats()
     win_rate = (stats["wins"] / stats["count"] * 100) if stats["count"] > 0 else 0.0
-    today_color = _pnl_color(stats["today_pnl"])
+    h24_color = _pnl_color(stats["h24_pnl"])
+
+    starting = stats["starting_balance"]
+    est_balance = (starting + all_time_pnl + unreal_pnl) if starting > 0 else None
+    balance_line = (
+        f"💰 Est. balance: <b>${est_balance:.2f} CAD</b>  (started ${starting:.2f})"
+        if est_balance is not None else ""
+    )
     lines = [
         f"{trade_color} <b>Portfolio Update</b>",
         f"",
         f"🎫 <code>{symbol}</code>  |  {arrow} ${price:.2f} CAD",
-        f"🔢 Shares held: <b>{shares:.4f}</b>",
+        f"🔢 Shares: <b>{shares:.4f}</b>  |  💼 Value: <b>${pos_value:.2f} CAD</b>",
         f"💵 Entry: ${entry:.2f}  →  Now: ${price:.2f}",
-        f"💼 Position value: <b>${pos_value:.2f} CAD</b>",
         f"",
-        f"{arrow} Unrealized PnL: <b>${unreal_pnl:+.2f} CAD ({pnl_pct:+.2f}%)</b>",
+        f"{arrow} Unrealized: <b>${unreal_pnl:+.2f} CAD ({pnl_pct:+.2f}%)</b>",
         f"",
         f"━━━━━━━━━━━━━━━━━━━━",
-        f"📊 <b>Account Stats</b>",
-        f"{today_color} Today: <b>${stats['today_pnl']:+.2f} CAD ({stats['today_pnl_pct']:+.2f}%)</b>",
+        f"📊 <b>Account</b>",
+    ]
+    if balance_line:
+        lines.append(balance_line)
+    lines += [
+        f"{h24_color} Last 24h: <b>${stats['h24_pnl']:+.2f} CAD ({stats['h24_pnl_pct']:+.2f}%)</b>",
         f"{at_color} All-time: <b>${all_time_pnl:+.2f} CAD ({stats['total_pnl_pct']:+.2f}%)</b>",
         f"🏆 Record: <b>{stats['wins']}W / {stats['losses']}L</b>  ({win_rate:.0f}% win rate)",
         f"",
-        f"{'🚀 Account GREEN since launch!' if all_time_pnl >= 0 else '⚠️ Account RED — need to recover'}",
+        f"{'🚀 GREEN since launch!' if all_time_pnl >= 0 else '⚠️ RED — keep grinding'}",
     ]
     return "\n".join(lines)
 
@@ -281,24 +312,33 @@ def _msg_sold(symbol: str, price: float, shares: float, cost: float,
     proceeds = shares * price
     stats = _get_trade_stats()
     win_rate = (stats["wins"] / stats["count"] * 100) if stats["count"] > 0 else 0.0
-    today_color = _pnl_color(stats["today_pnl"])
+    h24_color = _pnl_color(stats["h24_pnl"])
+
+    starting = stats["starting_balance"]
+    est_balance = (starting + all_time_pnl) if starting > 0 else None
+    balance_line = (
+        f"💰 Est. balance: <b>${est_balance:.2f} CAD</b>  (started ${starting:.2f})"
+        if est_balance is not None else ""
+    )
     lines = [
         f"{'🚀' if trade_pnl >= 0 else '📉'} <b>Position closed — {symbol}</b>",
         f"",
         f"🎫 <code>{symbol}</code>",
-        f"💵 Exit price: <b>${price:.2f} CAD</b>",
-        f"🔢 Shares sold: <b>{shares:.4f}</b>",
-        f"💰 Total invested: ${cost:.2f} CAD",
-        f"💰 Proceeds: <b>${proceeds:.2f} CAD</b>",
+        f"💵 Exit: <b>${price:.2f} CAD</b>  |  🔢 Shares: <b>{shares:.4f}</b>",
+        f"💰 Invested: ${cost:.2f}  →  Proceeds: <b>${proceeds:.2f} CAD</b>",
         f"",
         f"{trade_color} Trade PnL: <b>${trade_pnl:+.2f} CAD ({pnl_pct:+.2f}%)</b>",
         f"",
         f"━━━━━━━━━━━━━━━━━━━━",
-        f"📊 <b>Account Stats</b>",
-        f"{today_color} Today: <b>${stats['today_pnl']:+.2f} CAD ({stats['today_pnl_pct']:+.2f}%)</b>  [{stats['today_count']} trade(s)]",
+        f"📊 <b>Account</b>",
+    ]
+    if balance_line:
+        lines.append(balance_line)
+    lines += [
+        f"{h24_color} Last 24h: <b>${stats['h24_pnl']:+.2f} CAD ({stats['h24_pnl_pct']:+.2f}%)</b>  [{stats['h24_count']} trade(s)]",
         f"{at_color} All-time: <b>${all_time_pnl:+.2f} CAD ({stats['total_pnl_pct']:+.2f}%)</b>",
         f"🏆 Record: <b>{stats['wins']}W / {stats['losses']}L</b>  ({win_rate:.0f}% win rate)",
-        f"{'🟢 Account is GREEN since launch 🚀' if all_time_pnl >= 0 else '🔴 Account is RED — keep grinding 💪'}",
+        f"{'🟢 Account GREEN 🚀' if all_time_pnl >= 0 else '🔴 Account RED — keep grinding 💪'}",
     ]
     return "\n".join(lines)
 

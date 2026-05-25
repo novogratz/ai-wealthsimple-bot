@@ -195,31 +195,44 @@ def run_buy(symbol: str, price: float, shares_est: int) -> None:
     )
 
 
-def fetch_live_balance() -> float | None:
-    log("Fetching live balance from Wealthsimple...")
-    result = subprocess.run(
-        [PYTHON, str(AUTO_SCRIPT), "balance"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    combined = result.stdout + result.stderr
-    if "session expired" in combined.lower() or "log in" in combined.lower():
-        notify(
-            "❌ <b>Wealthsimple session expired</b>\n\n"
-            "Fix it now:\n"
-            "<code>python scripts/wealthsimple_auto.py setup</code>\n\n"
-            "Log in to Wealthsimple in the Firefox window, then press ENTER. Restart the bot after.",
-            event="error",
-        )
-        log("SESSION EXPIRED — run: python scripts/wealthsimple_auto.py setup")
-    for line in result.stdout.splitlines():
-        if line.startswith("LIVE_BALANCE_CAD:"):
-            try:
-                return float(line[len("LIVE_BALANCE_CAD:"):].replace(",", ""))
-            except ValueError:
-                pass
+def fetch_live_balance(retries: int = 3) -> float | None:
+    for attempt in range(1, retries + 1):
+        log(f"Fetching live balance from Wealthsimple (attempt {attempt}/{retries})...")
+        try:
+            result = subprocess.run(
+                [PYTHON, str(AUTO_SCRIPT), "balance"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except Exception as e:
+            log(f"  Balance fetch error: {e}")
+            time.sleep(15)
+            continue
+
+        combined = result.stdout + result.stderr
+        if "session expired" in combined.lower() or "log in" in combined.lower():
+            notify(
+                "❌ <b>Wealthsimple session expired</b>\n\n"
+                "Fix it now:\n"
+                "<code>python scripts/wealthsimple_auto.py setup</code>\n\n"
+                "Log in to Wealthsimple in the Firefox window, then press ENTER. Restart the bot after.",
+                event="error",
+            )
+            log("SESSION EXPIRED — run: python scripts/wealthsimple_auto.py setup")
+            return None
+
+        for line in result.stdout.splitlines():
+            if line.startswith("LIVE_BALANCE_CAD:"):
+                try:
+                    val = float(line[len("LIVE_BALANCE_CAD:"):].replace(",", ""))
+                    log(f"  Live balance: ${val:.2f} CAD")
+                    return val
+                except ValueError:
+                    pass
+        log(f"  Could not parse balance (attempt {attempt})")
+        time.sleep(15)
     return None
 
 
@@ -236,13 +249,23 @@ def cleanup_screenshots() -> None:
 
 def run_watch() -> None:
     log("Watch loop started - checking price every 60s, selling at 15:55 ET...")
-    result = subprocess.run(
-        [PYTHON, "-m", "fashion_bot", "watch", "--position-file", str(POS_FILE)],
-        cwd=ROOT,
-    )
-    if result.returncode != 0:
-        log("Watch/sell loop exited with an error.")
-        sys.exit(1)
+    for attempt in range(1, 4):
+        result = subprocess.run(
+            [PYTHON, "-m", "fashion_bot", "watch", "--position-file", str(POS_FILE)],
+            cwd=ROOT,
+        )
+        if result.returncode == 0:
+            return
+        if not POS_FILE.exists():
+            log("Position file gone — position already closed.")
+            return
+        log(f"Watch loop exited with error (attempt {attempt}/3).")
+        if attempt < 3:
+            notify(f"⚠️ Watch loop crashed (attempt {attempt}/3) — restarting in 30s...", event="error")
+            time.sleep(30)
+    notify("❌ Watch loop failed 3 times — manual intervention needed.", event="error")
+    log("Watch loop failed 3 times. Check logs.")
+    sys.exit(1)
 
 
 def main() -> None:
@@ -264,9 +287,11 @@ def main() -> None:
         if balance is None:
             log("Could not fetch live balance — defaulting to $17.24 CAD")
             balance = 17.24
-        else:
-            log(f"Live balance: ${balance:.2f} CAD")
 
+    # Persist so periodic Telegram updates can show estimated account value
+    (DATA / "session_info.json").write_text(
+        json.dumps({"startingBalance": balance, "startTime": now_et().isoformat()})
+    )
     log(f"Budget: ${balance:.2f} CAD | Auto-sell at: 15:55 ET")
 
     from fashion_bot.cli import _get_total_pnl
