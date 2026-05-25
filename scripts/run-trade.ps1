@@ -1,15 +1,15 @@
 <#
 .SYNOPSIS
-    Full trading day: scan TSX -> browser buy -> wait until 15:45 ET -> browser sell.
+    Full trading day: scan TSX -> browser buy -> autonomous sell (stop-loss / take-profit / trailing-stop / force-exit).
     Uses Playwright automation with DOM selectors.
 
 .EXAMPLE
-    .\scripts\run-trade.ps1 -Balance 17.24           # full day, review only
-    .\scripts\run-trade.ps1 -Balance 17.24 -BuyOnly  # morning buy only, review only
-    .\scripts\run-trade.ps1 -SellOnly                # close open position, review only
-    .\scripts\run-trade.ps1 -AutoDay -Confirm        # wait for entry, buy, sell at 15:55 ET
-    .\scripts\run-trade.ps1 -Balance 17.24 -DryRun   # scan only, no browser
-    .\scripts\run-trade.ps1 -Balance 17.24 -Confirm  # submit real orders
+    .\scripts\run-trade.ps1 -Balance 17.24                      # full day, review only
+    .\scripts\run-trade.ps1 -Balance 17.24 -BuyOnly             # morning buy only, review only
+    .\scripts\run-trade.ps1 -SellOnly                           # close open position, review only
+    .\scripts\run-trade.ps1 -AutoDay -Confirm                   # wait for entry, buy, auto-sell (full automation)
+    .\scripts\run-trade.ps1 -Balance 17.24 -DryRun              # scan only, no browser
+    .\scripts\run-trade.ps1 -Balance 17.24 -Confirm             # submit real orders
 
     First-time setup (saves Wealthsimple session):
         python scripts/wealthsimple_auto.py setup
@@ -367,7 +367,63 @@ if ($BuyOnly) {
 }
 
 # =============================================================================
-# STEP 3 - Wait
+# STEP 3 - Auto-Sell (AutoDay mode)
+# =============================================================================
+if ($AutoDay -and -not $SellOnly) {
+    if (-not (Test-Path $posFile)) {
+        Send-TradeNotification -Event "error" -Message "No open position file found for sell."
+        Write-Error "No position file at $posFile - run buy first."
+        exit 1
+    }
+
+    $pos = Get-Content $posFile -Raw | ConvertFrom-Json
+    $Symbol = $pos.symbol
+    $Shares = [int]$pos.shares
+    $BuyCost = [double]($pos.estimatedCost)
+    $AllTimePnlBefore = Get-AllTimePnl
+
+    Write-Host ""
+    Write-Host "=== [3/4] AUTO-MONITOR $Symbol ==="
+    Send-TradeNotification -Event "info" -Symbol $Symbol -Shares $Shares -Message ("Auto-monitoring $Symbol with stop-loss/take-profit/trailing-stop.`nEntry: `$$($pos.buyPrice) CAD`nShares: $Shares`nAll-time P/L before: " + (Format-Money $AllTimePnlBefore) + " CAD")
+
+    $watchArgs = @("-m", "fashion_bot", "watch", "--position-file", $posFile)
+    if ($Confirm) { $watchArgs += "--confirm" }
+
+    $watchRun = Invoke-Automation -CommandArgs $watchArgs
+
+    if ($watchRun.exit -ne 0) {
+        Send-TradeNotification -Event "error" -Symbol $Symbol -Message "Auto-sell monitoring failed."
+        Write-Error "Auto-sell monitoring failed (exit $($watchRun.exit))."
+        exit $watchRun.exit
+    }
+
+    $sellResult = $watchRun.result
+    $sellValue = $null
+    $sellQuantity = $null
+    if ($sellResult) {
+        $sellQuantity = ConvertTo-NullableDouble $sellResult.estimated_quantity
+        $sellValue = ConvertTo-NullableDouble $sellResult.estimated_value
+    }
+    if ($null -eq $sellQuantity) { $sellQuantity = [double]$Shares }
+    if ($null -eq $sellValue) { $sellValue = $sellQuantity * [double]$pos.buyPrice }
+
+    $tradePnl = $sellValue - $BuyCost
+    if ($Confirm) {
+        Add-RealizedPnl -Symbol $Symbol -BuyCost $BuyCost -SellValue $sellValue -Quantity $sellQuantity
+    }
+
+    Remove-Item $posFile -ErrorAction SilentlyContinue
+    $allTimeAfter = Get-AllTimePnl
+
+    Write-Host ""
+    Write-Host "[OK] Auto-sold $Symbol. Position closed."
+    $msg = "Auto-sold $Symbol.`nEstimated proceeds: `$$($sellValue.ToString('0.00')) CAD`nTrade P/L: $(Format-Money $tradePnl) CAD`nAll-time P/L: $(Format-Money $allTimeAfter) CAD"
+    Send-TradeNotification -Event "sell_submitted" -Symbol $Symbol -Shares $Shares -Message $msg
+    exit 0
+}
+
+# =============================================================================
+# STEP 3 - Wait (legacy, for SellOnly / manual mode)
 # =============================================================================
 if (-not (Test-Path $posFile)) {
     Send-TradeNotification -Event "error" -Message "No open position file found for sell."
