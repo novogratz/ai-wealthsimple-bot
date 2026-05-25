@@ -51,24 +51,42 @@ def notify(msg: str, event: str = "info") -> None:
         log(f"  Telegram failed: {e}")
 
 
+def _next_entry_window() -> datetime:
+    """Return the next 09:30 ET on a weekday, skipping weekends."""
+    from datetime import timedelta
+    now = now_et()
+    candidate = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    if now >= candidate:
+        candidate += timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate += timedelta(days=1)
+    return candidate
+
+
 def wait_for_entry() -> None:
     while True:
         now = now_et()
         if now.weekday() >= 5:
-            log("Weekend - sleeping 10 min...")
-            time.sleep(600)
+            nxt = _next_entry_window()
+            secs = (nxt - now).total_seconds()
+            log(f"Weekend — next entry window {nxt:%a %b %d %H:%M} ET ({secs/3600:.1f}h away). Sleeping 30 min...")
+            time.sleep(1800)
             continue
         target = now.replace(hour=9, minute=30, second=0, microsecond=0)
         latest = now.replace(hour=9, minute=35, second=0, microsecond=0)
         if now < target:
             secs = (target - now).total_seconds()
-            log(f"Market opens in {secs / 60:.1f} min - waiting...")
+            log(f"Market opens in {secs/60:.1f} min — waiting...")
             time.sleep(min(secs, 300))
             continue
         if now > latest:
-            log("Entry window missed (past 09:35 ET). Use --now to override.")
-            sys.exit(1)
-        log("Entry window open - proceeding.")
+            # Past today's window — wait overnight for tomorrow
+            nxt = _next_entry_window()
+            secs = (nxt - now).total_seconds()
+            log(f"Today's entry window closed. Next window {nxt:%a %b %d %H:%M} ET ({secs/3600:.1f}h away). Sleeping 30 min...")
+            time.sleep(1800)
+            continue
+        log("Entry window open (09:30–09:35 ET) — proceeding.")
         return
 
 
@@ -88,12 +106,19 @@ def run_scan(balance: float) -> tuple[str, float, int]:
         sys.exit(1)
 
     pick = picks[0]
+    est_shares = balance / pick.last_price if pick.last_price > 0 else 0.0
     log(f"TOP PICK : {pick.symbol}")
     log(f"Price    : ${pick.last_price:.2f}")
-    log(f"Shares   : {pick.shares}")
+    log(f"Est. shares: ~{est_shares:.4f} (${balance:.2f} / ${pick.last_price:.2f})")
     log(f"Score    : {pick.score:.2f}")
     log(f"Reason   : {pick.reason}")
-    notify(f"Scan done. Buying {pick.symbol} @ ${pick.last_price:.2f} (max dollars, ~{pick.shares} shares est.)", event="scan_top")
+    notify(
+        f"🔍 <b>Scan done — Top pick: <code>{pick.symbol}</code></b>\n\n"
+        f"💵 Price: <b>${pick.last_price:.2f} CAD</b>\n"
+        f"🔢 Est. shares: <b>~{est_shares:.4f}</b>  (${balance:.2f} budget)\n"
+        f"📊 Score: {pick.score:.2f}  |  {pick.reason}",
+        event="scan_top",
+    )
     return pick.symbol, pick.last_price, pick.shares
 
 
@@ -232,13 +257,20 @@ def main() -> None:
         pos = json.loads(POS_FILE.read_text())
         symbol = pos["symbol"]
         entry = float(pos.get("buyPrice", 0))
+        cost = float(pos.get("estimatedCost", 0))
         shares = float(pos.get("shares", 0))
-        cost = float(pos.get("estimatedCost", entry * shares))
-        log(f"Resuming existing position: {symbol} (skipping scan + buy)")
+        # If shares looks like a bad integer estimate, re-derive from cost/price
+        if shares < 1.01 and cost > 0 and entry > 0:
+            derived = cost / entry
+            if derived > shares * 1.05:
+                shares = derived
+                log(f"Corrected share count from position file: {shares:.4f} ({cost:.2f}/{entry:.2f})")
+        log(f"Resuming existing position: {symbol} {shares:.4f} shares @ ${entry:.2f}")
         notify(
             f"▶️ <b>Bot restarted — resuming position</b>\n\n"
-            f"🎫 <code>{symbol}</code>  |  🔢 {shares:.4f} shares\n"
-            f"💵 Entry: ${entry:.2f} CAD  |  💰 Invested: ${cost:.2f} CAD\n"
+            f"🎫 <code>{symbol}</code>\n"
+            f"🔢 Shares held: <b>{shares:.4f}</b>\n"
+            f"💵 Entry: <b>${entry:.2f} CAD</b>  |  💰 Invested: <b>${cost:.2f} CAD</b>\n"
             f"⏰ Will sell at 15:55 ET\n\n"
             f"{at_color} All-time realized PnL: <b>${all_time_pnl:+.2f} CAD</b>",
             event="info",
