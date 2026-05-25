@@ -272,6 +272,13 @@ def cmd_balance(_args) -> None:
     with sync_playwright() as p:
         browser, ctx, page = open_browser(p)
         try:
+            # Detect expired session before wasting time
+            page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
+            page.wait_for_timeout(2000)
+            if page.locator('input[type="password"], input[placeholder*="Password" i]').first.is_visible(timeout=1500):
+                print("SESSION_EXPIRED: Wealthsimple session expired - run: python scripts/wealthsimple_auto.py setup")
+                sys.exit(1)
+
             balance = get_live_balance(page)
             if balance is not None:
                 print(f"LIVE_BALANCE_CAD:{balance:.2f}")
@@ -281,6 +288,11 @@ def cmd_balance(_args) -> None:
                 snap(page, "balance_fail")
                 sys.exit(1)
         finally:
+            # Always save session so cookies stay fresh
+            try:
+                save_session(ctx)
+            except Exception:
+                pass
             browser.close()
 
 

@@ -212,7 +212,7 @@ def fetch_live_balance(retries: int = 3) -> float | None:
             continue
 
         combined = result.stdout + result.stderr
-        if "session expired" in combined.lower() or "log in" in combined.lower():
+        if "session_expired" in combined.lower() or "session expired" in combined.lower():
             notify(
                 "❌ <b>Wealthsimple session expired</b>\n\n"
                 "Fix it now:\n"
