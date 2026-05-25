@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Full trading day: scan TSX -> browser buy -> autonomous sell (stop-loss / take-profit / trailing-stop / force-exit).
+    Full trading day: scan TSX -> browser buy 9:30-9:35 ET -> hold -> auto-sell before close.
     Uses Playwright automation with DOM selectors.
 
 .EXAMPLE
@@ -384,7 +384,7 @@ if ($AutoDay -and -not $SellOnly) {
 
     Write-Host ""
     Write-Host "=== [3/4] AUTO-MONITOR $Symbol ==="
-    Send-TradeNotification -Event "info" -Symbol $Symbol -Shares $Shares -Message ("Auto-monitoring $Symbol with stop-loss/take-profit/trailing-stop.`nEntry: `$$($pos.buyPrice) CAD`nShares: $Shares`nAll-time P/L before: " + (Format-Money $AllTimePnlBefore) + " CAD")
+    Send-TradeNotification -Event "info" -Symbol $Symbol -Shares $Shares -Message ("Holding $Symbol until close.`nEntry: `$$($pos.buyPrice) CAD`nShares: $Shares`nAll-time P/L before: " + (Format-Money $AllTimePnlBefore) + " CAD")
 
     $watchArgs = @("-m", "fashion_bot", "watch", "--position-file", $posFile)
     if ($Confirm) { $watchArgs += "--confirm" }

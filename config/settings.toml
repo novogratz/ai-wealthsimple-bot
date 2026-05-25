@@ -2,7 +2,7 @@
 timezone = "America/Toronto"
 market_open = "09:30"
 market_close = "16:00"
-latest_entry = "10:00"
+latest_entry = "09:35"
 force_exit = "15:45"
 
 [risk]

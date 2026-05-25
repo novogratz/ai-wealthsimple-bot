@@ -11,7 +11,6 @@ class Position:
     symbol: str
     shares: int
     entry_price: float
-    peak_price: float
     opened_at: str
 
 
@@ -33,13 +32,9 @@ class PaperBroker:
         if shares < 1 or cost > self.cash:
             return "Paper buy skipped: insufficient cash."
         self.cash -= cost
-        self.position = Position(symbol, shares, price, price, datetime.now().isoformat())
+        self.position = Position(symbol, shares, price, datetime.now().isoformat())
         self._record("BUY", symbol, shares, price, note)
         return f"Paper BUY {shares} {symbol} at ${price:.2f}; cash ${self.cash:.2f}."
-
-    def mark(self, price: float) -> None:
-        if self.position is not None:
-            self.position.peak_price = max(self.position.peak_price, price)
 
     def sell(self, price: float, note: str) -> str:
         if self.position is None:

@@ -143,9 +143,7 @@ def cmd_quote(args: argparse.Namespace) -> int:
 
 def cmd_watch(args: argparse.Namespace) -> int:
     strategy = build_strategy()
-    settings = strategy.settings
-    risk = settings.risk
-    trading = settings.trading
+    trading = strategy.settings.trading
 
     pos_file = args.position_file.resolve()
     if not pos_file.exists():
@@ -155,23 +153,17 @@ def cmd_watch(args: argparse.Namespace) -> int:
     pos = json.loads(pos_file.read_text())
     symbol = pos["symbol"]
     entry_price = float(pos.get("buyPrice", 0))
-    peak_price = float(pos.get("peakPrice", entry_price))
     shares = int(pos.get("shares", 0))
     buy_cost = float(pos.get("estimatedCost", entry_price * shares))
 
     auto_script = ROOT / "scripts" / "wealthsimple_auto.py"
     confirm = args.confirm
-    stop_loss_price = entry_price * (1.0 - risk.stop_loss_pct)
-    take_profit_price = entry_price * (1.0 + risk.take_profit_pct)
 
-    print(f"Watching {symbol}:  entry=${entry_price:.2f}  shares={shares}", flush=True)
-    print(f"  Stop loss:    ${stop_loss_price:.2f}", flush=True)
-    print(f"  Take profit:  ${take_profit_price:.2f}", flush=True)
-    print(f"  Trailing:     {risk.trailing_stop_pct * 100:.1f}% from peak", flush=True)
-    print(f"  Force exit:   after {trading.force_exit} ET", flush=True)
+    print(f"Holding {symbol}:  entry=${entry_price:.2f}  shares={shares}", flush=True)
+    print(f"  Selling after {trading.force_exit} ET", flush=True)
 
     try:
-        text = trade_message("info", message=f"Started monitoring {symbol}. Entry: ${entry_price:.2f}")
+        text = trade_message("info", message=f"Holding {symbol} until close. Entry: ${entry_price:.2f}")
         send_message(text)
     except (TelegramConfigError, RuntimeError):
         pass
@@ -196,31 +188,14 @@ def cmd_watch(args: argparse.Namespace) -> int:
             time.sleep(60)
             continue
 
-        new_peak = max(peak_price, last_price)
-        if new_peak > peak_price:
-            peak_price = new_peak
-            pos["peakPrice"] = peak_price
-            pos_file.write_text(json.dumps(pos, indent=2))
-
-        reason = None
-        if last_price <= stop_loss_price:
-            reason = f"stop loss  (${last_price:.2f} <= ${stop_loss_price:.2f})"
-        elif last_price >= take_profit_price:
-            reason = f"take profit  (${last_price:.2f} >= ${take_profit_price:.2f})"
-        elif last_price <= peak_price * (1.0 - risk.trailing_stop_pct):
-            trail_price = peak_price * (1.0 - risk.trailing_stop_pct)
-            reason = f"trailing stop  (${last_price:.2f} <= ${trail_price:.2f}, peak=${peak_price:.2f})"
-        elif should_force_exit(now, trading):
-            reason = f"force exit near close  (${last_price:.2f})"
-
-        if reason:
+        if should_force_exit(now, trading):
             estimated_sell_value = shares * last_price
             pnl = estimated_sell_value - buy_cost
-            print(f"\nSELL SIGNAL: {reason}", flush=True)
+            print(f"\nSELL SIGNAL: force exit near close  (${last_price:.2f})", flush=True)
             print(f"Price: ${last_price:.2f}  Estimated PnL: ${pnl:.2f}", flush=True)
 
             try:
-                text = trade_message("info", message=f"Auto-selling {symbol}: {reason}")
+                text = trade_message("info", message=f"Force-exiting {symbol} near close")
                 send_message(text)
             except (TelegramConfigError, RuntimeError):
                 pass
@@ -241,7 +216,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
             if result.returncode != 0:
                 print(f"Sell automation failed (exit {result.returncode})", flush=True)
                 try:
-                    text = trade_message("error", message=f"Sell automation failed for {symbol}: {reason}")
+                    text = trade_message("error", message=f"Sell automation failed for {symbol}")
                     send_message(text)
                 except (TelegramConfigError, RuntimeError):
                     pass
@@ -250,17 +225,15 @@ def cmd_watch(args: argparse.Namespace) -> int:
             print(f"\nPosition closed. PnL: ${pnl:.2f}", flush=True)
             try:
                 text = trade_message("info", symbol=symbol, shares=shares, price=last_price,
-                                     message=f"Auto-sold {symbol}. PnL: ${pnl:.2f}")
+                                     message=f"Sold {symbol}. PnL: ${pnl:.2f}")
                 send_message(text)
             except (TelegramConfigError, RuntimeError):
                 pass
             return 0
 
         pnl_pct = (last_price - entry_price) / entry_price * 100
-        trail_pct = (1.0 - last_price / peak_price) * 100
-        print(f"{now:%H:%M} ET | ${last_price:.2f} ({pnl_pct:+.2f}%) | peak=${peak_price:.2f} | trail={trail_pct:.1f}%", flush=True)
-
-        time.sleep(args.interval if not should_force_exit(now, trading) else 30)
+        print(f"{now:%H:%M} ET | ${last_price:.2f} ({pnl_pct:+.2f}%)", flush=True)
+        time.sleep(args.interval)
 
 
 def main() -> None:
@@ -310,7 +283,7 @@ def main() -> None:
     quote.add_argument("--json", action="store_true", help="print machine-readable JSON")
     quote.set_defaults(func=cmd_quote)
 
-    watch = sub.add_parser("watch", help="monitor a live position and auto-sell on exit conditions")
+    watch = sub.add_parser("watch", help="hold a live position and auto-sell near close")
     watch.add_argument("--position-file", type=Path, default=ROOT / "data" / "open_position.json")
     watch.add_argument("--interval", type=int, default=60, help="seconds between price checks")
     watch.add_argument("--confirm", action="store_true", help="submit sell order automatically")
