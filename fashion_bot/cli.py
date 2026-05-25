@@ -341,21 +341,54 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
             sell_args = [sys.executable or "python", str(auto_script), "sell", "--symbol", symbol, "--sell-all"]
             print(f"Running: {' '.join(sell_args)}", flush=True)
-            result = subprocess.run(sell_args, timeout=180)
 
-            if result.returncode != 0:
-                print(f"Sell automation failed (exit {result.returncode})", flush=True)
+            MAX_SELL_RETRIES = 3
+            result = None
+            for attempt in range(1, MAX_SELL_RETRIES + 1):
+                result = subprocess.run(sell_args, capture_output=True, text=True, timeout=180)
+                for line in result.stdout.splitlines():
+                    print(f"  {line}", flush=True)
+                if result.returncode == 0:
+                    break
+                print(f"Sell attempt {attempt}/{MAX_SELL_RETRIES} failed (exit {result.returncode})", flush=True)
+                if attempt < MAX_SELL_RETRIES:
+                    try:
+                        send_message(trade_message("error", message=f"⚠️ Sell attempt {attempt}/{MAX_SELL_RETRIES} failed for {symbol}. Retrying in 60s..."))
+                    except (TelegramConfigError, RuntimeError):
+                        pass
+                    time.sleep(60)
+
+            if result is None or result.returncode != 0:
+                print("All sell attempts failed.", flush=True)
                 try:
-                    send_message(trade_message("error", message=f"❌ Sell automation failed for {symbol}. Check browser."))
+                    send_message(trade_message("error", message=f"❌ All {MAX_SELL_RETRIES} sell attempts failed for {symbol}. Restart bot to retry."))
                 except (TelegramConfigError, RuntimeError):
                     pass
                 return 1
 
-            all_time_pnl = _record_and_get_total_pnl(symbol, buy_cost, shares * last_price, shares)
+            # Parse actual fill from ORDER_RESULT_JSON for accurate PnL
+            actual_price = last_price
+            actual_qty = shares
+            for line in result.stdout.splitlines():
+                if line.startswith("ORDER_RESULT_JSON:"):
+                    try:
+                        data = json.loads(line[len("ORDER_RESULT_JSON:"):])
+                        if data.get("estimated_quantity"):
+                            actual_qty = float(data["estimated_quantity"])
+                        if data.get("estimated_value") and actual_qty > 0:
+                            actual_price = float(data["estimated_value"]) / actual_qty
+                    except Exception:
+                        pass
+
+            actual_proceeds = actual_qty * actual_price
+            trade_pnl = actual_proceeds - buy_cost
+            trade_pnl_pct = trade_pnl / buy_cost * 100
+
+            all_time_pnl = _record_and_get_total_pnl(symbol, buy_cost, actual_proceeds, actual_qty)
             pos_file.unlink(missing_ok=True)
-            print(f"\nPosition closed. Trade PnL: ${unrealized_pnl:+.2f}  All-time: ${all_time_pnl:+.2f}", flush=True)
+            print(f"\nPosition closed. Trade PnL: ${trade_pnl:+.2f}  All-time: ${all_time_pnl:+.2f}", flush=True)
             try:
-                send_message(_msg_sold(symbol, last_price, shares, buy_cost, unrealized_pnl, pnl_pct, all_time_pnl))
+                send_message(_msg_sold(symbol, actual_price, actual_qty, buy_cost, trade_pnl, trade_pnl_pct, all_time_pnl))
             except (TelegramConfigError, RuntimeError):
                 pass
             return 0

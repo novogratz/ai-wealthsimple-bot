@@ -155,6 +155,35 @@ def run_buy(symbol: str, price: float, shares_est: int) -> None:
     )
 
 
+def fetch_live_balance() -> float | None:
+    log("Fetching live balance from Wealthsimple...")
+    result = subprocess.run(
+        [PYTHON, str(AUTO_SCRIPT), "balance"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    for line in result.stdout.splitlines():
+        if line.startswith("LIVE_BALANCE_CAD:"):
+            try:
+                return float(line[len("LIVE_BALANCE_CAD:"):].replace(",", ""))
+            except ValueError:
+                pass
+    return None
+
+
+def cleanup_screenshots() -> None:
+    removed = list(DATA.glob("screen_*.png"))
+    for f in removed:
+        try:
+            f.unlink()
+        except Exception:
+            pass
+    if removed:
+        log(f"Cleared {len(removed)} old screenshot(s).")
+
+
 def run_watch() -> None:
     log("Watch loop started - checking price every 60s, selling at 15:55 ET...")
     result = subprocess.run(
@@ -170,12 +199,25 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Full trading day: scan -> buy -> hold -> sell at 15:55 ET"
     )
-    parser.add_argument("--balance", type=float, default=17.24, help="Cash to deploy in CAD")
+    parser.add_argument("--balance", type=float, default=None, help="Cash to deploy in CAD (default: fetch live from Wealthsimple)")
     parser.add_argument("--now", action="store_true", help="Skip the 09:30 ET wait")
     args = parser.parse_args()
 
     log("=== Fashion Bot - Full Day ===")
-    log(f"Balance: ${args.balance:.2f} CAD | Auto-sell at: 15:55 ET")
+    cleanup_screenshots()
+
+    if args.balance is not None:
+        balance = args.balance
+        log(f"Balance: ${balance:.2f} CAD (manual override)")
+    else:
+        balance = fetch_live_balance()
+        if balance is None:
+            log("Could not fetch live balance — defaulting to $17.24 CAD")
+            balance = 17.24
+        else:
+            log(f"Live balance: ${balance:.2f} CAD")
+
+    log(f"Budget: ${balance:.2f} CAD | Auto-sell at: 15:55 ET")
 
     from fashion_bot.cli import _get_total_pnl
     all_time_pnl = _get_total_pnl()
@@ -203,7 +245,7 @@ def main() -> None:
 
     notify(
         f"🤖 <b>Fashion Bot started</b>\n\n"
-        f"💼 Budget: <b>${args.balance:.2f} CAD</b>\n"
+        f"💼 Budget: <b>${balance:.2f} CAD</b>\n"
         f"⏰ Entry window: <b>09:30–09:35 ET</b>\n"
         f"🏁 Auto-sell at: <b>15:55 ET</b>\n\n"
         f"{at_color} All-time realized PnL: <b>${all_time_pnl:+.2f} CAD</b>",
@@ -213,7 +255,7 @@ def main() -> None:
     if not args.now:
         wait_for_entry()
 
-    symbol, price, shares = run_scan(args.balance)
+    symbol, price, shares = run_scan(balance)
     run_buy(symbol, price, shares)
     run_watch()
     log("Done. Check data/screen_sell_done.png to verify the sell.")
