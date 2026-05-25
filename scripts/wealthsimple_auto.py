@@ -314,7 +314,7 @@ def save_session(ctx) -> None:
         pass  # persistent context already saved to PROFILE_DIR
 
 
-def navigate_to_stock(page, ws_symbol: str) -> None:
+def navigate_to_stock(page, ws_symbol: str):
     print("Loading Wealthsimple home...")
     page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
     page.wait_for_timeout(3000)
@@ -323,37 +323,59 @@ def navigate_to_stock(page, ws_symbol: str) -> None:
     if page.locator('input[type="password"], input[placeholder*="Password" i]').first.is_visible(timeout=1000):
         raise RuntimeError("Wealthsimple session expired - run: python scripts/wealthsimple_auto.py setup")
 
-    print(f"Searching for {ws_symbol}...")
-    search = first_visible(page, [
-        '[aria-label*="Search" i]',
-        '[placeholder*="Search" i]',
-        'input[type="search"]',
-        '[data-testid*="search"]',
-    ])
-    if search is None:
-        snap(page, "search_not_found")
-        raise RuntimeError("Search box not found - see data/screen_search_not_found.png")
+    # Navigate directly to the trade URL — much more reliable than search UI
+    print(f"Navigating to {ws_symbol} trade page...")
+    ctx = page.context
+    trade_url = f"https://my.wealthsimple.com/app/trade/{ws_symbol}"
+    page.goto(trade_url, wait_until="domcontentloaded", timeout=30_000)
+    page.wait_for_timeout(3000)
 
-    search.click()
-    page.wait_for_timeout(400)
-    page.keyboard.type(ws_symbol, delay=90)
-    page.wait_for_timeout(2200)
-    snap(page, "search_results")
+    # If WS redirected away (e.g. to home or search), fall back to search UI
+    if ws_symbol.upper() not in page.url.upper():
+        print(f"  Direct URL redirected to {page.url} — trying search...")
+        page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
+        page.wait_for_timeout(2000)
 
-    clicked = click_first(page, [
-        '[data-testid*="search-result"]',
-        '[data-testid*="result"]',
-        'a[href*="/app/trade"]',
-        'a[href*="/stock"]',
-        '[class*="SearchResult"]',
-        '[class*="search-result"]',
-    ])
-    if not clicked:
-        print("  Falling back to Enter key...")
-        page.keyboard.press("Enter")
+        search = first_visible(page, [
+            '[aria-label*="Search" i]',
+            '[placeholder*="Search" i]',
+            'input[type="search"]',
+            '[data-testid*="search"]',
+        ])
+        if search is None:
+            snap(page, "search_not_found")
+            raise RuntimeError("Search box not found")
 
-    page.wait_for_timeout(4000)
+        # Track pages before so we can catch a new tab opening
+        pages_before = set(id(p) for p in ctx.pages)
+        search.click()
+        page.wait_for_timeout(400)
+        page.keyboard.type(ws_symbol, delay=90)
+        page.wait_for_timeout(2200)
+        snap(page, "search_results")
+
+        clicked = click_first(page, [
+            '[data-testid*="search-result"]',
+            '[data-testid*="result"]',
+            f'a[href*="{ws_symbol}"]',
+            'a[href*="/app/trade"]',
+            '[class*="SearchResult"]',
+            '[class*="search-result"]',
+        ])
+        if not clicked:
+            page.keyboard.press("Enter")
+
+        page.wait_for_timeout(3000)
+
+        # If a new tab opened, switch to it
+        new_pages = [p for p in ctx.pages if id(p) not in pages_before]
+        if new_pages:
+            page = new_pages[-1]
+            page.bring_to_front()
+            page.wait_for_timeout(2000)
+
     snap(page, "stock_page")
+    return page
 
 
 def choose_unregistered_account(page, side: str) -> None:
@@ -500,7 +522,7 @@ def place_order(
         # Use JS click to bypass chat-widget overlay that intercepts pointer events
         submitted_via_js = page.evaluate("""
             () => {
-                const texts = ['Submit order', 'Place order', 'Place Order', 'Confirm', 'Submit'];
+                const texts = ['Submit order', 'Place order', 'Place Order', 'Queue order', 'Confirm', 'Submit'];
                 const buttons = [...document.querySelectorAll('button')];
                 for (const text of texts) {
                     const btn = buttons.find(b => b.textContent.trim() === text || b.textContent.trim().startsWith(text));
@@ -588,7 +610,7 @@ def cmd_buy(args) -> None:
     with sync_playwright() as p:
         ctx, page = open_browser(p)
         try:
-            navigate_to_stock(page, strip_exchange(args.symbol))
+            page = navigate_to_stock(page, strip_exchange(args.symbol))
             result = place_order(
                 page,
                 "buy",
@@ -617,7 +639,7 @@ def cmd_sell(args) -> None:
     with sync_playwright() as p:
         ctx, page = open_browser(p)
         try:
-            navigate_to_stock(page, strip_exchange(args.symbol))
+            page = navigate_to_stock(page, strip_exchange(args.symbol))
             result = place_order(page, "sell", args.shares, None, confirm=True, sell_all=args.sell_all)
             result["symbol"] = args.symbol
             label = "all shares" if args.sell_all else f"{args.shares} shares"
