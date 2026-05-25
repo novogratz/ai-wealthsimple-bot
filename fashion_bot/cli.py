@@ -259,7 +259,19 @@ def cmd_balance(args: argparse.Namespace) -> int:
     balance = float(match.group(1))
     print(f"Live Balance: ${balance:.2f} CAD")
     
-    msg = f"Current Portfolio Status:\n💵 Unregistered Cash: ${balance:.2f} CAD\n✅ Live from Wealthsimple"
+    # Also fetch PnL to include in the same update
+    pnl_file = ROOT / "data" / "pnl_ledger.json"
+    pnl_info = ""
+    if pnl_file.exists():
+        try:
+            trades = json.loads(pnl_file.read_text())
+            total_pnl = sum(trade.get("realizedPnl", 0) for trade in trades)
+            trade_count = len(trades)
+            pnl_info = f"\n📊 <b>Overall PnL:</b> ${total_pnl:+.2f} CAD ({trade_count} trades)"
+        except Exception:
+            pass
+
+    msg = f"<b>Current Portfolio Status</b>\n💵 Unregistered Cash: ${balance:.2f} CAD{pnl_info}\n✅ Live from Wealthsimple"
     try:
         send_message(trade_message("info", message=msg))
         print("Telegram notification sent.")
@@ -283,8 +295,8 @@ def cmd_pnl(args: argparse.Namespace) -> int:
         print(f"Total Realized PnL: ${total_pnl:.2f} CAD ({trade_count} trades)")
         
         if args.notify:
-            status = "🚀 BIG WIN" if total_pnl > 0 else "📉 BIG LOSE" if total_pnl < 0 else "ℹ️ INFO"
-            msg = f"{status}\n\n📊 **Overall Portfolio Performance**\n💰 Total Realized PnL: ${total_pnl:+.2f} CAD\n🔢 Total Trades: {trade_count}"
+            status = "🚀 <b>BIG WIN</b>" if total_pnl > 0 else "📉 <b>BIG LOSE</b>" if total_pnl < 0 else "ℹ️ <b>INFO</b>"
+            msg = f"{status}\n\n📊 <b>Overall Portfolio Performance</b>\n💰 Total Realized PnL: ${total_pnl:+.2f} CAD\n🔢 Total Trades: {trade_count}"
             send_message(trade_message("info", message=msg))
             print("Telegram notification sent.")
             

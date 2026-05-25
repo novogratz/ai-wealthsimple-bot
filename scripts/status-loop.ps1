@@ -12,11 +12,8 @@ while ($true) {
     $now = Get-Date -Format "HH:mm:ss"
     Write-Host "[$now] Updating status..."
     
-    # 1. Fetch live balance (this also sends a Telegram update)
+    # Fetch live balance (now includes overall PnL and sends a single Telegram update)
     & $python -m fashion_bot balance
-    
-    # 2. Calculate and send PnL update
-    & $python -m fashion_bot pnl --notify
     
     Write-Host "Waiting $IntervalMinutes minutes..."
     Start-Sleep -Seconds ($IntervalMinutes * 60)

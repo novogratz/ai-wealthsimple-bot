@@ -63,6 +63,7 @@ def send_message(
         {
             "chat_id": cfg.chat_id,
             "text": text,
+            "parse_mode": "HTML",
             "disable_web_page_preview": "true",
         }
     ).encode("utf-8")
@@ -91,38 +92,33 @@ def trade_message(
     timestamp: datetime | None = None,
 ) -> str:
     labels = {
-        "scan_candidates": "🔍 Potential purchase candidates",
-        "scan_top": "💎 Top scan candidate",
-        "buy_preparing": "📝 Preparing buy ticket",
-        "buy_review": "👀 Buy ticket ready for review",
-        "buy_submitted": "🟢 Buy order submitted",
-        "sell_preparing": "📝 Preparing sell ticket",
-        "sell_review": "👀 Sell ticket ready for review",
-        "sell_submitted": "🔴 Sell order submitted",
-        "error": "⚠️ Trading assistant error",
-        "info": "ℹ️ Trading assistant update",
+        "scan_candidates": "🔍 <b>Potential purchase candidates</b>",
+        "scan_top": "💎 <b>Top scan candidate</b>",
+        "buy_preparing": "📝 <b>Preparing buy ticket</b>",
+        "buy_review": "👀 <b>Buy ticket ready for review</b>",
+        "buy_submitted": "🟢 <b>Buy order submitted</b>",
+        "sell_preparing": "📝 <b>Preparing sell ticket</b>",
+        "sell_review": "👀 <b>Sell ticket ready for review</b>",
+        "sell_submitted": "🔴 <b>Sell order submitted</b>",
+        "error": "⚠️ <b>Trading assistant error</b>",
+        "info": "ℹ️ <b>Trading assistant update</b>",
     }
     
     # Custom headers for big moves if the message contains win/loss keywords
-    custom_header = None
+    custom_header = ""
     if message:
         if "PnL: +$" in message or "BIG WIN" in message.upper():
-            custom_header = "🚀 💰 BIG WIN! 💰 🚀"
+            custom_header = "🚀 💰 <b>BIG WIN!</b> 💰 🚀\n\n"
         elif "PnL: -$" in message or "BIG LOSE" in message.upper():
-            custom_header = "📉 ⚠️ BIG LOSE! ⚠️ 📉"
+            custom_header = "📉 ⚠️ <b>BIG LOSE!</b> ⚠️ 📉\n\n"
 
-    label = labels.get(event, event.replace("_", " ").title())
+    label = labels.get(event, f"<b>{event.replace('_', ' ').title()}</b>")
     when = (timestamp or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
 
-    lines = []
-    if custom_header:
-        lines.append(custom_header)
-        lines.append("")
-    
-    lines.extend([f"**{label}**", f"⏰ Time: {when}"])
+    lines = [f"{custom_header}{label}", f"⏰ Time: {when}"]
     
     if symbol:
-        lines.append(f"🎫 Symbol: {symbol}")
+        lines.append(f"🎫 Symbol: <code>{symbol}</code>")
     if shares is not None:
         lines.append(f"🔢 Shares: {shares}")
     if price is not None:
@@ -130,6 +126,8 @@ def trade_message(
     
     if message:
         lines.append("")
-        lines.append(f"💬 {message}")
+        # Replace Markdown bold with HTML bold if any remains
+        clean_message = message.replace("**", "<b>").replace("**", "</b>")
+        lines.append(f"💬 {clean_message}")
         
     return "\n".join(lines)
