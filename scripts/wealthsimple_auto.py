@@ -368,37 +368,49 @@ def choose_unregistered_account(page, side: str) -> None:
 
     page.wait_for_timeout(900)
     snap(page, f"{side}_acct_picker")
-    
-    # Try to find the account row by name
-    selected = False
-    account_names = ["Unregistered", "Non-registered", "Personal"]
-    for name in account_names:
+
+    # Find the Non-registered account with the highest CAD balance.
+    # There are often multiple Non-registered accounts — pick the richest one.
+    account_labels = ["Non-registered", "Unregistered", "Personal"]
+    best_balance = -1.0
+    best_el = None
+
+    for label in account_labels:
         try:
-            # Look for a button or role="option" that contains the name
-            el = page.locator(f'button:has-text("{name}"), [role="option"]:has-text("{name}"), li:has-text("{name}")').first
-            if el.is_visible(timeout=2000):
-                el.click()
-                selected = True
-                print(f"  Selected account by name: {name}")
-                break
+            els = page.locator(
+                f'[role="option"]:has-text("{label}"), li:has-text("{label}"), button:has-text("{label}")'
+            ).all()
+            for el in els:
+                try:
+                    if not el.is_visible(timeout=500):
+                        continue
+                    text = el.inner_text()
+                    m = re.search(r'\$([0-9,]+\.?\d*)\s*CAD', text)
+                    bal = float(m.group(1).replace(",", "")) if m else 0.0
+                    if bal > best_balance:
+                        best_balance = bal
+                        best_el = el
+                except Exception:
+                    pass
         except Exception:
             pass
-            
-    if not selected:
-        # Fallback to the balance-based clicks if name search fails
-        for text in ["$111.11", "$100.64", "$100.00", "CAD"]:
-            try:
-                if click_account_row_by_balance(page, text):
-                    selected = True
-                    print(f"  Selected account by balance text: {text}")
-                    break
-            except Exception:
-                pass
 
-    if not selected:
-        snap(page, f"{side}_acct_fail")
-        raise RuntimeError(f"Unregistered account not found - see data/screen_{side}_acct_fail.png")
-    page.wait_for_timeout(600)
+    if best_el is not None:
+        try:
+            # Try clicking the radio button inside the row first
+            radio = best_el.locator('input[type="radio"]').first
+            if radio.is_visible(timeout=500):
+                radio.click()
+            else:
+                best_el.click()
+            print(f"  Selected Non-registered account (${best_balance:.2f} CAD)")
+            page.wait_for_timeout(700)
+            return
+        except Exception:
+            pass
+
+    snap(page, f"{side}_acct_fail")
+    raise RuntimeError(f"Unregistered account not found - see data/screen_{side}_acct_fail.png")
 
 
 def place_order(
