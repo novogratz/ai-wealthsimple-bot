@@ -119,7 +119,19 @@ def run_buy(symbol: str, price: float, shares: int) -> None:
     }
     POS_FILE.write_text(json.dumps(pos))
     log(f"Buy submitted. Holding until 15:55 ET.")
-    notify(f"Bought {symbol} @ ${price:.2f}. Holding until 15:55 ET.", event="buy_submitted")
+
+    from fashion_bot.cli import _get_total_pnl
+    all_time_pnl = _get_total_pnl()
+    at_color = "🟢" if all_time_pnl >= 0 else "🔴"
+    notify(
+        f"🛒 Bought <code>{symbol}</code>\n\n"
+        f"🔢 Shares: <b>{shares}</b>\n"
+        f"💵 Entry: <b>${price:.2f} CAD/share</b>\n"
+        f"💰 Total invested: <b>${price * shares:.2f} CAD</b>\n"
+        f"⏰ Auto-sell at: <b>15:55 ET</b>\n\n"
+        f"{at_color} All-time realized PnL: <b>${all_time_pnl:+.2f} CAD</b>",
+        event="buy_submitted"
+    )
 
 
 def run_sell(symbol: str, price: float, shares: int, buy_cost: float) -> None:
@@ -161,6 +173,16 @@ def main() -> None:
 
     log("=== Fashion Bot - Full Day ===")
     log(f"Balance: ${args.balance:.2f} CAD | Auto-sell at: 15:55 ET")
+
+    # Resume existing position instead of re-buying on restart
+    if POS_FILE.exists():
+        pos = json.loads(POS_FILE.read_text())
+        symbol = pos["symbol"]
+        log(f"Resuming existing position: {symbol} (skipping scan + buy)")
+        notify(f"▶️ Resuming open position in {symbol} — going straight to watch loop.", event="info")
+        run_watch()
+        log("Done.")
+        return
 
     if not args.now:
         wait_for_entry()
