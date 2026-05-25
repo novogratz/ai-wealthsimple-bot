@@ -41,6 +41,88 @@ def log(msg: str) -> None:
     print(f"[{now_et():%H:%M:%S} ET] {msg}", flush=True)
 
 
+def build_status_telegram(balance: float | None) -> str:
+    """Build the status message for Telegram (HTML)."""
+    pnl_file = DATA / "pnl_ledger.json"
+    trades = []
+    if pnl_file.exists():
+        try:
+            trades = json.loads(pnl_file.read_text())
+        except Exception:
+            pass
+
+    total_pnl  = sum(t.get("realizedPnl", 0) for t in trades)
+    total_cost = sum(t.get("buyCost", 0) for t in trades)
+    wins       = sum(1 for t in trades if t.get("realizedPnl", 0) > 0)
+    losses     = sum(1 for t in trades if t.get("realizedPnl", 0) < 0)
+    n          = len(trades)
+    win_rate   = (wins / n * 100) if n else 0.0
+    roi        = (total_pnl / total_cost * 100) if total_cost else 0.0
+    pnl_emoji  = "🟢" if total_pnl >= 0 else "🔴"
+    pnl_sign   = "+" if total_pnl >= 0 else ""
+
+    pos_line = "None"
+    if POS_FILE.exists():
+        try:
+            pos = json.loads(POS_FILE.read_text())
+            pos_line = (
+                f"<code>{pos['symbol']}</code>  "
+                f"{pos.get('shares', 0):.4f} sh @ ${pos.get('buyPrice', 0):.2f}"
+            )
+        except Exception:
+            pos_line = "Error reading position"
+
+    bal_str = f"<b>${balance:.2f} CAD</b>" if balance is not None else "<i>unknown</i>"
+
+    recent = ""
+    for t in trades[-5:]:
+        pnl  = t.get("realizedPnl", 0)
+        sym  = t.get("symbol", "?")
+        sign = "+" if pnl >= 0 else ""
+        emoji = "🟢" if pnl >= 0 else "🔴"
+        ts   = t.get("time", "")[:10]
+        recent += f"\n  {emoji} <code>{sym}</code>  {sign}{pnl:.2f} CAD   {ts}"
+
+    now = now_et()
+    nxt = _next_entry_window()
+    if now.weekday() >= 5:
+        next_event = f"Buy at {nxt:%a %b %d %H:%M} ET"
+    elif now.hour < 9 or (now.hour == 9 and now.minute < 31):
+        mins = int((now.replace(hour=9, minute=31, second=0, microsecond=0) - now).total_seconds() // 60)
+        next_event = f"Buy today at 09:31 ET  ({mins} min away)"
+    elif now.hour < 16:
+        next_event = "Sell today at 15:55 ET"
+    else:
+        next_event = f"Buy at {nxt:%a %b %d %H:%M} ET"
+
+    lines = [
+        "📊 <b>Fashion Bot — Status</b>",
+        "",
+        f"💰 Balance:      {bal_str}",
+        f"{pnl_emoji} All-time PnL:  <b>{pnl_sign}{total_pnl:.2f} CAD</b>  ({roi:+.2f}% ROI)",
+        f"🏆 Record:       <b>{wins}W / {losses}L</b>  ({win_rate:.0f}% win rate)",
+        f"📈 Total trades: <b>{n}</b>",
+        "",
+        f"📂 Open position: {pos_line}",
+        f"⏭ Next action:  {next_event}",
+    ]
+    if recent:
+        lines += ["", "🕐 <b>Last 5 trades:</b>" + recent]
+
+    return "\n".join(lines)
+
+
+def notify_status(balance: float | None) -> None:
+    """Send status update to Telegram."""
+    try:
+        send_message(build_status_telegram(balance))
+        log("  Status sent to Telegram.")
+    except TelegramConfigError as e:
+        log(f"  Telegram not configured: {e}")
+    except Exception as e:
+        log(f"  Telegram status failed: {e}")
+
+
 def print_status_banner(balance: float | None) -> None:
     pnl_file = DATA / "pnl_ledger.json"
     trades = []
@@ -399,40 +481,50 @@ def _passed(now: "datetime", hour: int, minute: int) -> bool:
     return now >= t
 
 
-def wait_for_open_with_scans(scans_done: set[str]) -> None:
+def wait_for_open_with_scans(scans_done: set[str], last_status: list) -> None:
     """
-    Sleep until the 09:30 ET entry window, firing scheduled scans along the way.
-    scans_done tracks which slots have already fired this cycle (mutated in place).
+    Sleep until the 09:31 ET entry window, firing scheduled scans and status pings.
+    scans_done tracks which slots fired this cycle (mutated in place).
+    last_status is a one-element list holding the monotonic time of the last status ping.
     """
-    # Immediate startup scan if we haven't done one this cycle
+    # Immediate startup scan + status
     if "startup" not in scans_done:
         run_overnight_analysis("startup")
+        notify_status(None)
+        last_status[0] = time.monotonic()
         scans_done.add("startup")
 
     while True:
         now = now_et()
         # Within 5 min of 9:31 on a weekday → stop waiting, go buy
         target_open = now.replace(hour=9, minute=31, second=0, microsecond=0)
-        secs_to_open = (target_open - now).total_seconds()
-        if now.weekday() < 5 and 0 <= secs_to_open <= 300:
+        if now.weekday() < 5 and 0 <= (target_open - now).total_seconds() <= 300:
             break
 
-        # 5 PM post-close scan
+        # 5 PM post-close scan + status
         if _passed(now, 17, 0) and "5pm" not in scans_done:
             run_overnight_analysis("5pm")
+            notify_status(None)
+            last_status[0] = time.monotonic()
             scans_done.add("5pm")
 
-        # 6 AM pre-market confirmation
+        # 6 AM pre-market confirmation + status
         if _passed(now, 6, 0) and "6am" not in scans_done:
             run_overnight_analysis("6am")
+            notify_status(None)
+            last_status[0] = time.monotonic()
             scans_done.add("6am")
+
+        # Every 4 hours send a status ping even if no scan fired
+        if time.monotonic() - last_status[0] >= 4 * 3600:
+            notify_status(None)
+            last_status[0] = time.monotonic()
 
         # Reset slots at midnight so they fire again next cycle
         if now.hour == 0 and now.minute < 1:
             scans_done.discard("5pm")
             scans_done.discard("6am")
 
-        # Log status every 30 min
         if now.minute % 30 == 0 and now.second < 60:
             nxt = _next_entry_window()
             log(f"Waiting for market open — next entry {nxt:%a %b %d %H:%M} ET")
@@ -490,10 +582,11 @@ def main() -> None:
     # Main loop — runs forever: overnight scans → wait for 9:30 → buy → sell → repeat
     skip_wait = args.now
     scans_done: set[str] = set()
+    last_status: list = [0.0]
 
     while True:
         if not skip_wait:
-            wait_for_open_with_scans(scans_done)
+            wait_for_open_with_scans(scans_done, last_status)
             wait_for_entry()
 
         skip_wait = False  # only skip on the very first iteration if --now passed
