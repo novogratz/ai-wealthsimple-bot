@@ -59,6 +59,32 @@ function Send-TradeNotification {
     }
 }
 
+function Get-ScanSummary {
+    param([object[]]$ScanOutput)
+
+    $candidateLines = $ScanOutput |
+        Where-Object { $_ -match '^\s+\d+\s+\S+' } |
+        Select-Object -First 5
+
+    if (-not $candidateLines) {
+        return $null
+    }
+
+    $summary = @("Potential purchases from scan:")
+    foreach ($line in $candidateLines) {
+        $cols = ($line -replace '\s+', ' ' -replace '^\s+', '') -split ' '
+        if ($cols.Count -ge 5) {
+            $rank = $cols[0]
+            $symbol = $cols[1]
+            $price = $cols[2]
+            $shares = $cols[3]
+            $score = $cols[4]
+            $summary += "$rank. $symbol @ `$$price, shares $shares, score $score"
+        }
+    }
+    return ($summary -join "`n")
+}
+
 # =============================================================================
 # STEP 1 - Scan
 # =============================================================================
@@ -76,6 +102,11 @@ if (-not $SellOnly) {
     if ($scanExit -ne 0) {
         Write-Error "Scan failed (exit $scanExit)."
         exit $scanExit
+    }
+
+    $scanSummary = Get-ScanSummary -ScanOutput $scanOut
+    if ($scanSummary) {
+        Send-TradeNotification -Event "scan_candidates" -Message $scanSummary
     }
 
     $topLine = $scanOut | Where-Object { $_ -match '^\s+\d+\s+\S+' } | Select-Object -First 1

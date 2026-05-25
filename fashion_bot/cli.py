@@ -138,6 +138,7 @@ def main() -> None:
         required=True,
         choices=[
             "scan_top",
+            "scan_candidates",
             "buy_preparing",
             "buy_review",
             "buy_submitted",

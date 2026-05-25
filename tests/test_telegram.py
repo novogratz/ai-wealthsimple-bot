@@ -1,8 +1,11 @@
 import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from urllib.parse import parse_qs
 
-from fashion_bot.telegram import TelegramConfig, send_message, trade_message
+from fashion_bot.telegram import TelegramConfig, load_dotenv, send_message, trade_message
 
 
 class FakeResponse:
@@ -45,6 +48,23 @@ class TelegramTests(unittest.TestCase):
         body = parse_qs(request.data.decode("utf-8"))
         self.assertEqual(body["chat_id"], ["@channel"])
         self.assertEqual(body["text"], ["hello"])
+
+    def test_load_dotenv_does_not_override_existing_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / ".env"
+            env_path.write_text(
+                "TELEGRAM_BOT_TOKEN=from_file\n"
+                "TELEGRAM_CHAT_ID='@from_file'\n",
+                encoding="utf-8",
+            )
+            os.environ["TELEGRAM_BOT_TOKEN"] = "already_set"
+            try:
+                load_dotenv(env_path)
+                self.assertEqual(os.environ["TELEGRAM_BOT_TOKEN"], "already_set")
+                self.assertEqual(os.environ["TELEGRAM_CHAT_ID"], "@from_file")
+            finally:
+                os.environ.pop("TELEGRAM_BOT_TOKEN", None)
+                os.environ.pop("TELEGRAM_CHAT_ID", None)
 
 
 if __name__ == "__main__":

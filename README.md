@@ -81,14 +81,15 @@ Add `--confirm` to either command only when you intend to submit a live Wealthsi
 
 ## Telegram Notifications
 
-Create a Telegram bot with BotFather, add it to your channel, and set these environment variables locally:
+Create a Telegram bot with BotFather, add it to your channel, and create a local `.env` file:
 
-```powershell
-$env:TELEGRAM_BOT_TOKEN = "<bot_token_from_botfather>"
-$env:TELEGRAM_CHAT_ID = "@your_channel_username"
+```text
+TELEGRAM_BOT_TOKEN=<bot_token_from_botfather>
+TELEGRAM_CHAT_ID=@your_channel_username
 ```
 
 For a private channel, use the numeric chat ID instead of `@your_channel_username`.
+The `.env` file is ignored by git and must not be committed.
 
 Test the notification path:
 
@@ -96,7 +97,7 @@ Test the notification path:
 python -m fashion_bot notify --event info --message "Trading assistant connected"
 ```
 
-The main runner sends Telegram updates for scan picks, preparing buy/sell tickets, review-ready tickets, submitted orders when `--confirm` is used, and automation errors. Missing Telegram config does not stop trading runs.
+The main runner sends Telegram updates for potential scan candidates, the selected top pick, preparing buy/sell tickets, review-ready tickets, submitted orders when `--confirm` is used, and automation errors. Missing Telegram config does not stop trading runs.
 
 ## Tests
 

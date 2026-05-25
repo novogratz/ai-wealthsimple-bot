@@ -4,6 +4,7 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -11,6 +12,7 @@ from urllib.request import Request, urlopen
 
 
 TELEGRAM_API = "https://api.telegram.org"
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class TelegramConfigError(RuntimeError):
@@ -24,6 +26,7 @@ class TelegramConfig:
 
     @classmethod
     def from_env(cls) -> "TelegramConfig":
+        load_dotenv(ROOT / ".env")
         token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
         chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
         if not token or not chat_id:
@@ -31,6 +34,21 @@ class TelegramConfig:
                 "Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to enable Telegram notifications."
             )
         return cls(bot_token=token, chat_id=chat_id)
+
+
+def load_dotenv(path: Path) -> None:
+    if not path.exists():
+        return
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 def send_message(
@@ -73,6 +91,7 @@ def trade_message(
     timestamp: datetime | None = None,
 ) -> str:
     labels = {
+        "scan_candidates": "Potential purchase candidates",
         "scan_top": "Top scan candidate",
         "buy_preparing": "Preparing buy ticket",
         "buy_review": "Buy ticket ready for review",
