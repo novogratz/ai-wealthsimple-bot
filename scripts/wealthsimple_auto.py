@@ -124,6 +124,35 @@ def use_max_dollars(page) -> None:
     page.wait_for_timeout(700)
 
 
+def use_max_shares(page) -> None:
+    print("Using Max shares / sell all...")
+    clicked = click_first(page, [
+        'button:has-text("Max")',
+        '[role="button"]:has-text("Max")',
+        'button:has-text("Sell all")',
+        'button:has-text("Sell All")',
+        '[role="button"]:has-text("Sell all")',
+        '[role="button"]:has-text("Sell All")',
+        'text="Max"',
+        'text="Sell all"',
+        'text="Sell All"',
+    ], timeout=4000)
+    if clicked:
+        page.wait_for_timeout(700)
+        return
+
+    # Some Wealthsimple tickets expose a "Shares" amount input with a Max pill
+    # inside the same control. If selector clicks fail, click near the right edge
+    # of the visible input where the Max action usually appears.
+    el = page.locator("input:visible").first
+    el.wait_for(state="visible", timeout=3000)
+    box = el.bounding_box()
+    if not box:
+        raise RuntimeError("Could not locate sell quantity input for Max shares.")
+    page.mouse.click(box["x"] + box["width"] - 28, box["y"] + box["height"] / 2)
+    page.wait_for_timeout(700)
+
+
 def wait_before_close(page, keep_open: bool) -> None:
     if keep_open:
         print("Browser left open. Close it manually when you are done reviewing.")
@@ -247,6 +276,7 @@ def place_order(
     price: Optional[float],
     confirm: bool,
     max_dollars: bool = False,
+    sell_all: bool = False,
 ) -> None:
     from playwright.sync_api import TimeoutError as PWTimeout
 
@@ -287,9 +317,12 @@ def place_order(
         print("Using Dollars -> Max...")
         use_max_dollars(page)
         snap(page, f"{side}_max")
+    elif sell_all and side == "sell":
+        use_max_shares(page)
+        snap(page, f"{side}_max")
     else:
         if shares is None:
-            raise RuntimeError("Shares are required unless --max-dollars is used for buys.")
+            raise RuntimeError("Shares are required unless --max-dollars or --sell-all is used.")
         print(f"Entering {shares} shares...")
         try:
             if price is None:
@@ -380,9 +413,10 @@ def cmd_sell(args) -> None:
         browser, ctx, page = open_browser(p)
         try:
             navigate_to_stock(page, strip_exchange(args.symbol))
-            place_order(page, "sell", args.shares, None, confirm=args.confirm)
+            place_order(page, "sell", args.shares, None, confirm=args.confirm, sell_all=args.sell_all)
             print()
-            print(f"[OK] Sell order: {args.shares} x {args.symbol} (Market)")
+            label = "all shares" if args.sell_all else f"{args.shares} shares"
+            print(f"[OK] Sell order: {label} x {args.symbol} (Market)")
             if not args.confirm:
                 wait_before_close(page, args.keep_open)
         finally:
@@ -406,13 +440,16 @@ def main() -> None:
 
     sell_p = sub.add_parser("sell", help="Prepare a sell order")
     sell_p.add_argument("--symbol", required=True)
-    sell_p.add_argument("--shares", type=int, required=True)
+    sell_p.add_argument("--shares", type=int, default=None)
+    sell_p.add_argument("--sell-all", action="store_true", help="Click Max/Sell all on the sell ticket")
     sell_p.add_argument("--confirm", action="store_true", help="Also click Place Order (submits real order)")
     sell_p.add_argument("--keep-open", action="store_true", help="Keep browser open at the review page")
 
     args = parser.parse_args()
     if args.cmd == "buy" and not args.max_dollars and args.shares is None:
         parser.error("buy requires --shares unless --max-dollars is used")
+    if args.cmd == "sell" and not args.sell_all and args.shares is None:
+        parser.error("sell requires --shares unless --sell-all is used")
     {"setup": cmd_setup, "buy": cmd_buy, "sell": cmd_sell}[args.cmd](args)
 
 

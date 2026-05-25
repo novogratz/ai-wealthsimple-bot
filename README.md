@@ -52,6 +52,12 @@ Run a scan only:
 .\scripts\run-trade.ps1 -Balance 17.24 -DryRun
 ```
 
+Run the full day workflow. If launched overnight, this waits for the 9:30-9:35 ET entry window, scans, prepares the buy, holds all day, and prepares the sell-all ticket at 15:55 ET:
+
+```powershell
+.\scripts\run-trade.ps1 -AutoDay
+```
+
 Prepare a buy ticket for the top scan result. The current buy flow uses Wealthsimple's `Dollars -> Max` control on the selected Non-registered account:
 
 ```powershell
@@ -67,14 +73,16 @@ Prepare a sell ticket for the saved position:
 Submit live orders only when you explicitly opt in:
 
 ```powershell
-.\scripts\run-trade.ps1 -Balance 17.24 -Confirm
+.\scripts\run-trade.ps1 -AutoDay -Confirm
 ```
+
+`-Confirm` submits live buy and sell orders. Without `-Confirm`, the browser stops at the review screen.
 
 You can also call the browser automation directly:
 
 ```powershell
 python scripts/wealthsimple_auto.py buy --symbol LSPD.TO --max-dollars --keep-open
-python scripts/wealthsimple_auto.py sell --symbol LSPD.TO --shares 1 --keep-open
+python scripts/wealthsimple_auto.py sell --symbol LSPD.TO --sell-all --keep-open
 ```
 
 Add `--confirm` to either command only when you intend to submit a live Wealthsimple order.

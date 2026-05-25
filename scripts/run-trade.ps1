@@ -7,6 +7,7 @@
     .\scripts\run-trade.ps1 -Balance 17.24           # full day, review only
     .\scripts\run-trade.ps1 -Balance 17.24 -BuyOnly  # morning buy only, review only
     .\scripts\run-trade.ps1 -SellOnly                # close open position, review only
+    .\scripts\run-trade.ps1 -AutoDay -Confirm        # wait for entry, buy, sell at 15:55 ET
     .\scripts\run-trade.ps1 -Balance 17.24 -DryRun   # scan only, no browser
     .\scripts\run-trade.ps1 -Balance 17.24 -Confirm  # submit real orders
 
@@ -17,10 +18,15 @@ param(
     [double]$Balance = 17.24,
     [switch]$DryRun,
     [switch]$Confirm,
+    [switch]$AutoDay,
+    [switch]$AllowLateEntry,
     [switch]$BuyOnly,
     [switch]$SellOnly,
+    [int]$EntryHour = 9,
+    [int]$EntryMin = 30,
+    [int]$LatestEntryMin = 35,
     [int]$ExitHour = 15,
-    [int]$ExitMin = 45
+    [int]$ExitMin = 55
 )
 
 $ErrorActionPreference = "Stop"
@@ -83,6 +89,61 @@ function Get-ScanSummary {
         }
     }
     return ($summary -join "`n")
+}
+
+function Get-NowEt {
+    $tz = [TimeZoneInfo]::FindSystemTimeZoneById("Eastern Standard Time")
+    return [TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow, $tz)
+}
+
+function Wait-ForEntryWindow {
+    param(
+        [int]$Hour,
+        [int]$Minute,
+        [int]$LatestMinute,
+        [switch]$AllowLate
+    )
+
+    while ($true) {
+        $nowET = Get-NowEt
+        if ($nowET.DayOfWeek -eq [DayOfWeek]::Saturday -or $nowET.DayOfWeek -eq [DayOfWeek]::Sunday) {
+            $next = $nowET.Date.AddDays(1).AddHours($Hour).AddMinutes($Minute)
+            while ($next.DayOfWeek -eq [DayOfWeek]::Saturday -or $next.DayOfWeek -eq [DayOfWeek]::Sunday) {
+                $next = $next.AddDays(1)
+            }
+            $wait = [math]::Max(1, [int]($next - $nowET).TotalMinutes)
+            Write-Host ("  " + $nowET.ToString("yyyy-MM-dd HH:mm") + " ET - weekend, entry in ~$wait min")
+            Send-TradeNotification -Event "info" -Message ("Weekend wait. Next entry window starts " + $next.ToString("yyyy-MM-dd HH:mm") + " ET.")
+            Start-Sleep -Seconds ([math]::Min(3600, $wait * 60))
+            continue
+        }
+
+        $entry = $nowET.Date.AddHours($Hour).AddMinutes($Minute)
+        $latest = $nowET.Date.AddHours($Hour).AddMinutes($LatestMinute)
+
+        if ($nowET -lt $entry) {
+            $wait = [math]::Max(1, [int]($entry - $nowET).TotalMinutes)
+            Write-Host ("  " + $nowET.ToString("HH:mm") + " ET - entry in ~$wait min")
+            Send-TradeNotification -Event "info" -Message ("Waiting for entry window at " + $entry.ToString("HH:mm") + " ET.")
+            Start-Sleep -Seconds ([math]::Min(900, $wait * 60))
+            continue
+        }
+
+        if ($nowET -gt $latest -and -not $AllowLate) {
+            Send-TradeNotification -Event "error" -Message ("Entry window missed. Current time " + $nowET.ToString("HH:mm") + " ET, latest entry " + $latest.ToString("HH:mm") + " ET.")
+            Write-Error "Entry window missed. Use -AllowLateEntry to override."
+            exit 1
+        }
+
+        Write-Host ("  Entry window active at " + $nowET.ToString("HH:mm") + " ET")
+        return
+    }
+}
+
+if ($AutoDay -and -not $SellOnly -and -not $DryRun) {
+    Write-Host ""
+    Write-Host "=== Waiting for entry window $EntryHour`:$($EntryMin.ToString('00'))-$EntryHour`:$($LatestEntryMin.ToString('00')) ET ==="
+    Wait-ForEntryWindow -Hour $EntryHour -Minute $EntryMin -LatestMinute $LatestEntryMin -AllowLate:$AllowLateEntry
 }
 
 # =============================================================================
@@ -164,6 +225,7 @@ if (-not $SellOnly) {
         wsSymbol = $wsSymbol
         shares = $Shares
         buyPrice = $Price
+        sellAll = $true
         time = (Get-Date -Format "o")
     }
     $pos | ConvertTo-Json | Set-Content $posFile -Encoding utf8
@@ -198,16 +260,16 @@ $Symbol = $pos.symbol
 $wsSymbol = $pos.wsSymbol
 $Shares = [int]$pos.shares
 
-$tz = [TimeZoneInfo]::FindSystemTimeZoneById("Eastern Standard Time")
 $targetMin = $ExitHour * 60 + $ExitMin
-$nowET = [TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow, $tz)
+$nowET = Get-NowEt
 $nowMin = $nowET.Hour * 60 + $nowET.Minute
 
 if ($nowMin -lt $targetMin) {
     Write-Host ""
     Write-Host "=== Holding $Shares x $Symbol - selling at $ExitHour`:$($ExitMin.ToString('00')) ET ==="
+    Send-TradeNotification -Event "info" -Symbol $Symbol -Shares $Shares -Message ("Holding until scheduled sell at " + $ExitHour + ":" + $ExitMin.ToString("00") + " ET.")
     while ($true) {
-        $nowET = [TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow, $tz)
+        $nowET = Get-NowEt
         $nowMin = $nowET.Hour * 60 + $nowET.Minute
         if ($nowMin -ge $targetMin) { break }
         $left = $targetMin - $nowMin
@@ -225,7 +287,7 @@ $sellArgs = @(
     $autoScript,
     "sell",
     "--symbol", $Symbol,
-    "--shares", $Shares
+    "--sell-all"
 )
 if ($Confirm) {
     $sellArgs += "--confirm"
@@ -233,7 +295,7 @@ if ($Confirm) {
 } else {
     Write-Host "    Review mode: stopping before final sell submit."
 }
-Send-TradeNotification -Event "sell_preparing" -Symbol $Symbol -Shares $Shares -Message "Preparing Wealthsimple sell ticket."
+Send-TradeNotification -Event "sell_preparing" -Symbol $Symbol -Shares $Shares -Message "Preparing Wealthsimple sell-all ticket."
 & $python @sellArgs
 
 if ($LASTEXITCODE -ne 0) {
@@ -245,10 +307,10 @@ if ($LASTEXITCODE -ne 0) {
 Remove-Item $posFile -ErrorAction SilentlyContinue
 Write-Host ""
 if ($Confirm) {
-    Write-Host "[OK] SELL submitted: $Shares x $Symbol. Position closed."
-    Send-TradeNotification -Event "sell_submitted" -Symbol $Symbol -Shares $Shares -Message "Sell automation submitted the order."
+    Write-Host "[OK] SELL submitted: all available $Symbol. Position closed."
+    Send-TradeNotification -Event "sell_submitted" -Symbol $Symbol -Shares $Shares -Message "Sell-all automation submitted the order."
 } else {
-    Write-Host "[OK] SELL review prepared: $Shares x $Symbol."
-    Send-TradeNotification -Event "sell_review" -Symbol $Symbol -Shares $Shares -Message "Sell ticket is ready for manual review."
+    Write-Host "[OK] SELL review prepared: all available $Symbol."
+    Send-TradeNotification -Event "sell_review" -Symbol $Symbol -Shares $Shares -Message "Sell-all ticket is ready for manual review."
 }
 Write-Host "     Check data\screen_sell_done.png to verify."
