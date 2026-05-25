@@ -41,6 +41,93 @@ def log(msg: str) -> None:
     print(f"[{now_et():%H:%M:%S} ET] {msg}", flush=True)
 
 
+def print_status_banner(balance: float | None) -> None:
+    pnl_file = DATA / "pnl_ledger.json"
+    trades = []
+    if pnl_file.exists():
+        try:
+            trades = json.loads(pnl_file.read_text())
+        except Exception:
+            pass
+
+    total_pnl   = sum(t.get("realizedPnl", 0) for t in trades)
+    total_cost  = sum(t.get("buyCost", 0) for t in trades)
+    wins        = sum(1 for t in trades if t.get("realizedPnl", 0) > 0)
+    losses      = sum(1 for t in trades if t.get("realizedPnl", 0) < 0)
+    n           = len(trades)
+    win_rate    = (wins / n * 100) if n else 0.0
+    roi         = (total_pnl / total_cost * 100) if total_cost else 0.0
+    pnl_arrow   = "^" if total_pnl >= 0 else "v"
+    pnl_sign    = "+" if total_pnl >= 0 else ""
+
+    # open position
+    pos_line = "None"
+    if POS_FILE.exists():
+        try:
+            pos = json.loads(POS_FILE.read_text())
+            pos_line = (
+                f"{pos['symbol']}  {pos.get('shares', 0):.4f} shares "
+                f"@ ${pos.get('buyPrice', 0):.2f}  (cost ${pos.get('estimatedCost', 0):.2f})"
+            )
+        except Exception:
+            pos_line = "Error reading position"
+
+    # next scheduled event
+    now = now_et()
+    if now.weekday() >= 5:
+        nxt = _next_entry_window()
+        next_event = f"Buy at {nxt:%a %b %d %H:%M} ET"
+    elif now.hour < 9 or (now.hour == 9 and now.minute < 31):
+        next_event = f"Buy today at 09:31 ET  ({(now.replace(hour=9,minute=31,second=0,microsecond=0)-now).seconds//60} min away)"
+    elif now.hour < 16:
+        next_event = "Sell today at 15:55 ET"
+    elif now.hour < 17:
+        next_event = "5 PM post-close scan coming up"
+    elif now.hour < 6:
+        next_event = "6 AM pre-market scan coming up"
+    else:
+        nxt = _next_entry_window()
+        next_event = f"Buy at {nxt:%a %b %d %H:%M} ET"
+
+    bal_str = f"${balance:.2f} CAD" if balance is not None else "fetching..."
+
+    W = 54
+    div = "-" * W
+    sep = f"+{div}+"
+    def row(left, right=""):
+        content = f"  {left:<22} {right}"
+        return f"|{content:<{W}}|"
+    def center_row(text):
+        return f"|{text:^{W}}|"
+
+    print(flush=True)
+    print(sep, flush=True)
+    print(center_row("  FASHION BOT  --  STATUS"), flush=True)
+    print(sep, flush=True)
+    print(row("Account balance", bal_str), flush=True)
+    print(row("All-time PnL", f"{pnl_arrow} {pnl_sign}{total_pnl:.2f} CAD  ({roi:+.2f}% ROI)"), flush=True)
+    print(row("Record", f"{wins}W / {losses}L  ({win_rate:.0f}% win rate)"), flush=True)
+    print(row("Total trades", str(n)), flush=True)
+    print(sep, flush=True)
+    print(row("Open position", pos_line[:W-26]), flush=True)
+    print(row("Next action", next_event[:W-26]), flush=True)
+    print(sep, flush=True)
+    if trades:
+        print(center_row("Recent trades"), flush=True)
+        for t in trades[-5:]:
+            pnl   = t.get("realizedPnl", 0)
+            sym   = t.get("symbol", "?")
+            arrow = "^" if pnl >= 0 else "v"
+            sign  = "+" if pnl >= 0 else ""
+            ts    = t.get("time", "")[:10]
+            line  = f"{arrow} {sym:<12} {sign}{pnl:.2f} CAD   {ts}"
+            print(f"|    {line:<{W-2}}  |", flush=True)
+    else:
+        print(center_row("No trades yet -- let's get it"), flush=True)
+    print(sep, flush=True)
+    print(flush=True)
+
+
 def notify(msg: str, event: str = "info") -> None:
     try:
         send_message(trade_message(event, message=msg))
@@ -361,14 +448,18 @@ def main() -> None:
     parser.add_argument("--now", action="store_true", help="Skip the 09:30 ET wait")
     args = parser.parse_args()
 
-    log("=== Fashion Bot — running continuously (sells 15:55, scans overnight, buys 09:30) ===")
+    log("=== Fashion Bot — running continuously (sells 15:55, scans overnight, buys 09:31) ===")
     cleanup_screenshots()
 
     from fashion_bot.cli import _get_total_pnl
 
+    # Show status dashboard immediately on start
+    _startup_balance = fetch_live_balance() if args.balance is None else args.balance
+    print_status_banner(_startup_balance)
+
     # Resume an existing open position on restart before entering the main loop
     if POS_FILE.exists():
-        balance = args.balance or fetch_live_balance() or 17.24
+        balance = _startup_balance or 17.24
         (DATA / "session_info.json").write_text(
             json.dumps({"startingBalance": balance, "startTime": now_et().isoformat()})
         )
