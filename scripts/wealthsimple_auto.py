@@ -527,7 +527,7 @@ def cmd_buy(args) -> None:
                 "buy",
                 args.shares,
                 args.price,
-                confirm=args.confirm,
+                confirm=True,
                 max_dollars=args.max_dollars,
             )
             label = "Dollars Max (Market)" if args.max_dollars else f"{args.shares} shares (Market)"
@@ -537,8 +537,6 @@ def cmd_buy(args) -> None:
             print(f"[OK] Buy order: {args.symbol} {label}")
             result["symbol"] = args.symbol
             print("ORDER_RESULT_JSON:" + json.dumps(result, sort_keys=True))
-            if not args.confirm:
-                wait_before_close(page, args.keep_open)
         finally:
             save_session(ctx)
             browser.close()
@@ -551,14 +549,12 @@ def cmd_sell(args) -> None:
         browser, ctx, page = open_browser(p)
         try:
             navigate_to_stock(page, strip_exchange(args.symbol))
-            result = place_order(page, "sell", args.shares, None, confirm=args.confirm, sell_all=args.sell_all)
+            result = place_order(page, "sell", args.shares, None, confirm=True, sell_all=args.sell_all)
             print()
             label = "all shares" if args.sell_all else f"{args.shares} shares"
             print(f"[OK] Sell order: {label} x {args.symbol} (Market)")
             result["symbol"] = args.symbol
             print("ORDER_RESULT_JSON:" + json.dumps(result, sort_keys=True))
-            if not args.confirm:
-                wait_before_close(page, args.keep_open)
         finally:
             save_session(ctx)
             browser.close()
@@ -576,15 +572,11 @@ def main() -> None:
     buy_p.add_argument("--shares", type=int, default=None)
     buy_p.add_argument("--price", type=float, default=None, help="Limit price (omit for Market)")
     buy_p.add_argument("--max-dollars", action="store_true", help="Buy in dollars and click Max")
-    buy_p.add_argument("--confirm", action="store_true", help="Also click Place Order (submits real order)")
-    buy_p.add_argument("--keep-open", action="store_true", help="Keep browser open at the review page")
 
     sell_p = sub.add_parser("sell", help="Prepare a sell order")
     sell_p.add_argument("--symbol", required=True)
     sell_p.add_argument("--shares", type=int, default=None)
     sell_p.add_argument("--sell-all", action="store_true", help="Click Max/Sell all on the sell ticket")
-    sell_p.add_argument("--confirm", action="store_true", help="Also click Place Order (submits real order)")
-    sell_p.add_argument("--keep-open", action="store_true", help="Keep browser open at the review page")
 
     args = parser.parse_args()
     if args.cmd == "buy" and not args.max_dollars and args.shares is None:

@@ -158,7 +158,6 @@ def cmd_watch(args: argparse.Namespace) -> int:
     buy_cost = float(pos.get("estimatedCost", entry_price * shares))
 
     auto_script = ROOT / "scripts" / "wealthsimple_auto.py"
-    confirm = args.confirm
 
     print(f"Holding {symbol}:  entry=${entry_price:.2f}  shares={shares}", flush=True)
     print(f"  Selling after {trading.force_exit} ET", flush=True)
@@ -207,9 +206,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 "sell",
                 "--symbol", symbol,
                 "--sell-all",
+                "--confirm",
             ]
-            if confirm:
-                sell_args.append("--confirm")
 
             print(f"Running: {' '.join(sell_args)}", flush=True)
             result = subprocess.run(sell_args, timeout=180)
@@ -354,7 +352,6 @@ def main() -> None:
     watch = sub.add_parser("watch", help="hold a live position and auto-sell near close")
     watch.add_argument("--position-file", type=Path, default=ROOT / "data" / "open_position.json")
     watch.add_argument("--interval", type=int, default=60, help="seconds between price checks")
-    watch.add_argument("--confirm", action="store_true", help="submit sell order automatically")
     watch.set_defaults(func=cmd_watch)
 
     args = parser.parse_args()
