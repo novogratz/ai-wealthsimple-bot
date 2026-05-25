@@ -15,6 +15,7 @@ from typing import Optional
 ROOT = Path(__file__).parent.parent
 DATA = ROOT / "data"
 AUTH = DATA / "ws_auth.json"
+PROFILE_DIR = DATA / "firefox_profile"  # persistent browser profile — keeps device trust
 WS_HOME = "https://my.wealthsimple.com/app/home"
 
 DATA.mkdir(exist_ok=True)
@@ -270,9 +271,8 @@ def cmd_balance(_args) -> None:
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
-        browser, ctx, page = open_browser(p)
+        ctx, page = open_browser(p)
         try:
-            # Detect expired session before wasting time
             page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
             page.wait_for_timeout(2000)
             if page.locator('input[type="password"], input[placeholder*="Password" i]').first.is_visible(timeout=1500):
@@ -288,27 +288,35 @@ def cmd_balance(_args) -> None:
                 snap(page, "balance_fail")
                 sys.exit(1)
         finally:
-            # Always save session so cookies stay fresh
+            save_session(ctx)
             try:
-                save_session(ctx)
+                ctx.close()
             except Exception:
                 pass
-            browser.close()
 
 
 def open_browser(p):
-    if not AUTH.exists():
-        print(f"No session file at {AUTH}.")
-        print("Run first: python scripts/wealthsimple_auto.py setup")
+    if not PROFILE_DIR.exists() and not AUTH.exists():
+        print("No session found. Run first: python scripts/wealthsimple_auto.py setup")
         sys.exit(1)
-    browser = p.firefox.launch(headless=False, slow_mo=60)
-    ctx = browser.new_context(storage_state=str(AUTH))
+    PROFILE_DIR.mkdir(exist_ok=True)
+    # Persistent context keeps the full Firefox profile on disk (cookies, device
+    # trust tokens, fingerprints). Wealthsimple sees the same "device" every run,
+    # so the 30-day OTP trust is preserved across restarts.
+    ctx = p.firefox.launch_persistent_context(
+        str(PROFILE_DIR),
+        headless=False,
+        slow_mo=60,
+    )
     page = ctx.new_page()
-    return browser, ctx, page
+    return ctx, page
 
 
 def save_session(ctx) -> None:
-    ctx.storage_state(path=str(AUTH))
+    try:
+        ctx.storage_state(path=str(AUTH))  # backup copy as JSON
+    except Exception:
+        pass  # persistent context already saved to PROFILE_DIR
 
 
 def navigate_to_stock(page, ws_symbol: str) -> None:
@@ -531,8 +539,8 @@ def cmd_setup(_args) -> None:
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
-        browser = p.firefox.launch(headless=False, slow_mo=50)
-        ctx = browser.new_context()
+        PROFILE_DIR.mkdir(exist_ok=True)
+        ctx = p.firefox.launch_persistent_context(str(PROFILE_DIR), headless=False, slow_mo=50)
         page = ctx.new_page()
         page.goto(WS_HOME)
         print()
@@ -556,18 +564,14 @@ def cmd_setup(_args) -> None:
                     page.wait_for_timeout(5000)
                 except Exception:
                     break
-        try:
-            save_session(ctx)
-            print(f"\n  Session saved -> {AUTH}")
-        except Exception as e:
-            print(f"\n  [ERROR] Could not save session: {e}")
-            sys.exit(1)
+        save_session(ctx)
+        print(f"\n  Session saved -> {PROFILE_DIR}")
         try:
             snap(page, "setup_done")
         except Exception:
             pass
         try:
-            browser.close()
+            ctx.close()
         except Exception:
             pass
     print("  Done. Run the bot normally now.")
@@ -578,7 +582,7 @@ def cmd_buy(args) -> None:
 
     result: dict = {"side": "buy", "submitted": False, "symbol": args.symbol}
     with sync_playwright() as p:
-        browser, ctx, page = open_browser(p)
+        ctx, page = open_browser(p)
         try:
             navigate_to_stock(page, strip_exchange(args.symbol))
             result = place_order(
@@ -598,11 +602,11 @@ def cmd_buy(args) -> None:
             print(f"\n[ERROR] Buy failed: {e}")
         finally:
             print("ORDER_RESULT_JSON:" + json.dumps(result, sort_keys=True))
+            save_session(ctx)
             try:
-                save_session(ctx)
+                ctx.close()
             except Exception:
                 pass
-            browser.close()
     if not result.get("submitted"):
         sys.exit(1)
 
@@ -612,7 +616,7 @@ def cmd_sell(args) -> None:
 
     result: dict = {"side": "sell", "submitted": False, "symbol": args.symbol}
     with sync_playwright() as p:
-        browser, ctx, page = open_browser(p)
+        ctx, page = open_browser(p)
         try:
             navigate_to_stock(page, strip_exchange(args.symbol))
             result = place_order(page, "sell", args.shares, None, confirm=True, sell_all=args.sell_all)
@@ -623,11 +627,11 @@ def cmd_sell(args) -> None:
             print(f"\n[ERROR] Sell failed: {e}")
         finally:
             print("ORDER_RESULT_JSON:" + json.dumps(result, sort_keys=True))
+            save_session(ctx)
             try:
-                save_session(ctx)
+                ctx.close()
             except Exception:
                 pass
-            browser.close()
     if not result.get("submitted"):
         sys.exit(1)
 
