@@ -32,6 +32,7 @@ param(
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $posFile = Join-Path $root "data\open_position.json"
+$pnlFile = Join-Path $root "data\pnl_ledger.json"
 
 # Prefer the project venv, fall back to PATH.
 $python = Join-Path $root ".venv\Scripts\python.exe"
@@ -89,6 +90,111 @@ function Get-ScanSummary {
         }
     }
     return ($summary -join "`n")
+}
+
+function ConvertTo-NullableDouble {
+    param([object]$Value)
+    if ($null -eq $Value) { return $null }
+    try {
+        return [double]$Value
+    } catch {
+        return $null
+    }
+}
+
+function Invoke-Automation {
+    param([string[]]$CommandArgs)
+
+    $oldErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $out = & $python @CommandArgs 2>&1
+    $exit = $LASTEXITCODE
+    $ErrorActionPreference = $oldErrorAction
+
+    $out | ForEach-Object { Write-Host "    $_" }
+
+    $jsonLine = $out | Where-Object { $_ -like "ORDER_RESULT_JSON:*" } | Select-Object -Last 1
+    $result = $null
+    if ($jsonLine) {
+        try {
+            $result = ($jsonLine -replace '^ORDER_RESULT_JSON:', '') | ConvertFrom-Json
+        } catch {
+            Write-Warning "Could not parse automation result JSON."
+        }
+    }
+
+    return @{
+        exit = $exit
+        output = $out
+        result = $result
+    }
+}
+
+function Get-AllTimePnl {
+    if (-not (Test-Path $pnlFile)) { return 0.0 }
+    try {
+        $items = Get-Content $pnlFile -Raw | ConvertFrom-Json
+        if ($null -eq $items) { return 0.0 }
+        $sum = 0.0
+        foreach ($item in @($items)) {
+            $sum += [double]$item.realizedPnl
+        }
+        return $sum
+    } catch {
+        return 0.0
+    }
+}
+
+function Add-RealizedPnl {
+    param(
+        [string]$Symbol,
+        [double]$BuyCost,
+        [double]$SellValue,
+        [double]$Quantity
+    )
+
+    $items = @()
+    if (Test-Path $pnlFile) {
+        try {
+            $loaded = Get-Content $pnlFile -Raw | ConvertFrom-Json
+            if ($loaded) { $items = @($loaded) }
+        } catch {
+            $items = @()
+        }
+    }
+
+    $items += [pscustomobject]@{
+        symbol = $Symbol
+        quantity = $Quantity
+        buyCost = $BuyCost
+        sellValue = $SellValue
+        realizedPnl = ($SellValue - $BuyCost)
+        time = (Get-Date -Format "o")
+    }
+    $items | ConvertTo-Json | Set-Content $pnlFile -Encoding utf8
+}
+
+function Get-QuotePrice {
+    param([string]$Symbol)
+
+    $oldErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $out = & $python -m fashion_bot quote --symbol $Symbol --json 2>&1
+    $exit = $LASTEXITCODE
+    $ErrorActionPreference = $oldErrorAction
+    if ($exit -ne 0) { return $null }
+
+    try {
+        $quote = ($out | Select-Object -Last 1) | ConvertFrom-Json
+        return [double]$quote.last_price
+    } catch {
+        return $null
+    }
+}
+
+function Format-Money {
+    param([double]$Value)
+    return ("{0:+$0.00;-$0.00;$0.00}" -f $Value)
 }
 
 function Get-NowEt {
@@ -211,20 +317,26 @@ if (-not $SellOnly) {
     } else {
         Write-Host "    Review mode: stopping before final buy submit."
     }
-    Send-TradeNotification -Event "buy_preparing" -Symbol $Symbol -Shares $Shares -Price $Price -Message "Preparing Wealthsimple buy ticket with Dollars Max."
-    & $python @buyArgs
+    Send-TradeNotification -Event "buy_preparing" -Symbol $Symbol -Shares $Shares -Price $Price -Message "Next move: planning to buy $Symbol with Dollars Max in the Non-registered account."
+    $buyRun = Invoke-Automation -CommandArgs $buyArgs
 
-    if ($LASTEXITCODE -ne 0) {
+    if ($buyRun.exit -ne 0) {
         Send-TradeNotification -Event "error" -Symbol $Symbol -Message "Buy automation failed."
-        Write-Error "Buy automation failed (exit $LASTEXITCODE)."
-        exit $LASTEXITCODE
+        Write-Error "Buy automation failed (exit $($buyRun.exit))."
+        exit $buyRun.exit
     }
+
+    $buyResult = $buyRun.result
+    $estimatedQuantity = ConvertTo-NullableDouble $buyResult.estimated_quantity
+    $estimatedCost = ConvertTo-NullableDouble $buyResult.estimated_value
 
     $pos = @{
         symbol = $Symbol
         wsSymbol = $wsSymbol
         shares = $Shares
         buyPrice = $Price
+        estimatedQuantity = $estimatedQuantity
+        estimatedCost = $estimatedCost
         sellAll = $true
         time = (Get-Date -Format "o")
     }
@@ -232,10 +344,18 @@ if (-not $SellOnly) {
     Write-Host ""
     if ($Confirm) {
         Write-Host "[OK] BUY submitted: $Shares x $Symbol @ `$$Price"
-        Send-TradeNotification -Event "buy_submitted" -Symbol $Symbol -Shares $Shares -Price $Price -Message "Buy automation submitted the order."
+        $msg = "Buy automation submitted the order."
+        if ($estimatedQuantity -and $estimatedCost) {
+            $msg += "`nEstimated quantity: $estimatedQuantity shares`nEstimated cost: `$$($estimatedCost.ToString('0.00')) CAD"
+        }
+        Send-TradeNotification -Event "buy_submitted" -Symbol $Symbol -Shares $Shares -Price $Price -Message $msg
     } else {
         Write-Host "[OK] BUY review prepared: $Shares x $Symbol @ `$$Price"
-        Send-TradeNotification -Event "buy_review" -Symbol $Symbol -Shares $Shares -Price $Price -Message "Buy ticket is ready for manual review."
+        $msg = "Buy ticket is ready for manual review."
+        if ($estimatedQuantity -and $estimatedCost) {
+            $msg += "`nEstimated quantity: $estimatedQuantity shares`nEstimated cost: `$$($estimatedCost.ToString('0.00')) CAD"
+        }
+        Send-TradeNotification -Event "buy_review" -Symbol $Symbol -Shares $Shares -Price $Price -Message $msg
     }
     Write-Host "     Position saved: $posFile"
 }
@@ -259,6 +379,11 @@ $pos = Get-Content $posFile | ConvertFrom-Json
 $Symbol = $pos.symbol
 $wsSymbol = $pos.wsSymbol
 $Shares = [int]$pos.shares
+$EstimatedQuantity = ConvertTo-NullableDouble $pos.estimatedQuantity
+if ($null -eq $EstimatedQuantity) { $EstimatedQuantity = [double]$Shares }
+$BuyCost = ConvertTo-NullableDouble $pos.estimatedCost
+if ($null -eq $BuyCost) { $BuyCost = $EstimatedQuantity * [double]$pos.buyPrice }
+$AllTimePnlBefore = Get-AllTimePnl
 
 $targetMin = $ExitHour * 60 + $ExitMin
 $nowET = Get-NowEt
@@ -267,7 +392,7 @@ $nowMin = $nowET.Hour * 60 + $nowET.Minute
 if ($nowMin -lt $targetMin) {
     Write-Host ""
     Write-Host "=== Holding $Shares x $Symbol - selling at $ExitHour`:$($ExitMin.ToString('00')) ET ==="
-    Send-TradeNotification -Event "info" -Symbol $Symbol -Shares $Shares -Message ("Holding until scheduled sell at " + $ExitHour + ":" + $ExitMin.ToString("00") + " ET.")
+    Send-TradeNotification -Event "info" -Symbol $Symbol -Shares $Shares -Message ("Holding until scheduled sell at " + $ExitHour + ":" + $ExitMin.ToString("00") + " ET.`nEstimated quantity: " + $EstimatedQuantity + " shares`nTracked cost: `$" + $BuyCost.ToString("0.00") + " CAD`nAll-time realized P/L: " + (Format-Money $AllTimePnlBefore) + " CAD")
     while ($true) {
         $nowET = Get-NowEt
         $nowMin = $nowET.Hour * 60 + $nowET.Minute
@@ -283,6 +408,17 @@ if ($nowMin -lt $targetMin) {
 # =============================================================================
 Write-Host ""
 Write-Host "=== [4/4] SELLING $Shares x $Symbol ==="
+$quotePrice = Get-QuotePrice -Symbol $Symbol
+$planningMessage = "Next move: planning to sell all available $Symbol."
+if ($quotePrice) {
+    $estimatedSellValue = $EstimatedQuantity * $quotePrice
+    $estimatedPnl = $estimatedSellValue - $BuyCost
+    $planningMessage += "`nEstimated quantity: $EstimatedQuantity shares"
+    $planningMessage += "`nCurrent quote: `$$($quotePrice.ToString('0.00')) CAD"
+    $planningMessage += "`nEstimated proceeds: `$$($estimatedSellValue.ToString('0.00')) CAD"
+    $planningMessage += "`nEstimated trade P/L: $(Format-Money $estimatedPnl) CAD"
+    $planningMessage += "`nAll-time realized P/L before this sell: $(Format-Money $AllTimePnlBefore) CAD"
+}
 $sellArgs = @(
     $autoScript,
     "sell",
@@ -295,22 +431,44 @@ if ($Confirm) {
 } else {
     Write-Host "    Review mode: stopping before final sell submit."
 }
-Send-TradeNotification -Event "sell_preparing" -Symbol $Symbol -Shares $Shares -Message "Preparing Wealthsimple sell-all ticket."
-& $python @sellArgs
+Send-TradeNotification -Event "sell_preparing" -Symbol $Symbol -Shares $Shares -Message $planningMessage
+$sellRun = Invoke-Automation -CommandArgs $sellArgs
 
-if ($LASTEXITCODE -ne 0) {
+if ($sellRun.exit -ne 0) {
     Send-TradeNotification -Event "error" -Symbol $Symbol -Shares $Shares -Message "Sell automation failed."
-    Write-Error "Sell automation failed (exit $LASTEXITCODE)."
-    exit $LASTEXITCODE
+    Write-Error "Sell automation failed (exit $($sellRun.exit))."
+    exit $sellRun.exit
+}
+
+$sellResult = $sellRun.result
+$sellQuantity = ConvertTo-NullableDouble $sellResult.estimated_quantity
+if ($null -eq $sellQuantity) { $sellQuantity = $EstimatedQuantity }
+$sellValue = ConvertTo-NullableDouble $sellResult.estimated_value
+$tradePnl = $null
+$allTimeAfter = $AllTimePnlBefore
+if ($null -ne $sellValue -and $null -ne $BuyCost) {
+    $tradePnl = $sellValue - $BuyCost
+    if ($Confirm) {
+        Add-RealizedPnl -Symbol $Symbol -BuyCost $BuyCost -SellValue $sellValue -Quantity $sellQuantity
+        $allTimeAfter = Get-AllTimePnl
+    }
 }
 
 Remove-Item $posFile -ErrorAction SilentlyContinue
 Write-Host ""
 if ($Confirm) {
     Write-Host "[OK] SELL submitted: all available $Symbol. Position closed."
-    Send-TradeNotification -Event "sell_submitted" -Symbol $Symbol -Shares $Shares -Message "Sell-all automation submitted the order."
+    $msg = "Sell-all automation submitted the order."
+    if ($null -ne $sellValue) { $msg += "`nEstimated proceeds: `$$($sellValue.ToString('0.00')) CAD" }
+    if ($null -ne $tradePnl) { $msg += "`nEstimated trade P/L: $(Format-Money $tradePnl) CAD" }
+    $msg += "`nAll-time realized P/L: $(Format-Money $allTimeAfter) CAD"
+    Send-TradeNotification -Event "sell_submitted" -Symbol $Symbol -Shares $Shares -Message $msg
 } else {
     Write-Host "[OK] SELL review prepared: all available $Symbol."
-    Send-TradeNotification -Event "sell_review" -Symbol $Symbol -Shares $Shares -Message "Sell-all ticket is ready for manual review."
+    $msg = "Sell-all ticket is ready for manual review."
+    if ($null -ne $sellValue) { $msg += "`nEstimated proceeds: `$$($sellValue.ToString('0.00')) CAD" }
+    if ($null -ne $tradePnl) { $msg += "`nEstimated trade P/L: $(Format-Money $tradePnl) CAD" }
+    $msg += "`nAll-time realized P/L before this sell: $(Format-Money $AllTimePnlBefore) CAD"
+    Send-TradeNotification -Event "sell_review" -Symbol $Symbol -Shares $Shares -Message $msg
 }
 Write-Host "     Check data\screen_sell_done.png to verify."

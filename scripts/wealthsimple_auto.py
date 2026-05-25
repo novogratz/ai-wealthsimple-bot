@@ -5,6 +5,7 @@ Wealthsimple browser automation via Playwright.
 Default behavior stops at the review page. Passing --confirm submits a real order.
 """
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -167,6 +168,57 @@ def wait_before_close(page, keep_open: bool) -> None:
         page.wait_for_timeout(5000)
 
 
+def parse_money(value: str) -> float | None:
+    cleaned = re.sub(r"[^0-9.\-]", "", value)
+    if not cleaned:
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def parse_review_details(page, side: str, submitted: bool) -> dict:
+    text = page.locator("body").inner_text(timeout=5000)
+
+    def find_number(patterns: list[str]) -> float | None:
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                return parse_money(match.group(1))
+        return None
+
+    quantity = find_number([
+        r"Estimated quantity\s+([0-9,.]+)",
+        r"Quantity\s+([0-9,.]+)",
+    ])
+    value = find_number([
+        r"Estimated cost\s+\$?([0-9,.]+)",
+        r"Estimated proceeds\s+\$?([0-9,.]+)",
+        r"Estimated value\s+\$?([0-9,.]+)",
+        r"Total\s+\$?([0-9,.]+)",
+    ])
+
+    account = None
+    account_match = re.search(r"Account\s+([^\n]+)", text, flags=re.IGNORECASE)
+    if account_match:
+        account = account_match.group(1).strip()
+
+    order_type = None
+    order_match = re.search(r"Order type\s+([^\n]+)", text, flags=re.IGNORECASE)
+    if order_match:
+        order_type = order_match.group(1).strip()
+
+    return {
+        "side": side,
+        "submitted": submitted,
+        "estimated_quantity": quantity,
+        "estimated_value": value,
+        "account": account,
+        "order_type": order_type,
+    }
+
+
 def open_browser(p):
     if not AUTH.exists():
         print(f"No session file at {AUTH}.")
@@ -187,6 +239,9 @@ def navigate_to_stock(page, ws_symbol: str) -> None:
     page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
     page.wait_for_timeout(3000)
     snap(page, "home")
+
+    if page.locator('input[type="password"], input[placeholder*="Password" i]').first.is_visible(timeout=1000):
+        raise RuntimeError("Wealthsimple session expired - run: python scripts/wealthsimple_auto.py setup")
 
     print(f"Searching for {ws_symbol}...")
     search = first_visible(page, [
@@ -277,7 +332,7 @@ def place_order(
     confirm: bool,
     max_dollars: bool = False,
     sell_all: bool = False,
-) -> None:
+) -> dict:
     from playwright.sync_api import TimeoutError as PWTimeout
 
     print(f"Clicking {side.title()} tab...")
@@ -339,6 +394,7 @@ def place_order(
     page.get_by_role("button", name="Next").click(timeout=8000)
     page.wait_for_timeout(3000)
     snap(page, f"{side}_review")
+    submitted = False
 
     if confirm:
         print("Placing order (confirm)...")
@@ -356,8 +412,11 @@ def place_order(
         page.wait_for_timeout(2500)
         snap(page, f"{side}_done")
         print("  Order submitted.")
+        submitted = True
     else:
         print("  Stopped at review page - confirm manually.")
+
+    return parse_review_details(page, side, submitted)
 
 
 def cmd_setup(_args) -> None:
@@ -386,7 +445,7 @@ def cmd_buy(args) -> None:
         browser, ctx, page = open_browser(p)
         try:
             navigate_to_stock(page, strip_exchange(args.symbol))
-            place_order(
+            result = place_order(
                 page,
                 "buy",
                 args.shares,
@@ -399,6 +458,8 @@ def cmd_buy(args) -> None:
                 label = f"{args.shares} shares @ ${args.price:.2f}"
             print()
             print(f"[OK] Buy order: {args.symbol} {label}")
+            result["symbol"] = args.symbol
+            print("ORDER_RESULT_JSON:" + json.dumps(result, sort_keys=True))
             if not args.confirm:
                 wait_before_close(page, args.keep_open)
         finally:
@@ -413,10 +474,12 @@ def cmd_sell(args) -> None:
         browser, ctx, page = open_browser(p)
         try:
             navigate_to_stock(page, strip_exchange(args.symbol))
-            place_order(page, "sell", args.shares, None, confirm=args.confirm, sell_all=args.sell_all)
+            result = place_order(page, "sell", args.shares, None, confirm=args.confirm, sell_all=args.sell_all)
             print()
             label = "all shares" if args.sell_all else f"{args.shares} shares"
             print(f"[OK] Sell order: {label} x {args.symbol} (Market)")
+            result["symbol"] = args.symbol
+            print("ORDER_RESULT_JSON:" + json.dumps(result, sort_keys=True))
             if not args.confirm:
                 wait_before_close(page, args.keep_open)
         finally:

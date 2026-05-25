@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 from pathlib import Path
 
@@ -114,6 +115,29 @@ def cmd_notify(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_quote(args: argparse.Namespace) -> int:
+    data = YFinanceMarketData()
+    snap = data.snapshot(args.symbol)
+    if snap is None:
+        print(f"No quote available for {args.symbol}.")
+        return 1
+
+    payload = {
+        "symbol": snap.symbol,
+        "last_price": snap.last_price,
+        "previous_close": snap.previous_close,
+        "open_price": snap.open_price,
+        "day_high": snap.day_high,
+        "latest_volume": snap.latest_volume,
+        "avg_volume": snap.avg_volume,
+    }
+    if args.json:
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        print(f"{snap.symbol} ${snap.last_price:.2f} CAD")
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="fashion_bot")
     sub = parser.add_subparsers(required=True)
@@ -155,6 +179,11 @@ def main() -> None:
     notify.add_argument("--message")
     notify.add_argument("--print-only", action="store_true", help="print instead of sending")
     notify.set_defaults(func=cmd_notify)
+
+    quote = sub.add_parser("quote", help="fetch one market-data snapshot")
+    quote.add_argument("--symbol", required=True)
+    quote.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    quote.set_defaults(func=cmd_quote)
 
     args = parser.parse_args()
     raise SystemExit(args.func(args))
