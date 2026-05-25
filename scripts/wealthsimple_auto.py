@@ -497,14 +497,22 @@ def place_order(
         if not submitted_via_js:
             snap(page, f"{side}_confirm_fail")
             raise RuntimeError(f"Submit button not found - see data/screen_{side}_confirm_fail.png")
-        page.wait_for_timeout(3000)
-        snap(page, f"{side}_done")
-        print("  Order submitted.")
+        # Mark submitted BEFORE any post-submit page ops — the confirmation page
+        # can navigate/crash and we must not lose the fact the order went through.
         submitted = True
+        print("  Order submitted.")
+        try:
+            page.wait_for_timeout(3000)
+            snap(page, f"{side}_done")
+        except Exception:
+            pass
     else:
         print("  Stopped at review page - confirm manually.")
 
-    return parse_review_details(page, side, submitted)
+    try:
+        return parse_review_details(page, side, submitted)
+    except Exception:
+        return {"side": side, "submitted": submitted}
 
 
 def cmd_setup(_args) -> None:
@@ -529,6 +537,7 @@ def cmd_setup(_args) -> None:
 def cmd_buy(args) -> None:
     from playwright.sync_api import sync_playwright
 
+    result: dict = {"side": "buy", "submitted": False, "symbol": args.symbol}
     with sync_playwright() as p:
         browser, ctx, page = open_browser(p)
         try:
@@ -541,34 +550,47 @@ def cmd_buy(args) -> None:
                 confirm=True,
                 max_dollars=args.max_dollars,
             )
+            result["symbol"] = args.symbol
             label = "Dollars Max (Market)" if args.max_dollars else f"{args.shares} shares (Market)"
             if args.price:
                 label = f"{args.shares} shares @ ${args.price:.2f}"
-            print()
-            print(f"[OK] Buy order: {args.symbol} {label}")
-            result["symbol"] = args.symbol
-            print("ORDER_RESULT_JSON:" + json.dumps(result, sort_keys=True))
+            print(f"\n[OK] Buy order: {args.symbol} {label}")
+        except Exception as e:
+            print(f"\n[ERROR] Buy failed: {e}")
         finally:
-            save_session(ctx)
+            print("ORDER_RESULT_JSON:" + json.dumps(result, sort_keys=True))
+            try:
+                save_session(ctx)
+            except Exception:
+                pass
             browser.close()
+    if not result.get("submitted"):
+        sys.exit(1)
 
 
 def cmd_sell(args) -> None:
     from playwright.sync_api import sync_playwright
 
+    result: dict = {"side": "sell", "submitted": False, "symbol": args.symbol}
     with sync_playwright() as p:
         browser, ctx, page = open_browser(p)
         try:
             navigate_to_stock(page, strip_exchange(args.symbol))
             result = place_order(page, "sell", args.shares, None, confirm=True, sell_all=args.sell_all)
-            print()
-            label = "all shares" if args.sell_all else f"{args.shares} shares"
-            print(f"[OK] Sell order: {label} x {args.symbol} (Market)")
             result["symbol"] = args.symbol
-            print("ORDER_RESULT_JSON:" + json.dumps(result, sort_keys=True))
+            label = "all shares" if args.sell_all else f"{args.shares} shares"
+            print(f"\n[OK] Sell order: {label} x {args.symbol} (Market)")
+        except Exception as e:
+            print(f"\n[ERROR] Sell failed: {e}")
         finally:
-            save_session(ctx)
+            print("ORDER_RESULT_JSON:" + json.dumps(result, sort_keys=True))
+            try:
+                save_session(ctx)
+            except Exception:
+                pass
             browser.close()
+    if not result.get("submitted"):
+        sys.exit(1)
 
 
 def main() -> None:
