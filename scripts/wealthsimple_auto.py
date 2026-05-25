@@ -118,42 +118,34 @@ def switch_buy_in_to_dollars(page) -> None:
 def use_max_dollars(page) -> None:
     switch_buy_in_to_dollars(page)
     print("Clicking Max...")
-    clicked = click_first(page, [
-        'button:has-text("Max")',
-        '[role="button"]:has-text("Max")',
-        'text="Max"',
-    ], timeout=6000)
+    clicked = page.evaluate("""
+        () => {
+            const els = [...document.querySelectorAll('button, [role="button"]')];
+            const btn = els.find(el => el.textContent.trim() === 'Max');
+            if (btn) { btn.click(); return true; }
+            return false;
+        }
+    """)
     if not clicked:
-        raise RuntimeError("Max button not found after account selection — see screenshots for state")
+        raise RuntimeError("Max button not found — account may not be selected yet")
     page.wait_for_timeout(700)
 
 
 def use_max_shares(page) -> None:
     print("Using Max shares / sell all...")
-    clicked = click_first(page, [
-        'button:has-text("Max")',
-        '[role="button"]:has-text("Max")',
-        'button:has-text("Sell all")',
-        'button:has-text("Sell All")',
-        '[role="button"]:has-text("Sell all")',
-        '[role="button"]:has-text("Sell All")',
-        'text="Max"',
-        'text="Sell all"',
-        'text="Sell All"',
-    ], timeout=4000)
-    if clicked:
-        page.wait_for_timeout(700)
-        return
-
-    # Some Wealthsimple tickets expose a "Shares" amount input with a Max pill
-    # inside the same control. If selector clicks fail, click near the right edge
-    # of the visible input where the Max action usually appears.
-    el = page.locator("input:visible").first
-    el.wait_for(state="visible", timeout=3000)
-    box = el.bounding_box()
-    if not box:
-        raise RuntimeError("Could not locate sell quantity input for Max shares.")
-    page.mouse.click(box["x"] + box["width"] - 28, box["y"] + box["height"] / 2)
+    clicked = page.evaluate("""
+        () => {
+            const labels = ['Max', 'Sell all', 'Sell All'];
+            const els = [...document.querySelectorAll('button, [role="button"]')];
+            for (const label of labels) {
+                const btn = els.find(el => el.textContent.trim() === label);
+                if (btn) { btn.click(); return true; }
+            }
+            return false;
+        }
+    """)
+    if not clicked:
+        raise RuntimeError("Max/Sell-all button not found — account may not be selected")
     page.wait_for_timeout(700)
 
 
@@ -415,15 +407,19 @@ def place_order(
     from playwright.sync_api import TimeoutError as PWTimeout
 
     print(f"Clicking {side.title()} tab...")
-    clicked = click_first(page, [
-        f'button:has-text("{side.title()}")',
-        f'[role="tab"]:has-text("{side.title()}")',
-        f'[data-testid*="{side}"]',
-    ], timeout=5000)
-    if not clicked:
+    tab_label = side.title()  # "Buy" or "Sell"
+    tab_clicked = page.evaluate(f"""
+        () => {{
+            const tabs = [...document.querySelectorAll('button, [role="tab"]')];
+            const tab = tabs.find(el => el.textContent.trim() === '{tab_label}');
+            if (tab) {{ tab.click(); return true; }}
+            return false;
+        }}
+    """)
+    if not tab_clicked:
         snap(page, f"{side}_tab_fail")
-        raise RuntimeError(f"Could not find {side.title()} tab - see data/screen_{side}_tab_fail.png")
-    page.wait_for_timeout(600)
+        raise RuntimeError(f"Could not find {side.title()} tab")
+    page.wait_for_timeout(800)
     snap(page, f"{side}_tab")
 
     if price is not None and side == "buy":
@@ -470,7 +466,16 @@ def place_order(
         snap(page, f"{side}_qty")
 
     print("Clicking Next...")
-    page.get_by_role("button", name="Next").click(timeout=8000)
+    next_clicked = page.evaluate("""
+        () => {
+            const btn = [...document.querySelectorAll('button')].find(el => el.textContent.trim() === 'Next');
+            if (btn) { btn.click(); return true; }
+            return false;
+        }
+    """)
+    if not next_clicked:
+        snap(page, f"{side}_next_fail")
+        raise RuntimeError("Next button not found")
     page.wait_for_timeout(3000)
     snap(page, f"{side}_review")
     submitted = False
