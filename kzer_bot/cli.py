@@ -481,7 +481,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         print(f"{now:%H:%M} ET | ${last_price:.2f} ({pnl_pct:+.2f}%) | unrealized ${unrealized_pnl:+.2f}", flush=True)
 
         in_session = is_market_session(now, trading)
-        update_interval = 300 if in_session else 14400  # 5 min during market, 4h outside
+        update_interval = 1800 if in_session else 14400  # 30 min during market, 4h outside
         if time.time() - last_telegram_update >= update_interval:
             all_time_pnl = _get_total_pnl()
             try:

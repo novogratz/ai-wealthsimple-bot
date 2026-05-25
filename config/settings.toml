@@ -1,8 +1,8 @@
 [trading]
 timezone = "America/Toronto"
-market_open = "09:31"
+market_open = "09:15"
 market_close = "16:00"
-latest_entry = "09:36"
+latest_entry = "09:20"
 force_exit = "15:55"
 
 [risk]

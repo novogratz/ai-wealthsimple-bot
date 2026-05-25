@@ -88,8 +88,8 @@ def build_status_telegram(balance: float | None) -> str:
     if now.weekday() >= 5:
         next_event = f"Buy at {nxt:%a %b %d %H:%M} ET"
     elif now.hour < 9 or (now.hour == 9 and now.minute < 31):
-        mins = int((now.replace(hour=9, minute=31, second=0, microsecond=0) - now).total_seconds() // 60)
-        next_event = f"Buy today at 09:31 ET  ({mins} min away)"
+        mins = int((now.replace(hour=9, minute=15, second=0, microsecond=0) - now).total_seconds() // 60)
+        next_event = f"Buy today at 09:15 ET  ({mins} min away)"
     elif now.hour < 16:
         next_event = "Sell today at 15:55 ET"
     else:
@@ -162,7 +162,7 @@ def print_status_banner(balance: float | None) -> None:
         nxt = _next_entry_window()
         next_event = f"Buy at {nxt:%a %b %d %H:%M} ET"
     elif now.hour < 9 or (now.hour == 9 and now.minute < 31):
-        next_event = f"Buy today at 09:31 ET  ({(now.replace(hour=9,minute=31,second=0,microsecond=0)-now).seconds//60} min away)"
+        next_event = f"Buy today at 09:15 ET  ({(now.replace(hour=9,minute=15,second=0,microsecond=0)-now).seconds//60} min away)"
     elif now.hour < 16:
         next_event = "Sell today at 15:55 ET"
     elif now.hour < 17:
@@ -223,10 +223,10 @@ def notify(msg: str, event: str = "info") -> None:
 
 
 def _next_entry_window() -> datetime:
-    """Return the next 09:31 ET on a weekday, skipping weekends."""
+    """Return the next 09:15 ET on a weekday, skipping weekends."""
     from datetime import timedelta
     now = now_et()
-    candidate = now.replace(hour=9, minute=31, second=0, microsecond=0)
+    candidate = now.replace(hour=9, minute=15, second=0, microsecond=0)
     if now >= candidate:
         candidate += timedelta(days=1)
     while candidate.weekday() >= 5:
@@ -243,11 +243,11 @@ def wait_for_entry() -> None:
             log(f"Weekend — next entry window {nxt:%a %b %d %H:%M} ET ({secs/3600:.1f}h away). Sleeping 30 min...")
             time.sleep(1800)
             continue
-        target = now.replace(hour=9, minute=31, second=0, microsecond=0)
-        latest = now.replace(hour=9, minute=36, second=0, microsecond=0)
+        target = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        latest = now.replace(hour=9, minute=20, second=0, microsecond=0)
         if now < target:
             secs = (target - now).total_seconds()
-            log(f"Market opens in {secs/60:.1f} min — waiting...")
+            log(f"Placing order at 09:15 ET — {secs/60:.1f} min away...")
             time.sleep(min(secs, 300))
             continue
         if now > latest:
@@ -256,7 +256,7 @@ def wait_for_entry() -> None:
             log(f"Today's entry window closed. Next window {nxt:%a %b %d %H:%M} ET ({secs/3600:.1f}h away). Sleeping 30 min...")
             time.sleep(1800)
             continue
-        log("Entry window open (09:31–09:36 ET) — proceeding.")
+        log("Entry window open (09:15–09:20 ET) — queuing order before open.")
         return
 
 
@@ -417,6 +417,28 @@ def cleanup_screenshots() -> None:
         log(f"Cleared {len(removed)} old screenshot(s).")
 
 
+def run_fill_check(symbol: str) -> None:
+    """Wait until 9:15 ET then fetch live balance to confirm the order filled."""
+    now = now_et()
+    target = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    secs = (target - now).total_seconds()
+    if secs > 0:
+        log(f"Order queued — waiting {secs/60:.1f} min for market open to confirm fill...")
+        time.sleep(secs)
+
+    log("Market open — checking live balance to confirm fill...")
+    balance = fetch_live_balance(retries=3)
+    bal_str = f"${balance:.2f} CAD" if balance is not None else "unknown"
+    log(f"  Balance after fill: {bal_str}")
+    notify(
+        f"✅ <b>Order filled at market open</b>\n\n"
+        f"🎫 <code>{symbol}</code> — queued at 09:15, filled at open\n"
+        f"💰 Live balance: <b>{bal_str}</b>\n"
+        f"⏰ Auto-sell at: <b>15:55 ET</b>",
+        event="info",
+    )
+
+
 def run_watch() -> None:
     log("Watch loop started - checking price every 60s, selling at 15:55 ET...")
     for attempt in range(1, 4):
@@ -485,7 +507,7 @@ def _passed(now: "datetime", hour: int, minute: int) -> bool:
 
 def wait_for_open_with_scans(scans_done: set[str], last_status: list) -> None:
     """
-    Sleep until the 09:31 ET entry window, firing scheduled scans and status pings.
+    Sleep until the 09:15 ET entry window, firing scheduled scans and status pings.
     scans_done tracks which slots fired this cycle (mutated in place).
     last_status is a one-element list holding the monotonic time of the last status ping.
     """
@@ -498,8 +520,8 @@ def wait_for_open_with_scans(scans_done: set[str], last_status: list) -> None:
 
     while True:
         now = now_et()
-        # Within 5 min of 9:31 on a weekday → stop waiting, go buy
-        target_open = now.replace(hour=9, minute=31, second=0, microsecond=0)
+        # Within 5 min of 9:15 on a weekday → stop waiting, go buy
+        target_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
         if now.weekday() < 5 and 0 <= (target_open - now).total_seconds() <= 300:
             break
 
@@ -542,7 +564,7 @@ def main() -> None:
     parser.add_argument("--now", action="store_true", help="Skip the 09:30 ET wait")
     args = parser.parse_args()
 
-    log("=== kzeR Wealthsimple Bot — running continuously (sells 15:55, scans overnight, buys 09:31) ===")
+    log("=== kzeR Wealthsimple Bot — running continuously (sells 15:55, scans overnight, queues order 09:15, fills 09:30) ===")
     cleanup_screenshots()
 
     from kzer_bot.cli import _get_total_pnl
@@ -595,15 +617,15 @@ def main() -> None:
         # Reset scan slots for the next overnight cycle after each trading day
         scans_done.clear()
 
-        # Hard guard: never buy outside 9:31–9:36 ET
+        # Hard guard: never buy outside 9:15–9:20 ET
         _now = now_et()
-        _open = _now.replace(hour=9, minute=31, second=0, microsecond=0)
-        _close = _now.replace(hour=9, minute=36, second=0, microsecond=0)
+        _open = _now.replace(hour=9, minute=15, second=0, microsecond=0)
+        _close = _now.replace(hour=9, minute=20, second=0, microsecond=0)
         if not (_open <= _now <= _close):
-            log(f"Outside 09:31–09:36 entry window ({_now:%H:%M} ET) — waiting for next open.")
+            log(f"Outside 09:15–09:20 entry window ({_now:%H:%M} ET) — waiting for next open.")
             notify(
                 f"⚠️ <b>Buy skipped</b> — {_now:%H:%M} ET is outside entry window.\n"
-                f"Scanning overnight and retrying tomorrow at 09:31.",
+                f"Scanning overnight and retrying tomorrow at 09:15.",
                 event="error",
             )
             continue
@@ -618,7 +640,7 @@ def main() -> None:
         notify(
             f"🤖 <b>kzeR Wealthsimple Bot — new trading day</b>\n\n"
             f"💼 Budget: <b>${balance:.2f} CAD</b>\n"
-            f"⏰ Entry: <b>09:31 ET</b>  |  🏁 Auto-sell: <b>15:55 ET</b>\n\n"
+            f"⏰ Entry: <b>09:15 ET</b>  |  🏁 Auto-sell: <b>15:55 ET</b>\n\n"
             f"{at_color} All-time PnL: <b>${all_time_pnl:+.2f} CAD</b>",
             event="info",
         )
@@ -626,6 +648,7 @@ def main() -> None:
 
         symbol, price, shares = run_scan(balance)
         run_buy(symbol, price, shares)
+        run_fill_check(symbol)
         run_watch()
         POS_FILE.unlink(missing_ok=True)
 
