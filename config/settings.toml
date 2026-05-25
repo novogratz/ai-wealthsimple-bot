@@ -3,7 +3,7 @@ timezone = "America/Toronto"
 market_open = "09:30"
 market_close = "16:00"
 latest_entry = "09:35"
-force_exit = "15:45"
+force_exit = "15:55"
 
 [risk]
 max_cash_per_trade = 17.24
