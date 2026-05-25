@@ -41,11 +41,14 @@ def log(msg: str) -> None:
     print(f"[{now_et():%H:%M:%S} ET] {msg}", flush=True)
 
 
-def notify(msg: str) -> None:
+def notify(msg: str, event: str = "info") -> None:
     try:
-        send_message(trade_message("info", message=msg))
-    except (TelegramConfigError, RuntimeError, Exception):
-        pass
+        send_message(trade_message(event, message=msg))
+        log("  Telegram sent.")
+    except TelegramConfigError as e:
+        log(f"  Telegram not configured: {e}")
+    except Exception as e:
+        log(f"  Telegram failed: {e}")
 
 
 def wait_for_entry() -> None:
@@ -90,19 +93,20 @@ def run_scan(balance: float) -> tuple[str, float, int]:
     log(f"Shares   : {pick.shares}")
     log(f"Score    : {pick.score:.2f}")
     log(f"Reason   : {pick.reason}")
-    notify(f"Scan done. Buying {pick.symbol} @ ${pick.last_price:.2f} ({pick.shares} shares)")
+    notify(f"Scan done. Buying {pick.symbol} @ ${pick.last_price:.2f} ({pick.shares} shares)", event="scan_top")
     return pick.symbol, pick.last_price, pick.shares
 
 
 def run_buy(symbol: str, price: float, shares: int) -> None:
     log(f"Opening Wealthsimple to buy {symbol} (max dollars)...")
+    notify(f"Placing buy order for {symbol} @ ~${price:.2f}", event="buy_preparing")
     result = subprocess.run(
         [PYTHON, str(AUTO_SCRIPT), "buy", "--symbol", symbol, "--max-dollars"],
         cwd=ROOT,
     )
     if result.returncode != 0:
         log("Buy automation failed.")
-        notify(f"Buy FAILED for {symbol}")
+        notify(f"Buy FAILED for {symbol}", event="error")
         sys.exit(1)
 
     pos = {
@@ -115,11 +119,29 @@ def run_buy(symbol: str, price: float, shares: int) -> None:
     }
     POS_FILE.write_text(json.dumps(pos))
     log(f"Buy submitted. Holding until 15:55 ET.")
-    notify(f"Bought {symbol}. Will auto-sell at 15:55 ET.")
+    notify(f"Bought {symbol} @ ${price:.2f}. Holding until 15:55 ET.", event="buy_submitted")
+
+
+def run_sell(symbol: str, price: float, shares: int, buy_cost: float) -> None:
+    log(f"Selling {symbol}...")
+    notify(f"Placing sell order for {symbol}", event="sell_preparing")
+    result = subprocess.run(
+        [PYTHON, str(AUTO_SCRIPT), "sell", "--symbol", symbol, "--sell-all"],
+        cwd=ROOT,
+    )
+    if result.returncode != 0:
+        log("Sell automation failed.")
+        notify(f"Sell FAILED for {symbol}", event="error")
+        sys.exit(1)
+
+    estimated_proceeds = shares * price
+    pnl = estimated_proceeds - buy_cost
+    log(f"Sold {symbol}. Estimated PnL: ${pnl:+.2f}")
+    notify(f"Sold {symbol} @ ~${price:.2f}\nEstimated PnL: ${pnl:+.2f} CAD", event="sell_submitted")
 
 
 def run_watch() -> None:
-    log("Watch loop started - checking price every 60s...")
+    log("Watch loop started - checking price every 60s, selling at 15:55 ET...")
     result = subprocess.run(
         [PYTHON, "-m", "fashion_bot", "watch", "--position-file", str(POS_FILE)],
         cwd=ROOT,
