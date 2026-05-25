@@ -372,27 +372,32 @@ def choose_unregistered_account(page, side: str) -> None:
     page.wait_for_timeout(900)
     snap(page, f"{side}_acct_picker")
 
-    # Click the first Non-registered / Unregistered account row.
+    # Use JS to directly click the first Non-registered / Unregistered option in the DOM.
+    # Coordinate-based clicks land on elements behind the picker overlay.
     for label in ["Non-registered", "Unregistered", "Personal"]:
-        try:
-            el = page.locator(
-                f'[role="option"]:has-text("{label}"), li:has-text("{label}"), button:has-text("{label}")'
-            ).first
-            el.wait_for(state="visible", timeout=2000)
-            box = el.bounding_box()
-            if box:
-                page.mouse.click(
-                    box["x"] + box["width"] / 2,
-                    box["y"] + box["height"] / 2,
-                )
-            else:
-                el.click()
+        found = page.evaluate(f"""
+            () => {{
+                const all = [
+                    ...document.querySelectorAll('[role="option"]'),
+                    ...document.querySelectorAll('li'),
+                    ...document.querySelectorAll('button'),
+                ];
+                for (const el of all) {{
+                    if (el.textContent.trim().startsWith('{label}') || el.innerText?.includes('{label}')) {{
+                        const radio = el.querySelector('input[type="radio"]');
+                        if (radio) {{ radio.click(); return true; }}
+                        el.click();
+                        return true;
+                    }}
+                }}
+                return false;
+            }}
+        """)
+        if found:
             page.wait_for_timeout(700)
             snap(page, f"{side}_acct_selected")
-            print(f"  Selected {label} account")
+            print(f"  Selected {label} account via JS click")
             return
-        except Exception:
-            pass
 
     snap(page, f"{side}_acct_fail")
     raise RuntimeError(f"Unregistered account not found - see data/screen_{side}_acct_fail.png")
