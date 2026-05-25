@@ -117,11 +117,14 @@ def switch_buy_in_to_dollars(page) -> None:
 
 def use_max_dollars(page) -> None:
     switch_buy_in_to_dollars(page)
-    click_first(page, [
+    print("Clicking Max...")
+    clicked = click_first(page, [
         'button:has-text("Max")',
         '[role="button"]:has-text("Max")',
         'text="Max"',
-    ], timeout=3000)
+    ], timeout=6000)
+    if not clicked:
+        raise RuntimeError("Max button not found after account selection — see screenshots for state")
     page.wait_for_timeout(700)
 
 
@@ -369,43 +372,27 @@ def choose_unregistered_account(page, side: str) -> None:
     page.wait_for_timeout(900)
     snap(page, f"{side}_acct_picker")
 
-    # Find the Non-registered account with the highest CAD balance.
-    # There are often multiple Non-registered accounts — pick the richest one.
-    # Click by pixel coordinates at the right edge of the row (where the radio button is).
-    account_labels = ["Non-registered", "Unregistered", "Personal"]
-    best_balance = -1.0
-    best_box = None
-
-    for label in account_labels:
+    # Click the first Non-registered / Unregistered account row.
+    for label in ["Non-registered", "Unregistered", "Personal"]:
         try:
-            els = page.locator(
+            el = page.locator(
                 f'[role="option"]:has-text("{label}"), li:has-text("{label}"), button:has-text("{label}")'
-            ).all()
-            for el in els:
-                try:
-                    if not el.is_visible(timeout=500):
-                        continue
-                    text = el.inner_text()
-                    m = re.search(r'\$([0-9,]+\.?\d*)\s*CAD', text)
-                    bal = float(m.group(1).replace(",", "")) if m else 0.0
-                    if bal > best_balance:
-                        box = el.bounding_box()
-                        if box:
-                            best_balance = bal
-                            best_box = box
-                except Exception:
-                    pass
+            ).first
+            el.wait_for(state="visible", timeout=2000)
+            box = el.bounding_box()
+            if box:
+                page.mouse.click(
+                    box["x"] + box["width"] / 2,
+                    box["y"] + box["height"] / 2,
+                )
+            else:
+                el.click()
+            page.wait_for_timeout(700)
+            snap(page, f"{side}_acct_selected")
+            print(f"  Selected {label} account")
+            return
         except Exception:
             pass
-
-    if best_box is not None:
-        # Click near the right edge of the row — that's where the radio button circle lives
-        x = best_box["x"] + best_box["width"] - 20
-        y = best_box["y"] + best_box["height"] / 2
-        page.mouse.click(x, y)
-        print(f"  Clicked radio button for Non-registered ${best_balance:.2f} CAD account")
-        page.wait_for_timeout(700)
-        return
 
     snap(page, f"{side}_acct_fail")
     raise RuntimeError(f"Unregistered account not found - see data/screen_{side}_acct_fail.png")
