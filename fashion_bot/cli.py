@@ -369,12 +369,28 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
             MAX_SELL_RETRIES = 3
             result = None
+            sell_stdout = ""
+            order_submitted = False
+
             for attempt in range(1, MAX_SELL_RETRIES + 1):
                 result = subprocess.run(sell_args, capture_output=True, text=True, timeout=180)
-                for line in result.stdout.splitlines():
+                sell_stdout = result.stdout
+                for line in sell_stdout.splitlines():
                     print(f"  {line}", flush=True)
-                if result.returncode == 0:
+
+                # Check if the order was actually submitted (browser may crash AFTER placing it)
+                for line in sell_stdout.splitlines():
+                    if line.startswith("ORDER_RESULT_JSON:"):
+                        try:
+                            data = json.loads(line[len("ORDER_RESULT_JSON:"):])
+                            if data.get("submitted"):
+                                order_submitted = True
+                        except Exception:
+                            pass
+
+                if result.returncode == 0 or order_submitted:
                     break
+
                 print(f"Sell attempt {attempt}/{MAX_SELL_RETRIES} failed (exit {result.returncode})", flush=True)
                 if attempt < MAX_SELL_RETRIES:
                     try:
@@ -383,7 +399,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
                         pass
                     time.sleep(60)
 
-            if result is None or result.returncode != 0:
+            sell_ok = (result is not None) and (result.returncode == 0 or order_submitted)
+            if not sell_ok:
                 print("All sell attempts failed.", flush=True)
                 try:
                     send_message(trade_message("error", message=f"❌ All {MAX_SELL_RETRIES} sell attempts failed for {symbol}. Restart bot to retry."))
@@ -391,10 +408,13 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     pass
                 return 1
 
+            if order_submitted and result.returncode != 0:
+                print("Order was submitted but browser crashed after — treating as success.", flush=True)
+
             # Parse actual fill from ORDER_RESULT_JSON for accurate PnL
             actual_price = last_price
             actual_qty = shares
-            for line in result.stdout.splitlines():
+            for line in sell_stdout.splitlines():
                 if line.startswith("ORDER_RESULT_JSON:"):
                     try:
                         data = json.loads(line[len("ORDER_RESULT_JSON:"):])
