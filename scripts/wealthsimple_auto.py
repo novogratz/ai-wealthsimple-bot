@@ -631,16 +631,33 @@ def place_order(
         # Use JS click to bypass chat-widget overlay that intercepts pointer events
         submitted_via_js = page.evaluate("""
             () => {
-                const texts = ['Submit order', 'Place order', 'Place Order', 'Queue order', 'Confirm', 'Submit'];
-                const buttons = [...document.querySelectorAll('button')];
+                const texts = [
+                    'Submit order', 'Submit Order', 'Place order', 'Place Order',
+                    'Queue order', 'Review order', 'Review Order',
+                    'Confirm order', 'Confirm Order', 'Confirm',
+                    'Submit', 'Buy', 'Place', 'Execute',
+                ];
+                const buttons = [...document.querySelectorAll('button, [role="button"], [role="submit"]')];
                 for (const text of texts) {
-                    const btn = buttons.find(b => b.textContent.trim() === text || b.textContent.trim().startsWith(text));
-                    if (btn) { btn.click(); return true; }
+                    const btn = buttons.find(b =>
+                        b.textContent.trim() === text ||
+                        b.textContent.trim().startsWith(text) ||
+                        b.textContent.trim().toLowerCase() === text.toLowerCase() ||
+                        b.textContent.trim().toLowerCase().startsWith(text.toLowerCase())
+                    );
+                    if (btn) { btn.click(); return 'clicked:' + text; }
                 }
-                return false;
+                const submitBtn = document.querySelector('button[type="submit"]');
+                if (submitBtn) { submitBtn.click(); return 'clicked:type=submit'; }
+                const allText = document.body.innerText.substring(0, 2000);
+                return 'not_found::' + allText;
             }
         """)
-        if not submitted_via_js:
+        if submitted_via_js and submitted_via_js.startswith("clicked:"):
+            print(f"  Submit clicked via: {submitted_via_js}")
+        else:
+            debug_text = (submitted_via_js or "").replace("not_found::", "")[:1000] if submitted_via_js else "no text"
+            print(f"  Page text at submit: {debug_text[:500]}")
             snap(page, f"{side}_confirm_fail")
             raise RuntimeError(f"Submit button not found - see data/screen_{side}_confirm_fail.png")
         # Mark submitted BEFORE any post-submit page ops — the confirmation page
