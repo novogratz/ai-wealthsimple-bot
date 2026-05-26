@@ -18,6 +18,8 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 ROOT           = Path(__file__).resolve().parents[1]
 YF_CACHE       = ROOT / "data" / "yfinance_cache"
 SNAPSHOT_CACHE = ROOT / "data" / "grinder_snapshot_cache.json"
+MARKET_CAP_CACHE = ROOT / "data" / "market_cap_cache.json"
+FUTURES_CACHE   = ROOT / "data" / "futures_bias_cache.json"
 UNIVERSE_FILE  = ROOT / "data" / "universe.json"
 YF_CACHE.mkdir(parents=True, exist_ok=True)
 yf.set_tz_cache_location(str(YF_CACHE))
@@ -241,6 +243,7 @@ class GrinderMarketData:
     def __init__(self) -> None:
         self._cache: dict[str, Optional[GrinderSnapshot]] = {}
         self._market_cap_cache: dict[str, Optional[float]] = {}
+        self._market_cap_disk_loaded = False
         self._disk_loaded = False
 
     def _load_disk_cache(self) -> None:
@@ -268,6 +271,35 @@ class GrinderMarketData:
         try:
             data = {sym: _snapshot_to_dict(snap) for sym, snap in self._cache.items() if snap is not None}
             SNAPSHOT_CACHE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _load_market_cap_cache(self) -> None:
+        if self._market_cap_disk_loaded:
+            return
+        self._market_cap_disk_loaded = True
+        if not MARKET_CAP_CACHE.exists():
+            return
+        try:
+            age = time.time() - MARKET_CAP_CACHE.stat().st_mtime
+            if age > 7 * 86400:
+                return
+            raw = json.loads(MARKET_CAP_CACHE.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                for symbol, value in raw.items():
+                    if value is None:
+                        self._market_cap_cache[symbol] = None
+                    else:
+                        self._market_cap_cache[symbol] = float(value)
+        except Exception:
+            return
+
+    def _persist_market_cap_cache(self) -> None:
+        try:
+            MARKET_CAP_CACHE.write_text(
+                json.dumps(self._market_cap_cache, indent=2),
+                encoding="utf-8",
+            )
         except Exception:
             pass
 
@@ -349,10 +381,12 @@ class GrinderMarketData:
         return [s for s in self._cache.values() if s is not None]
 
     def market_cap(self, symbol: str) -> Optional[float]:
+        self._load_market_cap_cache()
         if symbol in self._market_cap_cache:
             return self._market_cap_cache[symbol]
         value = self._fetch_market_cap(symbol)
         self._market_cap_cache[symbol] = value
+        self._persist_market_cap_cache()
         return value
 
     def _fetch_market_cap(self, symbol: str) -> Optional[float]:
@@ -397,6 +431,39 @@ class FuturesBias(Enum):
     NEUTRAL = "neutral"
 
 
+def _load_cached_futures_bias() -> tuple[FuturesBias, str] | None:
+    if not FUTURES_CACHE.exists():
+        return None
+    try:
+        age = time.time() - FUTURES_CACHE.stat().st_mtime
+        if age > 18 * 3600:
+            return None
+        raw = json.loads(FUTURES_CACHE.read_text(encoding="utf-8"))
+        bias = FuturesBias(raw.get("bias", "neutral"))
+        detail = str(raw.get("detail", ""))
+        if detail:
+            detail += " (cached)"
+        else:
+            detail = "cached futures bias"
+        return bias, detail
+    except Exception:
+        return None
+
+
+def _save_cached_futures_bias(bias: FuturesBias, detail: str) -> None:
+    try:
+        FUTURES_CACHE.write_text(
+            json.dumps({
+                "bias": bias.value,
+                "detail": detail,
+                "updated": time.time(),
+            }, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
 def get_futures_bias() -> tuple[FuturesBias, str]:
     """
     Checks ES=F (S&P 500 futures) vs 24h ago.
@@ -419,12 +486,17 @@ def get_futures_bias() -> tuple[FuturesBias, str]:
         detail = f"ES=F {last:,.0f} pts  ({pct:+.2f}% vs 24h ago)"
 
         if pct >= 0.3:
-            return FuturesBias.GREEN,   detail
+            bias = FuturesBias.GREEN
         elif pct <= -0.3:
-            return FuturesBias.RED,     detail
+            bias = FuturesBias.RED
         else:
-            return FuturesBias.NEUTRAL, detail
+            bias = FuturesBias.NEUTRAL
+        _save_cached_futures_bias(bias, detail)
+        return bias, detail
     except Exception as exc:
+        cached = _load_cached_futures_bias()
+        if cached is not None:
+            return cached
         return FuturesBias.NEUTRAL, f"ES=F: error - {exc}"
 
 
@@ -493,6 +565,7 @@ class GrinderStrategy:
     MIN_REL_VOL   = 1.5
     MIN_ATR_PCT   = 1.5
     MIN_CLOSE_STR = 0.40
+    MARKET_CAP_SCAN_LIMIT = 120
 
     def __init__(self, market_data: Optional[GrinderMarketData] = None) -> None:
         self.market_data = market_data or GrinderMarketData()
@@ -503,12 +576,13 @@ class GrinderStrategy:
             snap = self.market_data.snapshot(symbol)
             if snap is None:
                 continue
-            pick = self._qualify(snap)
+            pick = self._qualify_core(snap)
             if pick is not None:
                 picks.append(pick)
-        return sorted(picks, key=lambda p: p.score, reverse=True)
+        picks.sort(key=lambda p: p.score, reverse=True)
+        return self._filter_market_cap(picks)
 
-    def _qualify(self, snap: GrinderSnapshot) -> Optional[GrinderPick]:
+    def _qualify_core(self, snap: GrinderSnapshot) -> Optional[GrinderPick]:
         if not (self.MIN_PRICE <= snap.last_close <= self.MAX_PRICE):
             return None
         if snap.yesterday_volume < self.MIN_YDAY_VOL:
@@ -528,9 +602,6 @@ class GrinderStrategy:
             return None
         if snap.close_strength < self.MIN_CLOSE_STR:
             return None
-        market_cap = self.market_data.market_cap(snap.symbol)
-        if market_cap is None or market_cap < self.MIN_MARKET_CAP:
-            return None
         return GrinderPick(
             symbol        = snap.symbol,
             last_close    = snap.last_close,
@@ -543,6 +614,15 @@ class GrinderStrategy:
             above_ema20   = True,
             strategy_name = "Main Strategy",
         )
+
+    def _filter_market_cap(self, picks: list[GrinderPick]) -> list[GrinderPick]:
+        filtered: list[GrinderPick] = []
+        for pick in picks[: self.MARKET_CAP_SCAN_LIMIT]:
+            market_cap = self.market_data.market_cap(pick.symbol)
+            if market_cap is None or market_cap < self.MIN_MARKET_CAP:
+                continue
+            filtered.append(pick)
+        return filtered
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -568,6 +648,7 @@ class FallbackStrategy:
     MIN_PCT_CHG = 1.0
     MAX_PCT_CHG = 15.0
     MIN_REL_VOL = 1.0  # lowered: catches stocks up on quiet volume
+    MARKET_CAP_SCAN_LIMIT = 120
 
     def __init__(self, market_data: Optional[GrinderMarketData] = None) -> None:
         self.market_data = market_data or GrinderMarketData()
@@ -578,12 +659,13 @@ class FallbackStrategy:
             snap = self.market_data.snapshot(symbol)
             if snap is None:
                 continue
-            pick = self._qualify(snap)
+            pick = self._qualify_core(snap)
             if pick is not None:
                 picks.append(pick)
-        return sorted(picks, key=lambda p: p.score, reverse=True)
+        picks.sort(key=lambda p: p.score, reverse=True)
+        return self._filter_market_cap(picks)
 
-    def _qualify(self, snap: GrinderSnapshot) -> Optional[GrinderPick]:
+    def _qualify_core(self, snap: GrinderSnapshot) -> Optional[GrinderPick]:
         if not (self.MIN_PRICE <= snap.last_close <= self.MAX_PRICE):
             return None
         if snap.yesterday_volume < self.MIN_YDAY_VOL:
@@ -596,9 +678,6 @@ class FallbackStrategy:
         if snap.rel_volume < self.MIN_REL_VOL:
             return None
         if snap.last_close <= snap.ema20:
-            return None
-        market_cap = self.market_data.market_cap(snap.symbol)
-        if market_cap is None or market_cap < self.MIN_MARKET_CAP:
             return None
         score = pct * snap.rel_volume * (1.0 + snap.close_strength)
         return GrinderPick(
@@ -613,6 +692,15 @@ class FallbackStrategy:
             above_ema20   = True,
             strategy_name = "Fallback",
         )
+
+    def _filter_market_cap(self, picks: list[GrinderPick]) -> list[GrinderPick]:
+        filtered: list[GrinderPick] = []
+        for pick in picks[: self.MARKET_CAP_SCAN_LIMIT]:
+            market_cap = self.market_data.market_cap(pick.symbol)
+            if market_cap is None or market_cap < self.MIN_MARKET_CAP:
+                continue
+            filtered.append(pick)
+        return filtered
 
 
 # ──────────────────────────────────────────────────────────────────────────────

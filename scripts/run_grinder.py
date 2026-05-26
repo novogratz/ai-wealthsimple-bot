@@ -9,9 +9,11 @@ Entry timing : Green/Neutral futures → 9:15 AM pre-market (fills at 9:30 open)
 AI analysis  : claude CLI analyses top candidates each morning
 
 Usage:
-    python scripts/run_grinder.py              # 24/7 autonomous mode
-    python scripts/run_grinder.py --now        # skip wait, buy immediately (debug)
-    python scripts/run_grinder.py --balance 95 # override cash (default: live fetch)
+    python scripts/run_grinder.py                       # 24/7 autonomous mode
+    python scripts/run_grinder.py --now                 # skip overnight wait (debug)
+    python scripts/run_grinder.py --now --yahoo         # skip wait + use Yahoo most active watchlist
+    python scripts/run_grinder.py --buy-today --yahoo   # buy immediately with Yahoo watchlist
+    python scripts/run_grinder.py --balance 95          # override cash (default: live fetch)
 """
 from __future__ import annotations
 
@@ -52,6 +54,7 @@ PNL_LEDGER   = DATA / "pnl_ledger.json"
 SESSION_FILE = DATA / "session_info.json"
 LOG_FILE     = DATA / "grinder.log"
 PROFILE_FILE  = DATA / "company_profiles.json"
+SCAN_STATE_FILE = DATA / "scan_state.json"
 PYTHON       = sys.executable
 TZ           = ZoneInfo("America/Toronto")
 
@@ -61,6 +64,11 @@ _LOG_MAX_BYTES = 5 * 1024 * 1024  # rotate at 5 MB
 
 _SELL_HOUR        = 15
 _SELL_MINUTE      = 55
+_BUY_DELAY_MINUTES = 5
+_SHORTLIST_SIZE    = 150
+_FULL_REFRESH_TTL  = 12 * 3600
+_CACHED_SCAN_TTL   = 18 * 3600
+_MIN_COVERAGE_FOR_CACHE = 0.35
 _DEPLOY_PCT       = 90        # % of balance deployed per trade
 _UNIVERSE_MAX_AGE = 7 * 86400  # refresh universe.json if older than 7 days
 UNIVERSE_FILE     = ROOT / "data" / "universe.json"
@@ -204,6 +212,148 @@ def _company_details(symbol: str) -> str:
     industry = profile.get("industry", "").strip()
     pieces = [p for p in (sector, industry) if p]
     return " / ".join(pieces) if pieces else "Business description unavailable"
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=TZ)
+        return parsed.astimezone(TZ)
+    except Exception:
+        return None
+
+
+def _pick_to_dict(pick: GrinderPick) -> dict:
+    return {
+        "symbol": pick.symbol,
+        "last_close": pick.last_close,
+        "score": pick.score,
+        "yesterday_pct": pick.yesterday_pct,
+        "rel_volume": pick.rel_volume,
+        "atr_pct": pick.atr_pct,
+        "close_strength": pick.close_strength,
+        "above_ema5": pick.above_ema5,
+        "above_ema20": pick.above_ema20,
+        "strategy_name": pick.strategy_name,
+    }
+
+
+def _pick_from_dict(data: dict) -> GrinderPick | None:
+    try:
+        return GrinderPick(
+            symbol=str(data["symbol"]),
+            last_close=float(data["last_close"]),
+            score=float(data["score"]),
+            yesterday_pct=float(data["yesterday_pct"]),
+            rel_volume=float(data["rel_volume"]),
+            atr_pct=float(data["atr_pct"]),
+            close_strength=float(data["close_strength"]),
+            above_ema5=bool(data["above_ema5"]),
+            above_ema20=bool(data["above_ema20"]),
+            strategy_name=str(data["strategy_name"]),
+        )
+    except Exception:
+        return None
+
+
+def _load_scan_state() -> dict:
+    if not SCAN_STATE_FILE.exists():
+        return {}
+    try:
+        payload = json.loads(SCAN_STATE_FILE.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_scan_state(
+    *,
+    picks: list[GrinderPick],
+    bias: FuturesBias,
+    buy_plan: str,
+    strategy_name: str,
+    futures_detail: str,
+    shortlist: list[str],
+    full_refresh: bool,
+    scan_symbols: list[str],
+) -> None:
+    try:
+        payload = {
+            "updated": now_et().isoformat(),
+            "last_full_scan": now_et().isoformat() if full_refresh else _load_scan_state().get("last_full_scan"),
+            "bias": bias.value,
+            "buy_plan": buy_plan,
+            "strategy_name": strategy_name,
+            "futures_detail": futures_detail,
+            "shortlist": shortlist[:_SHORTLIST_SIZE],
+            "scan_symbols": scan_symbols,
+            "picks": [_pick_to_dict(p) for p in picks[:10]],
+        }
+        SCAN_STATE_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _load_cached_scan_result() -> tuple[list[GrinderPick], FuturesBias, str, str, str, list[str]] | None:
+    state = _load_scan_state()
+    if not state:
+        return None
+    updated = _parse_ts(state.get("updated"))
+    if updated is None:
+        return None
+    if (now_et() - updated).total_seconds() > _CACHED_SCAN_TTL:
+        return None
+    picks: list[GrinderPick] = []
+    for raw in state.get("picks", []) if isinstance(state.get("picks", []), list) else []:
+        pick = _pick_from_dict(raw)
+        if pick is not None:
+            picks.append(pick)
+    if not picks:
+        return None
+    try:
+        bias = FuturesBias(state.get("bias", "neutral"))
+    except Exception:
+        bias = FuturesBias.NEUTRAL
+    buy_plan = str(state.get("buy_plan", ""))
+    strategy_name = str(state.get("strategy_name", "Cached"))
+    futures_detail = str(state.get("futures_detail", "cached"))
+    shortlist = [str(s) for s in state.get("shortlist", []) if str(s)]
+    return picks, bias, buy_plan, strategy_name, futures_detail, shortlist
+
+
+def _choose_scan_symbols(force_full: bool = False) -> tuple[list[str], bool]:
+    state = _load_scan_state()
+    updated = _parse_ts(state.get("updated"))
+    last_full = _parse_ts(state.get("last_full_scan"))
+    shortlist = [str(s) for s in state.get("shortlist", []) if str(s)]
+
+    use_full = force_full or not shortlist
+    if not use_full:
+        if last_full is None:
+            use_full = True
+        else:
+            use_full = (now_et() - last_full).total_seconds() >= _FULL_REFRESH_TTL
+
+    if use_full:
+        return WATCHLIST, True
+    return shortlist, False
+
+
+def _build_shortlist(md: GrinderMarketData, picks: list[GrinderPick]) -> list[str]:
+    shortlist: list[str] = []
+    for pick in picks:
+        if pick.symbol not in shortlist:
+            shortlist.append(pick.symbol)
+
+    for snap in sorted(md.all_snapshots(), key=lambda s: s.score, reverse=True):
+        if snap.symbol not in shortlist:
+            shortlist.append(snap.symbol)
+        if len(shortlist) >= _SHORTLIST_SIZE:
+            break
+    return shortlist[:_SHORTLIST_SIZE]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -561,40 +711,43 @@ def _log_scan_diagnostics(md: GrinderMarketData) -> None:
 # Scan
 # ──────────────────────────────────────────────────────────────────────────────
 
-def run_scan(balance: float) -> tuple[list[GrinderPick], FuturesBias, str, str, str]:
+def run_scan(balance: float, scan_symbols: list[str] | None = None,
+             full_refresh: bool = False) -> tuple[list[GrinderPick], FuturesBias, str, str, str]:
     """
     Returns (picks, bias, buy_plan, strategy_name, futures_detail).
     picks is the full sorted list (may be empty).
     strategy_name reflects which strategy produced the picks.
     """
+    scan_symbols = scan_symbols or WATCHLIST
+
     log("Checking US futures (ES=F)...")
     bias, futures_detail = get_futures_bias()
     log(f"  Bias: {bias.value.upper()}  |  {futures_detail}")
 
-    log(f"Scanning {len(WATCHLIST)} Canadian tickers (main 8-criteria)...")
+    log(f"Scanning {len(scan_symbols)} Canadian tickers (main 8-criteria)...")
     md = GrinderMarketData()
 
     # Batch-download all tickers at once (3-5x faster than sequential)
     def _progress(done: int, total: int) -> None:
         if done % 500 == 0 or done == total:
             log(f"  Data: {done}/{total} tickers downloaded...")
-    md.prefetch(WATCHLIST, progress_cb=_progress)
+    md.prefetch(scan_symbols, progress_cb=_progress)
     log(f"  Prefetch complete — {len(md.all_snapshots())} tickers with data")
 
-    picks = GrinderStrategy(md).scan(WATCHLIST)
+    picks = GrinderStrategy(md).scan(scan_symbols)
     log(f"  Main strategy: {len(picks)} candidate(s).")
 
     strategy_name = "Main Strategy"
     if not picks:
         _log_scan_diagnostics(md)
         log("  No main picks — running fallback...")
-        picks = FallbackStrategy(md).scan(WATCHLIST)
+        picks = FallbackStrategy(md).scan(scan_symbols)
         strategy_name = "Fallback Original Strategy" if picks else ""
         log(f"  Fallback: {len(picks)} candidate(s).")
 
     if not picks:
         log("  No fallback picks — running best-effort guaranteed pick...")
-        picks = BestEffortStrategy(md).scan(WATCHLIST)
+        picks = BestEffortStrategy(md).scan(scan_symbols)
         strategy_name = "Best Available" if picks else "No Strategy"
         log(f"  Best-effort: {len(picks)} candidate(s).")
 
@@ -604,6 +757,61 @@ def run_scan(balance: float) -> tuple[list[GrinderPick], FuturesBias, str, str, 
         buy_plan = "⏳ Wait for bounce — buy 11:00–12:00 PM ET"
     else:
         buy_plan = "🚀 Buy at 9:15 AM pre-market  (fills at 9:30 open)"
+
+    shortlist_source = picks if picks else [GrinderPick(
+        symbol=s.symbol,
+        last_close=s.last_close,
+        score=s.score,
+        yesterday_pct=s.yesterday_pct_change,
+        rel_volume=s.rel_volume,
+        atr_pct=s.atr_pct,
+        close_strength=s.close_strength,
+        above_ema5=(s.last_close > s.ema5),
+        above_ema20=(s.last_close > s.ema20),
+        strategy_name="Shortlist Seed",
+    ) for s in sorted(md.all_snapshots(), key=lambda s: s.score, reverse=True)[:_SHORTLIST_SIZE]]
+
+    if picks:
+        shortlist = _build_shortlist(md, picks)
+        _save_scan_state(
+            picks=picks,
+            bias=bias,
+            buy_plan=buy_plan,
+            strategy_name=strategy_name,
+            futures_detail=futures_detail,
+            shortlist=shortlist,
+            full_refresh=full_refresh,
+            scan_symbols=scan_symbols,
+        )
+        return picks, bias, buy_plan, strategy_name, futures_detail
+
+    cached = _load_cached_scan_result()
+    coverage = (len(md.all_snapshots()) / len(scan_symbols)) if scan_symbols else 0.0
+    shortlist = _build_shortlist(md, shortlist_source)
+    _save_scan_state(
+        picks=[],
+        bias=bias,
+        buy_plan=buy_plan,
+        strategy_name=strategy_name,
+        futures_detail=futures_detail,
+        shortlist=shortlist,
+        full_refresh=full_refresh,
+        scan_symbols=scan_symbols,
+    )
+    if cached is not None and (coverage < _MIN_COVERAGE_FOR_CACHE or len(scan_symbols) > 1000):
+        cached_picks, _, cached_buy_plan, cached_strategy, cached_fut, cached_shortlist = cached
+        log("  Using cached scan state because live data coverage was low.")
+        _save_scan_state(
+            picks=cached_picks,
+            bias=bias,
+            buy_plan=cached_buy_plan or buy_plan,
+            strategy_name=cached_strategy,
+            futures_detail=cached_fut or futures_detail,
+            shortlist=cached_shortlist or shortlist,
+            full_refresh=full_refresh,
+            scan_symbols=scan_symbols,
+        )
+        return cached_picks, bias, cached_buy_plan or buy_plan, cached_strategy, cached_fut or futures_detail
 
     return picks, bias, buy_plan, strategy_name, futures_detail
 
@@ -615,6 +823,44 @@ def run_scan(balance: float) -> tuple[list[GrinderPick], FuturesBias, str, str, 
 def _bias_line(bias: FuturesBias, futures_detail: str) -> str:
     emoji = {"green": "🟢 GREEN", "red": "🔴 RED", "neutral": "⚪ NEUTRAL"}[bias.value]
     return f"📡 Futures: <b>{emoji}</b>  —  {futures_detail}"
+
+
+def _criteria_explanation(pick: GrinderPick) -> str:
+    strat = pick.strategy_name
+    if strat == "Main Strategy":
+        return (
+            f"━━━ <b>8-CRITERIA PASSED</b> ━━━━\n"
+            f"  ✅ Price: <b>${pick.last_close:.2f}</b>  ($2.00–$40.00)\n"
+            f"  ✅ Avg Vol: <b>≥300k</b>\n"
+            f"  ✅ Yesterday: <b>{pick.yesterday_pct:+.2f}%</b>  (+1.5% to +12%)\n"
+            f"  ✅ Rel Vol: <b>{pick.rel_volume:.1f}x</b>  (≥1.5x)\n"
+            f"  ✅ ATR: <b>{pick.atr_pct:.2f}%</b>  (≥1.5%)\n"
+            f"  ✅ Above EMA20 ✅ EMA5\n"
+            f"  ✅ Close Strength: <b>{pick.close_strength:.0%}</b>  (≥0.40)\n"
+            f"  ✅ Market Cap ≥ $25M"
+        )
+    if strat == "Fallback":
+        return (
+            f"━━━ <b>FALLBACK CRITERIA PASSED</b> ━━━━\n"
+            f"  ✅ Price: <b>${pick.last_close:.2f}</b>  ($1.00–$40.00)\n"
+            f"  ✅ Avg Vol: <b>≥100k</b>\n"
+            f"  ✅ Yesterday: <b>{pick.yesterday_pct:+.2f}%</b>  (+1.0% to +15%)\n"
+            f"  ✅ Rel Vol: <b>{pick.rel_volume:.1f}x</b>  (≥1.0x)\n"
+            f"  ✅ Above EMA20\n"
+            f"  ✅ Market Cap ≥ $25M\n\n"
+            f"  ⚠️ Missed main: ATR or close-strength or EMA5 threshold"
+        )
+    if strat == "Best Available":
+        return (
+            f"━━━ <b>BEST AVAILABLE (no filters)</b> ━━━━\n"
+            f"  ⚠️ No stock passed normal filters\n"
+            f"  🎯 Highest raw momentum score from full universe\n"
+            f"  📈 Yesterday: <b>{pick.yesterday_pct:+.2f}%</b>\n"
+            f"  🔥 Rel Vol: <b>{pick.rel_volume:.1f}x</b>\n"
+            f"  📊 Above EMA5 {'✅' if pick.above_ema5 else '❌'}  "
+            f"Above EMA20 {'✅' if pick.above_ema20 else '❌'}"
+        )
+    return ""
 
 
 def build_scan_message(
@@ -693,6 +939,7 @@ def build_scan_message(
         f"  📊 Trend: EMA5 {'✅' if top.above_ema5 else '❌'}  "
         f"EMA20 {'✅' if top.above_ema20 else '❌'}\n"
         f"  🎯 Score: <b>{top.score:.1f}</b>  ({top.confidence})\n\n"
+        f"{_criteria_explanation(top)}\n"
     )
 
     if others and not is_best:
@@ -755,6 +1002,7 @@ def build_buy_message(
         f"  ✅ Close strength: <b>{pick.close_strength:.0%}</b> → buyers held the close\n"
         f"  {bias_line}\n"
         f"  🎯 Score: <b>{pick.score:.1f}</b>  ({pick.confidence})\n\n"
+        f"{_criteria_explanation(pick)}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📋 <b>PLAN:</b>  {pick.strategy_name}\n"
         f"🏁 Hard sell at <b>3:55 PM ET</b>  — no stop loss, time-based exit only"
@@ -994,6 +1242,21 @@ def wait_for_fill_confirm(symbol: str) -> None:
     )
 
 
+def wait_after_pick(pick: GrinderPick, bias: FuturesBias, futures_detail: str) -> None:
+    if _BUY_DELAY_MINUTES <= 0:
+        return
+    delay_secs = _BUY_DELAY_MINUTES * 60
+    notify(
+        f"🕒 <b>Pick locked</b>\n\n"
+        f"🎫 <code>{pick.symbol}</code>\n"
+        f"🏢 {_company_line(pick.symbol)}\n"
+        f"⏳ Buying in <b>{_BUY_DELAY_MINUTES} min</b> after confirmation\n"
+        f"📡 {_bias_line(bias, futures_detail)}"
+    )
+    log(f"Waiting {_BUY_DELAY_MINUTES} min after pick selection before buy...")
+    time.sleep(delay_secs)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Hold + 30-min updates + sell
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1021,6 +1284,25 @@ def hold_and_sell() -> None:
     UPDATE_INTERVAL = 1800  # 30 min
 
     log(f"Holding {symbol}  {shares:.4f} sh @ ${entry:.2f}  (cost ${cost:.2f})")
+
+    now = now_et()
+
+    # If bought after hours (past 3:55 PM), wait until next day's sell time
+    if now.hour > _SELL_HOUR or (now.hour == _SELL_HOUR and now.minute >= _SELL_MINUTE):
+        next_sell = now.replace(hour=_SELL_HOUR, minute=_SELL_MINUTE, second=0, microsecond=0) + timedelta(days=1)
+        while next_sell.weekday() >= 5:
+            next_sell += timedelta(days=1)
+        secs = (next_sell - now).total_seconds()
+        log(f"After-hours buy — holding until next sell at {next_sell:%a %b %d %H:%M} ET ({secs/3600:.1f}h).")
+        notify(
+            f"📊 <b>Position open — overnight hold</b>\n\n"
+            f"🎫 <code>{symbol}</code>  |  {shares:.4f} sh @ ${entry:.2f}\n"
+            f"💰 Cost: <b>${cost:.2f} CAD</b>  |  📋 {strat}\n"
+            f"🌙 Bought after hours — holding until <b>3:55 PM ET tomorrow</b>\n"
+            f"⏰ Updates every 30 min"
+        )
+        time.sleep(secs)
+
     notify(
         f"📊 <b>Position open — monitoring until 3:55 PM</b>\n\n"
         f"🎫 <code>{symbol}</code>  |  {shares:.4f} sh @ ${entry:.2f}\n"
@@ -1115,8 +1397,14 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
     """
 
     def _do_scan(label: str) -> FuturesBias:
-        log(f"Running {label}...")
-        picks, new_bias, buy_plan, strat_name, fut_det = run_scan(balance)
+        scan_symbols, full_refresh = _choose_scan_symbols()
+        source = "full universe" if full_refresh else f"shortlist ({len(scan_symbols)})"
+        log(f"Running {label} using {source}...")
+        picks, new_bias, buy_plan, strat_name, fut_det = run_scan(
+            balance,
+            scan_symbols=scan_symbols,
+            full_refresh=full_refresh,
+        )
         top = picks[0] if picks else None
         ai  = get_ai_analysis(picks, new_bias, fut_det, balance)
         msg = build_scan_message(picks, new_bias, fut_det, buy_plan, strat_name, balance, ai, label)
@@ -1198,6 +1486,14 @@ def main() -> None:
                         help="Cash in CAD (default: live fetch from Wealthsimple)")
     parser.add_argument("--now", "--buy-now", action="store_true",
                         help="Skip all waiting and buy immediately (debug)")
+    parser.add_argument("--ticker", type=str, default=None,
+                        help="Skip 4000-stock scan and buy this single ticker immediately (e.g. SHOP.TO)")
+    parser.add_argument("--lite", action="store_true",
+                        help="Use hardcoded ~100 ticker watchlist instead of full 4000-stock universe (avoids rate limits)")
+    parser.add_argument("--yahoo", action="store_true",
+                        help="Use Yahoo Finance most active Canadian stocks (~755 tickers sorted by volume)")
+    parser.add_argument("--buy-today", action="store_true",
+                        help="Skip all timing (overnight wait + buy window) — scan and buy immediately")
     args = parser.parse_args()
 
     # ── Startup ───────────────────────────────────────────────────────────
@@ -1205,7 +1501,34 @@ def main() -> None:
     log("Le Grinder — STARTING")
     log(f"Log file: {LOG_FILE}")
     log("=" * 60)
-    refresh_universe_if_stale()
+
+    if args.lite:
+        from kzer_bot.grinder_strategy import _HARDCODED_WATCHLIST
+        global WATCHLIST
+        WATCHLIST = _HARDCODED_WATCHLIST
+        log(f"Lite mode: using hardcoded watchlist ({len(WATCHLIST)} tickers)")
+        # Clear cached scan state so lite watchlist is used (not stale shortlist)
+        SCAN_STATE_FILE.unlink(missing_ok=True)
+    elif args.yahoo:
+        yahoo_file = DATA / "yahoo_watchlist.json"
+        if not yahoo_file.exists():
+            log("Yahoo watchlist file not found — fetching from Yahoo Finance...")
+            from scripts.fetch_yahoo_most_active import fetch_all_symbols
+            symbols = fetch_all_symbols()
+            yahoo_file.write_text(json.dumps({
+                "updated": now_et().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "count": len(symbols),
+                "symbols": symbols,
+            }, indent=2))
+            log(f"Fetched {len(symbols)} Yahoo most active symbols")
+        yahoo_data = json.loads(yahoo_file.read_text(encoding="utf-8"))
+        WATCHLIST = yahoo_data["symbols"]
+        log(f"Yahoo mode: using top {len(WATCHLIST)} most active Canadian stocks")
+        # Clear cached scan state so full Yahoo watchlist is used (not stale shortlist)
+        SCAN_STATE_FILE.unlink(missing_ok=True)
+        log("  Cleared cached scan state for fresh Yahoo scan")
+    else:
+        refresh_universe_if_stale()
 
     balance: float = args.balance or fetch_live_balance() or 100.0
     SESSION_FILE.write_text(json.dumps({
@@ -1216,16 +1539,50 @@ def main() -> None:
 
     stats = _get_trade_stats()
     at_color = _pnl_color(stats["total_pnl"])
-    notify(
-        f"🚀 <b>Le Grinder started successfully</b>\n\n"
-        f"💰 Balance: <b>${balance:.2f} CAD</b>\n"
-        f"📋 Watchlist: <b>{len(WATCHLIST)} Canadian tickers</b>  (TSX / TSXV / NEO)\n"
-        f"📐 Strategy: 8-criteria momentum screen  +  Claude AI analysis\n"
-        f"⏰ Entry: 5:15 AM (green), 9:15 AM (neutral), or 11:00 AM (red)\n"
-        f"🏁 Exit: 3:55 PM daily  |  No stop loss\n\n"
-        f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} CAD</b>"
-        f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
-    )
+
+    if args.ticker:
+        notify(
+            f"🎯 <b>Le Grinder — Single-Ticker Mode</b>\n\n"
+            f"💰 Balance: <b>${balance:.2f} CAD</b>\n"
+            f"📋 Target: <b>{args.ticker.upper()}</b>\n"
+            f"⏰ Buying immediately — no scan, no wait\n"
+            f"🏁 Exit: 3:55 PM daily  |  No stop loss\n\n"
+            f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} CAD</b>"
+            f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
+        )
+    elif args.yahoo:
+        notify(
+            f"🚀 <b>Le Grinder started — Yahoo Most Active Mode</b>\n\n"
+            f"💰 Balance: <b>${balance:.2f} CAD</b>\n"
+            f"📋 Watchlist: <b>{len(WATCHLIST)} tickers</b>  (Yahoo most active CA — volume sorted)\n"
+            f"📐 Strategy: 8-criteria momentum screen  +  Claude AI analysis\n"
+            f"⏰ Entry: 5:15 AM (green), 9:15 AM (neutral), or 11:00 AM (red)\n"
+            f"🏁 Exit: 3:55 PM daily  |  No stop loss\n\n"
+            f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} CAD</b>"
+            f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
+        )
+    elif args.lite:
+        notify(
+            f"🚀 <b>Le Grinder started — Lite Mode</b>\n\n"
+            f"💰 Balance: <b>${balance:.2f} CAD</b>\n"
+            f"📋 Watchlist: <b>{len(WATCHLIST)} tickers</b>  (hardcoded — no rate limits)\n"
+            f"📐 Strategy: 8-criteria momentum screen  +  Claude AI analysis\n"
+            f"⏰ Entry: 5:15 AM (green), 9:15 AM (neutral), or 11:00 AM (red)\n"
+            f"🏁 Exit: 3:55 PM daily  |  No stop loss\n\n"
+            f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} CAD</b>"
+            f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
+        )
+    else:
+        notify(
+            f"🚀 <b>Le Grinder started successfully</b>\n\n"
+            f"💰 Balance: <b>${balance:.2f} CAD</b>\n"
+            f"📋 Watchlist: <b>{len(WATCHLIST)} Canadian tickers</b>  (TSX / TSXV / NEO)\n"
+            f"📐 Strategy: 8-criteria momentum screen  +  Claude AI analysis\n"
+            f"⏰ Entry: 5:15 AM (green), 9:15 AM (neutral), or 11:00 AM (red)\n"
+            f"🏁 Exit: 3:55 PM daily  |  No stop loss\n\n"
+            f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} CAD</b>"
+            f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
+        )
 
     # ── Resume open position ───────────────────────────────────────────────
     if POS_FILE.exists():
@@ -1240,11 +1597,69 @@ def main() -> None:
         hold_and_sell()
         POS_FILE.unlink(missing_ok=True)
 
+    # ── Single-ticker mode (skip 4000-stock scan, buy immediately) ────────
+    if args.ticker:
+        raw_symbol = args.ticker.upper().strip()
+
+        # Auto-append .TO if no exchange suffix given
+        if "." not in raw_symbol:
+            raw_symbol = f"{raw_symbol}.TO"
+
+        log(f"Single-ticker mode: {raw_symbol}")
+        log("Fetching data for single ticker...")
+
+        md = GrinderMarketData()
+        snap = md.snapshot(raw_symbol)
+
+        # Fallback: try .V if .TO returned nothing
+        if snap is None and raw_symbol.endswith(".TO"):
+            alt = raw_symbol.replace(".TO", ".V")
+            log(f"  No data for {raw_symbol}, trying {alt}...")
+            snap = md.snapshot(alt)
+            if snap is not None:
+                raw_symbol = alt
+
+        if snap is None:
+            log(f"No data for {raw_symbol} — aborting.")
+            notify(f"❌ No market data for <code>{raw_symbol}</code> — aborting.")
+            return
+
+        pick = GrinderPick(
+            symbol        = snap.symbol,
+            last_close    = snap.last_close,
+            score         = snap.score,
+            yesterday_pct = snap.yesterday_pct_change,
+            rel_volume    = snap.rel_volume,
+            atr_pct       = snap.atr_pct,
+            close_strength= snap.close_strength,
+            above_ema5    = (snap.last_close > snap.ema5),
+            above_ema20   = (snap.last_close > snap.ema20),
+            strategy_name = "Single Ticker",
+        )
+
+        log(f"Pick: {pick.symbol}  ${pick.last_close:.2f}  score {pick.score:.1f}")
+        bias, fut_det = get_futures_bias()
+        ai = get_ai_analysis([pick], bias, fut_det, balance)
+
+        ok = execute_buy(pick, balance, bias, fut_det, ai)
+        if ok:
+            hold_and_sell()
+        return
+
+    # ── Buy-today notification ────────────────────────────────────────────
+    if args.buy_today:
+        notify(
+            f"⚡ <b>Le Grinder — BUY TODAY Mode</b>\n\n"
+            f"Scanning <b>{len(WATCHLIST)}</b> tickers and buying <b>immediately</b>.\n"
+            f"⏰ No timing wait — scan → buy → hold → sell at 3:55 PM\n"
+            f"💰 Balance: <b>${balance:.2f} CAD</b>"
+        )
+
     # ── Main loop ─────────────────────────────────────────────────────────
     scans_done:    set[str] = set()
     last_status_t: list     = [0.0]
     bias = FuturesBias.NEUTRAL
-    skip_wait = args.now
+    skip_wait = args.now or args.buy_today
 
     while True:
         # Refresh balance each cycle
@@ -1274,7 +1689,12 @@ def main() -> None:
 
         # Final scan + AI analysis
         log("Final pre-buy scan + AI analysis...")
-        picks, _, buy_plan, strat_name, fut_det = run_scan(balance)
+        scan_symbols, full_refresh = _choose_scan_symbols()
+        picks, _, buy_plan, strat_name, fut_det = run_scan(
+            balance,
+            scan_symbols=scan_symbols,
+            full_refresh=full_refresh,
+        )
         ai = get_ai_analysis(picks, bias, fut_det, balance)
 
         if not picks:
@@ -1289,21 +1709,32 @@ def main() -> None:
         top = picks[0]
 
         # Wait for the correct window (sends red-waiting message if needed)
-        should_buy = wait_for_buy_window(bias, top, fut_det)
+        # Skipped for --buy-today (buy immediately)
+        should_buy = True
+        if not args.buy_today:
+            should_buy = wait_for_buy_window(bias, top, fut_det)
         if not should_buy:
             log("Buy window missed — entering overnight loop.")
             continue
 
         # Re-scan for red bias at 11 AM to get fresh price
-        if bias == FuturesBias.RED:
+        # Skipped for --buy-today (already have fresh data)
+        if bias == FuturesBias.RED and not args.buy_today:
             log("Red bias: re-scanning at 11 AM for freshest data...")
-            picks, _, _, strat_name, fut_det = run_scan(balance)
+            scan_symbols, full_refresh = _choose_scan_symbols()
+            picks, _, _, strat_name, fut_det = run_scan(
+                balance,
+                scan_symbols=scan_symbols,
+                full_refresh=full_refresh,
+            )
             ai = get_ai_analysis(picks, bias, fut_det, balance)
             if not picks:
                 notify("❌ <b>Bounce scan returned no data — skipping today.</b>")
                 log("Bounce scan returned no data — skipping.")
                 continue
             top = picks[0]
+
+        wait_after_pick(top, bias, fut_det)
 
         # Execute buy
         ok = execute_buy(top, balance, bias, fut_det, ai)
