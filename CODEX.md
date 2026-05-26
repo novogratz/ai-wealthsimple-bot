@@ -1,0 +1,177 @@
+# CODEX.md — Technical Reference
+
+## Module map
+
+```
+ai-wealthsimple-bot/
+├── kzer_bot/
+│   ├── grinder_strategy.py   ← v3.2 strategy (MAIN)
+│   │     GrinderSnapshot      — 10-field frozen dataclass w/ computed properties
+│   │     GrinderMarketData    — yfinance wrapper (60d daily, ATR14, EMA5/20)
+│   │     FuturesBias          — Enum: GREEN / RED / NEUTRAL
+│   │     get_futures_bias()   — ES=F 1h bars, compare to 24h ago
+│   │     GrinderPick          — frozen result dataclass w/ .confidence property
+│   │     GrinderStrategy      — 8-criteria scanner, sorted by score
+│   │     FallbackStrategy     — relaxed 5-criteria fallback
+│   │     WATCHLIST            — 164 hardcoded Canadian tickers
+│   │
+│   ├── market_data.py         ← Old data layer (used by hold loop)
+│   │     Snapshot             — 7-field dataclass (last_price, avg_volume, etc.)
+│   │     YFinanceMarketData   — 1m intraday for live price in watch loop
+│   │
+│   ├── telegram.py            ← Telegram integration
+│   │     TelegramConfig       — bot_token + chat_id, loaded from .env
+│   │     send_message()       — HTTP POST to Telegram Bot API
+│   │     trade_message()      — formats structured event messages
+│   │     load_dotenv()        — minimal .env parser (no dependency)
+│   │
+│   ├── cli.py                 ← CLI commands (scan / paper / watch / balance / pnl)
+│   │     _get_total_pnl()     — reads pnl_ledger.json
+│   │     _record_and_get_total_pnl() — appends to pnl_ledger.json
+│   │     cmd_watch()          — hold loop (price check every 60s, sell at force_exit)
+│   │
+│   ├── paper.py               ← PaperBroker — simulated trades to CSV
+│   ├── runner.py              ← run_paper_once() — one paper cycle
+│   ├── schedule.py            ← is_weekday / is_market_session / should_force_exit
+│   └── config.py              ← Settings / TradingSettings / RiskSettings (TOML)
+│
+├── scripts/
+│   ├── run_grinder.py         ← v3.2 orchestrator (MAIN ENTRY POINT)
+│   │     run_scan()           — futures + GrinderStrategy + FallbackStrategy
+│   │     get_ai_analysis()    — calls `claude -p "..."` subprocess
+│   │     wait_for_buy_window() — 9:15 AM or 11:00 AM depending on bias
+│   │     execute_buy()        — calls wealthsimple_auto.py buy --max-dollars
+│   │     hold_and_sell()      — 60s loop, 30-min Telegram, 3:55 PM sell
+│   │     wait_overnight()     — fires 5 AM and 5 PM scans, sleeps between
+│   │     main()               — startup → resume check → main loop
+│   │
+│   ├── wealthsimple_auto.py   ← Playwright browser automation
+│   │     cmd_buy()            — navigates to stock, fills Dollars→Max, submits
+│   │     cmd_sell()           — sell all shares of position
+│   │     cmd_balance()        — scrapes Available-to-trade balance
+│   │     cmd_setup()          — opens browser for manual login
+│   │     open_browser()       — launches Edge with persistent profile
+│   │     ORDER_RESULT_JSON:   — stdout line with fill details (parsed by caller)
+│   │     LIVE_BALANCE_CAD:    — stdout line with balance (parsed by caller)
+│   │
+│   └── run_day.py             ← Old kzer orchestrator (unchanged, still works)
+│
+├── config/
+│   ├── settings.toml          ← Risk/timing for OLD kzer strategy
+│   └── universe.csv           ← Old ticker universe (not used by grinder)
+│
+└── data/                      ← All runtime state (gitignored)
+    ├── open_position.json     ← {symbol, buyPrice, shares, estimatedCost, ...}
+    ├── pnl_ledger.json        ← [{symbol, buyCost, sellValue, realizedPnl, time}]
+    ├── trade_history.csv      ← Full log: timestamp,symbol,side,price,shares,cost,pnl,strategy
+    ├── session_info.json      ← {startingBalance, startTime}
+    ├── ws_auth.json           ← Wealthsimple browser session (NEVER commit)
+    ├── browser_profile/       ← Edge persistent profile (NEVER commit)
+    └── yfinance_cache/        ← yfinance tz cache
+```
+
+## Score formula (v3.2)
+
+```python
+score = yesterday_pct_change * (rel_volume ** 1.5) * atr_pct * (1 + close_strength)
+
+# where:
+yesterday_pct_change = (last_close - prev_close) / prev_close * 100
+rel_volume           = yesterday_volume / avg_volume_20
+atr_pct              = atr14 / last_close * 100
+close_strength       = (last_close - yesterday_low) / (yesterday_high - yesterday_low)
+
+# Confidence thresholds:
+# score >= 50 → HIGH  (strong setup)
+# score >= 20 → MEDIUM
+# score  < 20 → LOW   (use fallback)
+```
+
+## Wealthsimple automation protocol
+
+```
+wealthsimple_auto.py buy --symbol ERF.TO --max-dollars
+  → opens Edge (persistent profile at data/browser_profile)
+  → navigates to Wealthsimple stock page
+  → clicks Buy → switches to Dollars mode → clicks Max
+  → reads review page → prints ORDER_RESULT_JSON:{...}
+  → prints LIVE_BALANCE_CAD:xxx if balance visible
+  → exits 0 on success
+
+wealthsimple_auto.py sell --symbol ERF.TO --sell-all
+  → same flow but Sell side → Max shares
+  → prints ORDER_RESULT_JSON:{submitted: true, ...}
+
+wealthsimple_auto.py balance
+  → goes to home → scrapes Unregistered account balance
+  → prints LIVE_BALANCE_CAD:xxx
+  → exits 0 on success
+```
+
+## Telegram message contract
+
+All messages are sent as HTML via `send_message()`. Key events:
+
+| Event | When | Key content |
+|---|---|---|
+| Startup | Bot launch | Balance, watchlist size, strategy summary |
+| Resume | Restart with open position | Symbol, entry, cost |
+| Game plan | 5 AM / startup scan | Pick, score, why, plan, AI analysis |
+| Red waiting | 9:15 AM (red days) | Why we wait, what to watch |
+| Buying now | 9:15 AM or 11 AM | Edge reasoning, AI view |
+| Fill confirmed | 9:31 AM (pre-market buys) | Live balance after fill |
+| 30-min update | Every 30 min in session | Price, P&L, time to sell |
+| Closing | 3:55 PM | Est. exit price, P&L |
+| Sold | After sell executes | Trade P&L, all-time PnL, record |
+| 5 PM preview | 5:00 PM | Next day's top pick + plan |
+
+## AI analysis flow
+
+```python
+get_ai_analysis(picks, bias, futures_detail, balance)
+  # builds a 120-word-max prompt with pick metrics
+  # calls: subprocess.run(["claude", "-p", prompt])
+  # returns: plain text response (empty str if claude not on PATH)
+  # appended to game plan and buy messages on Telegram
+```
+
+## Position file schema
+
+```json
+{
+  "symbol": "ERF.TO",
+  "buyPrice": 4.82,
+  "shares": 18.5831,
+  "estimatedCost": 89.59,
+  "sellAll": true,
+  "strategyName": "Main Strategy",
+  "time": "2026-05-25T09:15:32.123456-04:00"
+}
+```
+
+## Environment variables
+
+```
+TELEGRAM_BOT_TOKEN=<from BotFather>
+TELEGRAM_CHAT_ID=@channel_or_numeric_id
+ANTHROPIC_API_KEY=<not needed, using claude CLI>
+```
+
+## Common errors and fixes
+
+| Error | Fix |
+|---|---|
+| `session_expired` in ws output | Run `python scripts/wealthsimple_auto.py setup` |
+| `claude: command not found` | AI analysis skipped silently — install Claude Code CLI |
+| `No candidates passed` | Market was closed or all tickers failed yfinance; check internet |
+| `UnicodeEncodeError` | PowerShell encoding issue — run in Windows Terminal with UTF-8 |
+| Balance returns None | Wealthsimple page layout changed — check wealthsimple_auto.py scraper |
+
+## Adding new tickers
+
+Edit `WATCHLIST` in `kzer_bot/grinder_strategy.py`:
+- TSX: use `.TO` suffix (e.g. `"ERF.TO"`)
+- TSXV: use `.V` suffix (e.g. `"GGD.V"`)
+- NEO: use `.NE` suffix (e.g. `"CBLT.NE"`)
+
+Tickers that fail to download or don't pass criteria are silently skipped.

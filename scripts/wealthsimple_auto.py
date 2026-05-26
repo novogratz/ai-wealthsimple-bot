@@ -270,6 +270,129 @@ def get_live_balance(page) -> float | None:
     return None
 
 
+def try_auto_login(page) -> bool:
+    """
+    Auto-login when session has expired back to the login page.
+    Clicks the email field, triggers browser autofill (ArrowDown+Enter),
+    handles the password field, then clicks Log in.
+    Falls back to WS_EMAIL / WS_PASSWORD env vars if autofill leaves fields empty.
+    Returns True if we successfully leave the login page.
+    """
+    import os
+
+    print("  Session expired — attempting auto-login via browser autofill...")
+    snap(page, "login_page")
+
+    try:
+        # Step 1: Click email input to trigger autofill dropdown
+        email_input = first_visible(page, [
+            'input[type="email"]',
+            'input[name="email"]',
+            'input[autocomplete*="email"]',
+            'input[placeholder*="email" i]',
+        ], timeout=4000)
+
+        if email_input is None:
+            print("  Auto-login: email input not found")
+            return False
+
+        email_input.click()
+        page.wait_for_timeout(600)
+
+        # ArrowDown opens the autofill suggestion list; Enter selects the first entry
+        page.keyboard.press("ArrowDown")
+        page.wait_for_timeout(500)
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(1000)
+
+        # Fallback: fill from env var if autofill left the field empty
+        try:
+            filled = email_input.input_value()
+        except Exception:
+            filled = ""
+        if not filled:
+            ws_email = os.environ.get("WS_EMAIL", "")
+            if ws_email:
+                email_input.fill(ws_email)
+                page.wait_for_timeout(300)
+
+        # Two-step flows show email only then reveal password after Continue/Next
+        for btn_label in ["Continue", "Next"]:
+            try:
+                btn = page.get_by_text(btn_label, exact=True).first
+                if btn.is_visible(timeout=1000):
+                    btn.click()
+                    page.wait_for_timeout(2000)
+                    break
+            except Exception:
+                pass
+
+        # Step 2: Handle password field if now visible
+        pwd = first_visible(page, [
+            'input[type="password"]',
+            'input[placeholder*="Password" i]',
+        ], timeout=2500)
+
+        if pwd is not None:
+            pwd.click()
+            page.wait_for_timeout(400)
+            page.keyboard.press("ArrowDown")
+            page.wait_for_timeout(400)
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(600)
+
+            try:
+                filled_pwd = pwd.input_value()
+            except Exception:
+                filled_pwd = ""
+            if not filled_pwd:
+                ws_password = os.environ.get("WS_PASSWORD", "")
+                if ws_password:
+                    pwd.fill(ws_password)
+                    page.wait_for_timeout(300)
+
+        # Step 3: Click the Log in / Sign in button
+        login_clicked = False
+        for label in ["Log in", "Login", "Sign in", "Sign In"]:
+            try:
+                btn = page.get_by_text(label, exact=True).first
+                if btn.is_visible(timeout=1500):
+                    btn.click()
+                    login_clicked = True
+                    break
+            except Exception:
+                pass
+        if not login_clicked:
+            try:
+                page.locator('button[type="submit"]').first.click(timeout=2000)
+                login_clicked = True
+            except Exception:
+                pass
+
+        if not login_clicked:
+            print("  Auto-login: login button not found")
+            return False
+
+        # Step 4: Wait for redirect away from login page
+        page.wait_for_timeout(6000)
+        snap(page, "after_auto_login")
+
+        still_on_login = page.locator(
+            'input[type="password"], input[placeholder*="Password" i]'
+        ).first.is_visible(timeout=2000)
+
+        if still_on_login:
+            print("  Auto-login: still on login page — 2FA or manual login required")
+            return False
+
+        print("  Auto-login: success!")
+        return True
+
+    except Exception as e:
+        print(f"  Auto-login error: {e}")
+        return False
+
+
 def cmd_balance(_args) -> None:
     from playwright.sync_api import sync_playwright
 
@@ -279,8 +402,11 @@ def cmd_balance(_args) -> None:
         page.wait_for_timeout(2000)
 
         if page.locator('input[type="password"], input[placeholder*="Password" i]').first.is_visible(timeout=1500):
-            print("SESSION_EXPIRED: Wealthsimple session expired - run: python scripts/wealthsimple_auto.py setup")
-            sys.exit(1)
+            if not try_auto_login(page):
+                print("SESSION_EXPIRED: Wealthsimple session expired — run: python scripts/wealthsimple_auto.py setup")
+                sys.exit(1)
+            page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
+            page.wait_for_timeout(3000)
 
         balance = get_live_balance(page)
         if balance is not None:
@@ -320,7 +446,10 @@ def navigate_to_stock(page, ws_symbol: str):
     snap(page, "home")
 
     if page.locator('input[type="password"], input[placeholder*="Password" i]').first.is_visible(timeout=1000):
-        raise RuntimeError("Wealthsimple session expired - run: python scripts/wealthsimple_auto.py setup")
+        if not try_auto_login(page):
+            raise RuntimeError("Wealthsimple session expired — run: python scripts/wealthsimple_auto.py setup")
+        page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
+        page.wait_for_timeout(2000)
 
     # Navigate directly to the trade URL — much more reliable than search UI
     print(f"Navigating to {ws_symbol} trade page...")

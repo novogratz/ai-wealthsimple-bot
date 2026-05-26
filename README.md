@@ -1,15 +1,40 @@
-# Wealthsimple Guarded Trading Assistant
+# TSX Futures Sentiment Grinder v3.2
 
-This project scans a configurable Canadian ticker universe, ranks intraday candidates, and can prepare a Wealthsimple browser order ticket for manual review.
+Autonomous Canadian stock day-trading bot for Wealthsimple.
 
-Important: by default, browser automation stops at the Wealthsimple review screen. It only clicks the final submit button when you explicitly pass `--confirm`.
+**Rules:** 1 trade/day · no stop loss · hard exit 3:55 PM ET · target +1.5–3%/day
 
-## Safety Model
+---
 
-- `data/ws_auth.json` stores your Wealthsimple browser session and is ignored by git.
-- Screenshots, paper fills, open-position state, and market-data caches live under `data/` and are ignored by git.
-- The scanner can pick a ticker, but you are responsible for reviewing any real-money order.
-- `--confirm` submits a live order. Do not use it unless you intend to place the trade.
+## How it works
+
+1. **5:00 AM** — Scans 164 Canadian tickers (TSX / TSXV / NEO) using an 8-criteria momentum screen, checks US futures (ES=F) for market bias, calls Claude CLI for AI analysis, sends the full game plan to Telegram.
+2. **9:15 AM** — Places a pre-market buy order on Wealthsimple (fills at 9:30 open) if futures are GREEN or NEUTRAL.
+3. **9:15 AM** (red days) — Sends a "waiting for bounce" message; buys at 11:00 AM instead.
+4. **Every 30 min** — Sends price / P&L / time-to-sell update to Telegram.
+5. **3:55 PM** — Hard market sell. No exceptions. Records to `trade_history.csv` and `pnl_ledger.json`.
+6. **5:00 PM** — Next-day preview scan.
+
+---
+
+## Strategy — 8 criteria
+
+| # | Criterion | Threshold |
+|---|---|---|
+| 1 | Price | $2.00 – $40.00 |
+| 2 | 20-day avg volume | ≥ 300,000 |
+| 3 | Yesterday % change | +1.5% to +12% |
+| 4 | Relative volume | ≥ 1.5× average |
+| 5 | ATR(14) | ≥ 1.5% of price |
+| 6 | Close > 20-day EMA | trend filter |
+| 7 | Close > 5-day EMA | short-term filter |
+| 8 | Close strength | ≥ 40% of day range |
+
+**Score** = `yesterday_pct × rel_volume^1.5 × atr_pct × (1 + close_strength)`
+
+Fallback strategy fires if the main screen finds no candidates (relaxed thresholds, tagged "Fallback Original Strategy" in Telegram).
+
+---
 
 ## Setup
 
@@ -17,102 +42,113 @@ Important: by default, browser automation stops at the Wealthsimple review scree
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-playwright install firefox
+playwright install msedge
 ```
 
-## First-Time Browser Login
-
+**Authenticate Wealthsimple** (first time and whenever session expires):
 ```powershell
 python scripts/wealthsimple_auto.py setup
 ```
+Log in inside the Edge window, navigate to your home page, then press ENTER in the terminal.
 
-Log in to Wealthsimple in the Firefox window that opens, navigate to your home page, then press ENTER in the terminal. The session is saved to `data/ws_auth.json`.
+**Create `.env`** in the project root:
+```
+TELEGRAM_BOT_TOKEN=<your bot token from BotFather>
+TELEGRAM_CHAT_ID=@yourchannel
+```
 
-## Scan
+---
+
+## Run
 
 ```powershell
-python -m fashion_bot scan --cash 17.24
+# Normal 24/7 mode
+python scripts/run_grinder.py
+
+# Skip overnight wait and buy immediately (debug)
+python scripts/run_grinder.py --now
+
+# Override cash (skips live balance fetch)
+python scripts/run_grinder.py --balance 95.50
 ```
 
-This ranks Canadian tickers from `config/universe.csv`.
+---
 
-## Paper Trade
+## Telegram game plan format
+
+Every morning at 5 AM you receive:
+
+```
+🌅 TSX Grinder v3.2 — 5 AM Morning Scan
+
+📡 Futures: 🟢 GREEN — ES=F 5,820 pts (+0.35% vs 24h ago)
+
+🔍 Scanned 164 Canadian tickers
+   ✅ 3 passed | Strategy: Main Strategy
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+🏆 TODAY'S PICK: ERF.TO  ($4.82 CAD)
+━━━━━━━━━━━━━━━━━━━━━━━━
+WHY THIS STOCK:
+  📈 Yesterday: +3.4%  on  2.3× normal volume
+  🔥 ATR(14): 2.6% of price
+  💪 Closed: 72% of day range
+  📊 Trend: EMA5 ✅  EMA20 ✅
+  🎯 Score: 47.2  (MEDIUM ✅)
+
+TODAY'S GAME PLAN:
+  📋 Main Strategy
+  ⏰ Buy at 9:15 AM pre-market (fills at 9:30 open)
+  💰 Budget: $100.00 → deploying 90% = $90.00
+  🏁 Exit: 3:55 PM ET hard sell (no stop loss)
+  🎯 Target: +1.5% to +3%
+
+🤖 AI Analysis (Claude): ...
+```
+
+---
+
+## Claude Code skills
+
+```
+/grinder   — run a live scan and show today's game plan with AI analysis
+/codex     — show full technical overview of the bot
+```
+
+---
+
+## CLI tools
 
 ```powershell
-python -m fashion_bot paper --cash 17.24
+# Quick scan
+python -m kzer_bot scan --cash 100
+
+# Check P&L history
+python -m kzer_bot pnl
+
+# Live balance
+python -m kzer_bot balance
+
+# Test Telegram
+python -m kzer_bot notify --event info --message "test"
+
+# Manual quote
+python -m kzer_bot quote --symbol ERF.TO
 ```
 
-The paper trader opens only during the configured entry window and exits on stop loss, take profit, trailing stop, or force-exit time.
+---
 
-## Browser Review Flow
+## Files that must never be committed
 
-Run a scan only:
-
-```powershell
-.\scripts\run-trade.ps1 -Balance 17.24 -DryRun
+```
+.env
+data/ws_auth.json
+data/browser_profile/
 ```
 
-Run the full day workflow. If launched overnight, this waits for the 9:30-9:35 ET entry window, scans, prepares the buy, holds all day, and prepares the sell-all ticket at 15:55 ET:
+---
 
-```powershell
-.\scripts\run-trade.ps1 -AutoDay
-```
+## Further reading
 
-Prepare a buy ticket for the top scan result. The current buy flow uses Wealthsimple's `Dollars -> Max` control on the selected Non-registered account:
-
-```powershell
-.\scripts\run-trade.ps1 -Balance 17.24 -BuyOnly
-```
-
-Prepare a sell ticket for the saved position:
-
-```powershell
-.\scripts\run-trade.ps1 -SellOnly
-```
-
-Submit live orders only when you explicitly opt in:
-
-```powershell
-.\scripts\run-trade.ps1 -AutoDay -Confirm
-```
-
-`-Confirm` submits live buy and sell orders. Without `-Confirm`, the browser stops at the review screen.
-
-You can also call the browser automation directly:
-
-```powershell
-python scripts/wealthsimple_auto.py buy --symbol LSPD.TO --max-dollars --keep-open
-python scripts/wealthsimple_auto.py sell --symbol LSPD.TO --sell-all --keep-open
-```
-
-Add `--confirm` to either command only when you intend to submit a live Wealthsimple order.
-
-## Telegram Notifications
-
-Create a Telegram bot with BotFather, add it to your channel, and create a local `.env` file:
-
-```text
-TELEGRAM_BOT_TOKEN=<bot_token_from_botfather>
-TELEGRAM_CHAT_ID=@your_channel_username
-```
-
-For a private channel, use the numeric chat ID instead of `@your_channel_username`.
-The `.env` file is ignored by git and must not be committed.
-
-Test the notification path:
-
-```powershell
-python -m fashion_bot notify --event info --message "Trading assistant connected"
-```
-
-The main runner sends Telegram updates for potential scan candidates, the selected top pick, preparing buy/sell tickets, review-ready tickets, submitted orders when `--confirm` is used, and automation errors. Missing Telegram config does not stop trading runs.
-
-## Tests
-
-```powershell
-python -m unittest discover -s tests
-```
-
-## Configuration
-
-Edit `config/settings.toml` for risk limits and session timing. Edit `config/universe.csv` to change the Canadian ticker universe.
+- `CLAUDE.md` — project context for Claude Code (what files do what, common tasks)
+- `CODEX.md` — full technical reference (module map, score formula, Wealthsimple protocol, error guide)
