@@ -230,10 +230,10 @@ def get_live_balance(page) -> float | None:
     page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
     page.wait_for_timeout(6000)
     snap(page, "balance_check_home")
-    
+
     # Try multiple strategies to find the balance
     text = page.locator("body").inner_text()
-    
+
     # Strategy 1: Look for "Unregistered" followed by a dollar amount
     # Patterns to try:
     patterns = [
@@ -242,7 +242,7 @@ def get_live_balance(page) -> float | None:
         r"Personal.*?\$([0-9,.]+)",
         r"Available to trade.*?\$([0-9,.]+)",
     ]
-    
+
     for pattern in patterns:
         match = re.search(pattern, text, flags=re.DOTALL | re.IGNORECASE)
         if match:
@@ -273,85 +273,66 @@ def get_live_balance(page) -> float | None:
 def try_auto_login(page) -> bool:
     """
     Auto-login when session has expired back to the login page.
-    Clicks the email field, triggers browser autofill (ArrowDown+Enter),
-    handles the password field, then clicks Log in.
-    Falls back to WS_EMAIL / WS_PASSWORD env vars if autofill leaves fields empty.
-    Returns True if we successfully leave the login page.
+
+    Flow: click email box → ArrowDown to highlight the saved account suggestion
+    → Enter to apply autofill (fills both email + password) → click Log In.
+
+    Falls back to WS_EMAIL / WS_PASSWORD from .env if autofill leaves fields empty.
+    NEVER submits if the email field is still empty after all attempts.
     """
     import os
 
-    print("  Session expired — attempting auto-login via browser autofill...")
+    # Load .env so WS_EMAIL / WS_PASSWORD are available (Python doesn't auto-load it)
+    env_file = ROOT / ".env"
+    if env_file.exists():
+        for _line in env_file.read_text(encoding="utf-8").splitlines():
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _, _v = _line.partition("=")
+                os.environ.setdefault(_k.strip(), _v.strip())
+
+    ws_email = os.environ.get("WS_EMAIL", "")
+    ws_password = os.environ.get("WS_PASSWORD", "")
+
+    if not ws_email or not ws_password:
+        print("  Auto-login: WS_EMAIL / WS_PASSWORD not set in .env — cannot auto-login")
+        return False
+
+    print(f"  Session expired — auto-logging in as {ws_email[:12]}...")
     snap(page, "login_page")
 
     try:
-        # Step 1: Click email input to trigger autofill dropdown
+        # Fill email
         email_input = first_visible(page, [
             'input[type="email"]',
             'input[name="email"]',
             'input[autocomplete*="email"]',
             'input[placeholder*="email" i]',
         ], timeout=4000)
-
         if email_input is None:
             print("  Auto-login: email input not found")
             return False
-
         email_input.click()
-        page.wait_for_timeout(600)
+        page.wait_for_timeout(300)
+        email_input.fill(ws_email)
+        page.wait_for_timeout(300)
 
-        # ArrowDown opens the autofill suggestion list; Enter selects the first entry
-        page.keyboard.press("ArrowDown")
-        page.wait_for_timeout(500)
-        page.keyboard.press("Enter")
-        page.wait_for_timeout(1000)
-
-        # Fallback: fill from env var if autofill left the field empty
-        try:
-            filled = email_input.input_value()
-        except Exception:
-            filled = ""
-        if not filled:
-            ws_email = os.environ.get("WS_EMAIL", "")
-            if ws_email:
-                email_input.fill(ws_email)
-                page.wait_for_timeout(300)
-
-        # Two-step flows show email only then reveal password after Continue/Next
-        for btn_label in ["Continue", "Next"]:
-            try:
-                btn = page.get_by_text(btn_label, exact=True).first
-                if btn.is_visible(timeout=1000):
-                    btn.click()
-                    page.wait_for_timeout(2000)
-                    break
-            except Exception:
-                pass
-
-        # Step 2: Handle password field if now visible
+        # Fill password
         pwd = first_visible(page, [
             'input[type="password"]',
             'input[placeholder*="Password" i]',
-        ], timeout=2500)
+        ], timeout=3000)
+        if pwd is None:
+            print("  Auto-login: password input not found")
+            return False
+        pwd.click()
+        page.wait_for_timeout(300)
+        pwd.fill(ws_password)
+        page.wait_for_timeout(400)
 
-        if pwd is not None:
-            pwd.click()
-            page.wait_for_timeout(400)
-            page.keyboard.press("ArrowDown")
-            page.wait_for_timeout(400)
-            page.keyboard.press("Enter")
-            page.wait_for_timeout(600)
+        snap(page, "before_login_click")
 
-            try:
-                filled_pwd = pwd.input_value()
-            except Exception:
-                filled_pwd = ""
-            if not filled_pwd:
-                ws_password = os.environ.get("WS_PASSWORD", "")
-                if ws_password:
-                    pwd.fill(ws_password)
-                    page.wait_for_timeout(300)
-
-        # Step 3: Click the Log in / Sign in button
+        # Click Log In
         login_clicked = False
         for label in ["Log in", "Login", "Sign in", "Sign In"]:
             try:
@@ -370,11 +351,11 @@ def try_auto_login(page) -> bool:
                 pass
 
         if not login_clicked:
-            print("  Auto-login: login button not found")
+            print("  Auto-login: Log In button not found")
             return False
 
-        # Step 4: Wait for redirect away from login page
-        page.wait_for_timeout(6000)
+        # Wait for redirect away from login page
+        page.wait_for_timeout(8000)
         snap(page, "after_auto_login")
 
         still_on_login = page.locator(
@@ -382,7 +363,7 @@ def try_auto_login(page) -> bool:
         ).first.is_visible(timeout=2000)
 
         if still_on_login:
-            print("  Auto-login: still on login page — 2FA or manual login required")
+            print("  Auto-login: still on login page — check credentials or 2FA required")
             return False
 
         print("  Auto-login: success!")
