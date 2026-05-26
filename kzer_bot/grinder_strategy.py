@@ -129,9 +129,27 @@ def _ema(series: pd.Series, period: int) -> float:
 
 
 class GrinderMarketData:
-    """yfinance-backed: fetches OHLCV + computes ATR14, EMA5, EMA20."""
+    """
+    yfinance-backed: fetches OHLCV + computes ATR14, EMA5, EMA20.
+    Caches snapshots in memory so main / fallback / best-effort strategies
+    all share a single download pass — no duplicate API calls.
+    """
+
+    def __init__(self) -> None:
+        self._cache: dict[str, Optional[GrinderSnapshot]] = {}
 
     def snapshot(self, symbol: str) -> Optional[GrinderSnapshot]:
+        if symbol in self._cache:
+            return self._cache[symbol]
+        result = self._fetch(symbol)
+        self._cache[symbol] = result
+        return result
+
+    def all_snapshots(self) -> list[GrinderSnapshot]:
+        """Return all successfully downloaded snapshots (for diagnostics)."""
+        return [s for s in self._cache.values() if s is not None]
+
+    def _fetch(self, symbol: str) -> Optional[GrinderSnapshot]:
         try:
             ticker = yf.Ticker(symbol)
             daily = ticker.history(period="60d", interval="1d", auto_adjust=False)

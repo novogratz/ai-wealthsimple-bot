@@ -46,10 +46,13 @@ AUTO_SCRIPT  = ROOT / "scripts" / "wealthsimple_auto.py"
 HISTORY_CSV  = DATA / "trade_history.csv"
 PNL_LEDGER   = DATA / "pnl_ledger.json"
 SESSION_FILE = DATA / "session_info.json"
+LOG_FILE     = DATA / "grinder.log"
 PYTHON       = sys.executable
 TZ           = ZoneInfo("America/Toronto")
 
 DATA.mkdir(exist_ok=True)
+
+_LOG_MAX_BYTES = 5 * 1024 * 1024  # rotate at 5 MB
 
 _SELL_HOUR   = 15
 _SELL_MINUTE = 55
@@ -65,7 +68,15 @@ def now_et() -> datetime:
 
 
 def log(msg: str) -> None:
-    print(f"[{now_et():%H:%M:%S} ET] {msg}", flush=True)
+    line = f"[{now_et():%Y-%m-%d %H:%M:%S} ET] {msg}"
+    print(line, flush=True)
+    try:
+        if LOG_FILE.exists() and LOG_FILE.stat().st_size > _LOG_MAX_BYTES:
+            LOG_FILE.rename(LOG_FILE.with_suffix(".log.old"))
+        with LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
 
 def notify(msg: str) -> None:
@@ -285,6 +296,43 @@ def _parse_order_result(stdout: str) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Scan diagnostics
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _log_scan_diagnostics(md: GrinderMarketData) -> None:
+    """Log top 5 tickers by raw score + which main-strategy filter each fails."""
+    snaps = md.all_snapshots()
+    log(f"  Diagnostics: {len(snaps)}/{len(WATCHLIST)} tickers returned data")
+    if not snaps:
+        return
+
+    top = sorted(snaps, key=lambda s: s.score, reverse=True)[:5]
+    log("  Top 5 by momentum score (main strategy filter failures):")
+    for s in top:
+        fails = []
+        if not (2.0 <= s.last_close <= 40.0):
+            fails.append(f"price=${s.last_close:.2f}")
+        if s.avg_volume_20 < 300_000:
+            fails.append(f"avgvol={s.avg_volume_20/1e3:.0f}k<300k")
+        pct = s.yesterday_pct_change
+        if not (1.5 <= pct <= 12.0):
+            fails.append(f"pct={pct:+.1f}%")
+        if s.rel_volume < 1.5:
+            fails.append(f"relvol={s.rel_volume:.1f}x<1.5x")
+        if s.atr_pct < 1.5:
+            fails.append(f"atr={s.atr_pct:.1f}%<1.5%")
+        if s.last_close <= s.ema20:
+            fails.append("below_ema20")
+        if s.last_close <= s.ema5:
+            fails.append("below_ema5")
+        if s.close_strength < 0.40:
+            fails.append(f"closestr={s.close_strength:.0%}<40%")
+        reason = " | ".join(fails) if fails else "PASSES ALL FILTERS"
+        log(f"    {s.symbol:12s}  score={s.score:7.1f}  pct={pct:+5.1f}%"
+            f"  relvol={s.rel_volume:.1f}x  ->  {reason}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Scan
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -305,6 +353,7 @@ def run_scan(balance: float) -> tuple[list[GrinderPick], FuturesBias, str, str, 
 
     strategy_name = "Main Strategy"
     if not picks:
+        _log_scan_diagnostics(md)
         log("  No main picks — running fallback...")
         picks = FallbackStrategy(md).scan(WATCHLIST)
         strategy_name = "Fallback Original Strategy" if picks else ""
@@ -887,6 +936,7 @@ def main() -> None:
     # ── Startup ───────────────────────────────────────────────────────────
     log("=" * 60)
     log("Le Grinder — STARTING")
+    log(f"Log file: {LOG_FILE}")
     log("=" * 60)
 
     balance: float = args.balance or fetch_live_balance() or 100.0
