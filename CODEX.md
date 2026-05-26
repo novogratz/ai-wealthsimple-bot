@@ -5,7 +5,7 @@
 ```
 ai-wealthsimple-bot/
 ├── kzer_bot/
-│   ├── grinder_strategy.py   ← v3.2 strategy (MAIN)
+│   ├── grinder_strategy.py   ← Le Grinder strategy (MAIN)
 │   │     GrinderSnapshot      — 10-field frozen dataclass w/ computed properties
 │   │     GrinderMarketData    — yfinance wrapper (60d daily, ATR14, EMA5/20)
 │   │     FuturesBias          — Enum: GREEN / RED / NEUTRAL
@@ -36,7 +36,7 @@ ai-wealthsimple-bot/
 │   └── config.py              ← Settings / TradingSettings / RiskSettings (TOML)
 │
 ├── scripts/
-│   ├── run_grinder.py         ← v3.2 orchestrator (MAIN ENTRY POINT)
+│   ├── run_grinder.py         ← Le Grinder orchestrator (MAIN ENTRY POINT)
 │   │     run_scan()           — futures + GrinderStrategy + FallbackStrategy
 │   │     get_ai_analysis()    — calls `claude -p "..."` subprocess
 │   │     wait_for_buy_window() — 9:15 AM or 11:00 AM depending on bias

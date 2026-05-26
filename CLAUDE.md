@@ -2,7 +2,7 @@
 
 ## What this is
 
-**ai-wealthsimple-bot** is a 24/7 autonomous Canadian stock day-trading bot that:
+**Le Grinder** is a 24/7 autonomous Canadian stock day-trading bot that:
 - Scans 164 Canadian tickers (TSX / TSXV / NEO) each morning using a momentum strategy
 - Checks US futures (ES=F) to decide *when* to buy (open vs bounce)
 - Places one trade per day via Wealthsimple browser automation (Playwright + Edge)
@@ -92,6 +92,13 @@ WS_PASSWORD=yourpassword
 ## AI analysis
 
 The bot calls `claude -p "..."` (Claude Code CLI) at each scan to get qualitative reasoning on the top picks. If claude CLI is not on PATH, this step is silently skipped.
+
+## Skills
+
+```
+/grinder   — live scan, top picks, AI analysis, game plan
+/codex     — full technical overview of Le Grinder
+```
 
 ## Common tasks for Claude Code
 

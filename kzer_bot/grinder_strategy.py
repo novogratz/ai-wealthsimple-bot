@@ -1,4 +1,4 @@
-"""TSX Futures Sentiment Grinder v3.2 — strategy, market data, futures bias."""
+"""Le Grinder — strategy, market data, futures bias."""
 
 from __future__ import annotations
 

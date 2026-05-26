@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-TSX Futures Sentiment Grinder v3.2
+Le Grinder
 ====================================
 Quant rules  : 1 trade/day  |  no stop loss  |  hard exit 3:55 PM ET
 Edge source  : momentum continuation on high-volume up-days + EMA trend filter
@@ -336,7 +336,7 @@ def build_scan_message(
     ai_analysis: str,
     label: str,
 ) -> str:
-    header = f"🌅 <b>TSX Grinder v3.2 — {label}</b>"
+    header = f"🌅 <b>Le Grinder — {label}</b>"
 
     if not picks:
         return (
@@ -848,7 +848,7 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="TSX Futures Grinder v3.2 — 1 trade/day, no stop, 3:55 PM exit"
+        description="Le Grinder — 1 trade/day, no stop, 3:55 PM exit"
     )
     parser.add_argument("--balance", type=float, default=None,
                         help="Cash in CAD (default: live fetch from Wealthsimple)")
@@ -858,7 +858,7 @@ def main() -> None:
 
     # ── Startup ───────────────────────────────────────────────────────────
     log("=" * 60)
-    log("TSX Futures Sentiment Grinder v3.2 — STARTING")
+    log("Le Grinder — STARTING")
     log("=" * 60)
 
     balance: float = args.balance or fetch_live_balance() or 100.0
@@ -871,7 +871,7 @@ def main() -> None:
     stats = _get_trade_stats()
     at_color = _pnl_color(stats["total_pnl"])
     notify(
-        f"🚀 <b>TSX Futures Grinder v3.2 started successfully</b>\n\n"
+        f"🚀 <b>Le Grinder started successfully</b>\n\n"
         f"💰 Balance: <b>${balance:.2f} CAD</b>\n"
         f"📋 Watchlist: <b>{len(WATCHLIST)} Canadian tickers</b>  (TSX / TSXV / NEO)\n"
         f"📐 Strategy: 8-criteria momentum screen  +  Claude AI analysis\n"

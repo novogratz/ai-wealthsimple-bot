@@ -1,4 +1,4 @@
-# TSX Futures Sentiment Grinder v3.2
+# Le Grinder 🇨🇦
 
 Autonomous Canadian stock day-trading bot for Wealthsimple.
 
@@ -85,7 +85,7 @@ python scripts/run_grinder.py --balance 95.50
 Every morning at 5 AM you receive:
 
 ```
-🌅 TSX Grinder v3.2 — 5 AM Morning Scan
+🌅 Le Grinder — 5 AM Morning Scan
 
 📡 Futures: 🟢 GREEN — ES=F 5,820 pts (+0.35% vs 24h ago)
 
@@ -114,11 +114,11 @@ TODAY'S GAME PLAN:
 
 ---
 
-## Claude Code skills
+## Skills
 
 ```
-/grinder   — run a live scan and show today's game plan with AI analysis
-/codex     — show full technical overview of the bot
+/grinder   — live scan: top picks, futures bias, AI analysis, full game plan
+/codex     — full technical overview of Le Grinder
 ```
 
 ---

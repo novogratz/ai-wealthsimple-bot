@@ -1,4 +1,4 @@
-Run a full morning scan of the TSX Futures Grinder v3.2, show me the top picks with their scores, futures bias, and the Claude AI analysis. Then tell me the game plan for today (or tomorrow if market is closed). Use the data from kzer_bot/grinder_strategy.py and the logic in scripts/run_grinder.py. Run the actual scan using the venv Python at .venv/Scripts/python.exe.
+Run a full morning scan of Le Grinder, show me the top picks with their scores, futures bias, and the Claude AI analysis. Then tell me the game plan for today (or tomorrow if market is closed). Use the data from kzer_bot/grinder_strategy.py and the logic in scripts/run_grinder.py. Run the actual scan using the venv Python at .venv/Scripts/python.exe.
 
 Steps:
 1. Check current time (ET) and whether the market is open
