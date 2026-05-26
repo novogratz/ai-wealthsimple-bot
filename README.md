@@ -45,17 +45,23 @@ pip install -r requirements.txt
 playwright install msedge
 ```
 
-**Authenticate Wealthsimple** (first time and whenever session expires):
+**Authenticate Wealthsimple** (first time only):
 ```powershell
 python scripts/wealthsimple_auto.py setup
 ```
 Log in inside the Edge window, navigate to your home page, then press ENTER in the terminal.
 
+After the first login, session expiry is handled **automatically** — the bot reads `WS_EMAIL` / `WS_PASSWORD` from `.env` and re-logs in without stopping.
+
 **Create `.env`** in the project root:
 ```
 TELEGRAM_BOT_TOKEN=<your bot token from BotFather>
 TELEGRAM_CHAT_ID=@yourchannel
+WS_EMAIL=you@gmail.com
+WS_PASSWORD=yourpassword
 ```
+
+`WS_EMAIL` and `WS_PASSWORD` enable automatic re-login if the Wealthsimple session expires mid-run. The bot detects the login page, fills credentials, and resumes without human intervention. `.env` is gitignored and never leaves your machine.
 
 ---
 
@@ -141,10 +147,12 @@ python -m kzer_bot quote --symbol ERF.TO
 ## Files that must never be committed
 
 ```
-.env
-data/ws_auth.json
-data/browser_profile/
+.env                   ← credentials (Telegram + Wealthsimple)
+data/ws_auth.json      ← browser session token
+data/browser_profile/  ← Edge persistent profile
 ```
+
+All three are gitignored. Double-check with `git status` before any push.
 
 ---
 

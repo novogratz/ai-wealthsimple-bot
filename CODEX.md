@@ -91,7 +91,8 @@ close_strength       = (last_close - yesterday_low) / (yesterday_high - yesterda
 
 ```
 wealthsimple_auto.py buy --symbol ERF.TO --max-dollars
-  → opens Edge (persistent profile at data/browser_profile)
+  → connects to Edge via CDP (localhost:9222)
+  → if login page detected → try_auto_login() → fills WS_EMAIL/WS_PASSWORD → Log In
   → navigates to Wealthsimple stock page
   → clicks Buy → switches to Dollars mode → clicks Max
   → reads review page → prints ORDER_RESULT_JSON:{...}
@@ -103,9 +104,30 @@ wealthsimple_auto.py sell --symbol ERF.TO --sell-all
   → prints ORDER_RESULT_JSON:{submitted: true, ...}
 
 wealthsimple_auto.py balance
-  → goes to home → scrapes Unregistered account balance
+  → goes to home → auto-login if session expired
+  → scrapes Non-registered/Unregistered account balance
   → prints LIVE_BALANCE_CAD:xxx
   → exits 0 on success
+
+wealthsimple_auto.py setup
+  → first-time only: launches Edge with persistent profile at data/browser_profile
+  → user logs in manually → session persists across bot restarts
+  → subsequent session expiries handled automatically via try_auto_login()
+```
+
+### Auto-login recovery (`try_auto_login`)
+
+Triggered whenever `input[type="password"]` is detected after navigating to WS_HOME.
+
+```python
+try_auto_login(page):
+  1. Loads .env to read WS_EMAIL / WS_PASSWORD
+  2. Fills email input with WS_EMAIL
+  3. Fills password input with WS_PASSWORD
+  4. Clicks "Log In" button
+  5. Waits 8s for redirect
+  6. Returns True if login page is gone, False otherwise
+  # Screenshots saved to data/screen_login_page.png and data/screen_after_auto_login.png
 ```
 
 ## Telegram message contract
@@ -154,14 +176,19 @@ get_ai_analysis(picks, bias, futures_detail, balance)
 ```
 TELEGRAM_BOT_TOKEN=<from BotFather>
 TELEGRAM_CHAT_ID=@channel_or_numeric_id
-ANTHROPIC_API_KEY=<not needed, using claude CLI>
+WS_EMAIL=<Wealthsimple login email>
+WS_PASSWORD=<Wealthsimple password>
+ANTHROPIC_API_KEY=<not needed — using claude CLI subprocess>
 ```
+
+All vars are loaded from `.env` at runtime. `.env` is gitignored — never committed.
 
 ## Common errors and fixes
 
 | Error | Fix |
 |---|---|
-| `session_expired` in ws output | Run `python scripts/wealthsimple_auto.py setup` |
+| Session expires mid-run | Auto-handled — `try_auto_login()` fires automatically using WS_EMAIL/WS_PASSWORD |
+| Auto-login fails (wrong creds) | Check WS_EMAIL / WS_PASSWORD in `.env`; re-run `setup` if needed |
 | `claude: command not found` | AI analysis skipped silently — install Claude Code CLI |
 | `No candidates passed` | Market was closed or all tickers failed yfinance; check internet |
 | `UnicodeEncodeError` | PowerShell encoding issue — run in Windows Terminal with UTF-8 |

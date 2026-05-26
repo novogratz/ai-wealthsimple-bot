@@ -25,7 +25,7 @@
 | `data/open_position.json` | Live position state (JSON) |
 | `data/pnl_ledger.json` | Cumulative P&L ledger |
 | `data/trade_history.csv` | Full trade log (CSV) |
-| `.env` | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (never commit) |
+| `.env` | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` + `WS_EMAIL` + `WS_PASSWORD` (never commit) |
 
 ## Running the bot
 
@@ -48,13 +48,19 @@ python -m venv .venv
 pip install -r requirements.txt
 playwright install msedge
 
-# Authenticate Wealthsimple (saves session to data/ws_auth.json)
+# First-time Wealthsimple login (opens Edge, log in manually, press ENTER)
 python scripts/wealthsimple_auto.py setup
+```
 
-# Create .env
+Create `.env` in the project root (never commit this file):
+```
 TELEGRAM_BOT_TOKEN=xxx
 TELEGRAM_CHAT_ID=@yourchannel
+WS_EMAIL=you@gmail.com
+WS_PASSWORD=yourpassword
 ```
+
+`WS_EMAIL` / `WS_PASSWORD` power the auto-login recovery: if the session expires mid-run, `wealthsimple_auto.py` detects the login page and re-authenticates automatically.
 
 ## Strategy summary (v3.2)
 
@@ -109,7 +115,8 @@ Data flows: scan → AI analysis → game plan Telegram → buy order → positi
 
 ## What NOT to do
 
-- Do not commit `.env`, `data/ws_auth.json`, or `data/browser_profile/`
+- Do not commit `.env`, `data/ws_auth.json`, or `data/browser_profile/` — all gitignored, verify with `git status`
 - Do not add stop losses — the strategy is time-based exit only
 - Do not change the sell time without testing — 3:55 PM is intentional (5 min before TSX close)
 - Do not run `run_day.py` and `run_grinder.py` simultaneously (both write to `open_position.json`)
+- Do not put credentials directly in code — always use `.env`
