@@ -118,7 +118,7 @@ def trade_message(
     lines = [f"{custom_header}{label}", f"⏰ Time: {when}"]
     
     if symbol:
-        lines.append(f"🎫 Symbol: <code>{symbol}</code>")
+        lines.append(f"🎫 Symbol: {symbol} (<code>{symbol}</code>)")
     if shares is not None:
         lines.append(f"🔢 Shares: {shares}")
     if price is not None:

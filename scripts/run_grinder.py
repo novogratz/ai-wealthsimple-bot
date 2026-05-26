@@ -17,13 +17,17 @@ from __future__ import annotations
 
 import argparse
 import csv
+import importlib
 import json
+import shutil
 import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+import yfinance as yf
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -47,6 +51,7 @@ HISTORY_CSV  = DATA / "trade_history.csv"
 PNL_LEDGER   = DATA / "pnl_ledger.json"
 SESSION_FILE = DATA / "session_info.json"
 LOG_FILE     = DATA / "grinder.log"
+PROFILE_FILE  = DATA / "company_profiles.json"
 PYTHON       = sys.executable
 TZ           = ZoneInfo("America/Toronto")
 
@@ -54,9 +59,12 @@ DATA.mkdir(exist_ok=True)
 
 _LOG_MAX_BYTES = 5 * 1024 * 1024  # rotate at 5 MB
 
-_SELL_HOUR   = 15
-_SELL_MINUTE = 55
-_DEPLOY_PCT  = 90          # % of balance deployed per trade
+_SELL_HOUR        = 15
+_SELL_MINUTE      = 55
+_DEPLOY_PCT       = 90        # % of balance deployed per trade
+_UNIVERSE_MAX_AGE = 7 * 86400  # refresh universe.json if older than 7 days
+UNIVERSE_FILE     = ROOT / "data" / "universe.json"
+UNIVERSE_SCRIPT   = ROOT / "scripts" / "update_universe.py"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -95,6 +103,107 @@ def _pnl_color(v: float) -> str:
 
 def _pnl_arrow(v: float) -> str:
     return "📈" if v >= 0 else "📉"
+
+
+def _buy_time_for_bias(bias: FuturesBias) -> tuple[int, int]:
+    if bias == FuturesBias.GREEN:
+        return 5, 15
+    if bias == FuturesBias.RED:
+        return 11, 0
+    return 9, 15
+
+
+def _load_name_map() -> dict[str, str]:
+    path = ROOT / "config" / "universe.csv"
+    names: dict[str, str] = {}
+    if not path.exists():
+        return names
+    try:
+        with path.open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                symbol = (row.get("symbol") or "").strip()
+                name = (row.get("name") or "").strip()
+                if symbol and name:
+                    names[symbol] = name
+    except Exception:
+        return {}
+    return names
+
+
+NAME_MAP = _load_name_map()
+
+
+def _load_profile_cache() -> dict[str, dict]:
+    if not PROFILE_FILE.exists():
+        return {}
+    try:
+        payload = json.loads(PROFILE_FILE.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_profile_cache(cache: dict[str, dict]) -> None:
+    try:
+        PROFILE_FILE.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+_PROFILE_CACHE = _load_profile_cache()
+
+
+def _company_profile(symbol: str) -> dict[str, str]:
+    cached = _PROFILE_CACHE.get(symbol)
+    if isinstance(cached, dict) and cached.get("name"):
+        return cached  # type: ignore[return-value]
+
+    profile = {
+        "name": NAME_MAP.get(symbol, symbol),
+        "sector": "",
+        "industry": "",
+        "summary": "",
+    }
+
+    try:
+        info = yf.Ticker(symbol).get_info()
+        profile["name"] = (
+            info.get("longName")
+            or info.get("shortName")
+            or profile["name"]
+        )
+        profile["sector"] = str(info.get("sector") or "").strip()
+        profile["industry"] = str(info.get("industry") or "").strip()
+        summary = str(info.get("longBusinessSummary") or "").strip()
+        if summary:
+            profile["summary"] = summary
+    except Exception:
+        pass
+
+    _PROFILE_CACHE[symbol] = profile
+    _save_profile_cache(_PROFILE_CACHE)
+    return profile
+
+
+def _company_line(symbol: str) -> str:
+    profile = _company_profile(symbol)
+    parts = [f"{symbol} - {profile['name']}"]
+    if profile.get("sector"):
+        parts.append(profile["sector"])
+    if profile.get("industry"):
+        parts.append(profile["industry"])
+    return " | ".join(parts)
+
+
+def _company_details(symbol: str) -> str:
+    profile = _company_profile(symbol)
+    summary = profile.get("summary", "").strip()
+    if summary:
+        return summary if len(summary) <= 240 else summary[:237].rstrip() + "..."
+    sector = profile.get("sector", "").strip()
+    industry = profile.get("industry", "").strip()
+    pieces = [p for p in (sector, industry) if p]
+    return " / ".join(pieces) if pieces else "Business description unavailable"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -165,8 +274,8 @@ def _append_trade_history(symbol: str, side: str, price: float, shares: float,
                     f"{cost:.2f}", f"{pnl:.2f}", strategy_name])
 
 
-def _next_weekday_9am() -> datetime:
-    candidate = now_et().replace(hour=9, minute=15, second=0, microsecond=0)
+def _next_weekday_buy() -> datetime:
+    candidate = now_et().replace(hour=5, minute=15, second=0, microsecond=0)
     if now_et() >= candidate:
         candidate += timedelta(days=1)
     while candidate.weekday() >= 5:
@@ -181,20 +290,133 @@ def _time_until_sell() -> float:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Universe refresh
+# ──────────────────────────────────────────────────────────────────────────────
+
+def refresh_universe_if_stale() -> None:
+    """Re-fetch TSX/TSXV universe from TMX API if file is missing or >7 days old."""
+    needs_refresh = True
+    if UNIVERSE_FILE.exists():
+        age = time.time() - UNIVERSE_FILE.stat().st_mtime
+        needs_refresh = age > _UNIVERSE_MAX_AGE
+
+    if not needs_refresh:
+        try:
+            count = json.loads(UNIVERSE_FILE.read_text())["count"]
+            log(f"Universe: {count} tickers (file up to date)")
+        except Exception:
+            pass
+        return
+
+    log("Universe file missing or stale — refreshing from TMX API...")
+    try:
+        result = subprocess.run(
+            [PYTHON, str(UNIVERSE_SCRIPT)],
+            cwd=ROOT, capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode == 0:
+            count = json.loads(UNIVERSE_FILE.read_text())["count"]
+            log(f"Universe updated: {count} tickers")
+            # Reload WATCHLIST with fresh data
+            import kzer_bot.grinder_strategy as _gs
+            importlib.reload(_gs)
+            from kzer_bot.grinder_strategy import WATCHLIST as _WL  # noqa: F401
+        else:
+            log(f"Universe refresh failed — using existing list: {result.stderr[:200]}")
+    except Exception as exc:
+        log(f"Universe refresh error: {exc} — using existing list")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Buy timing helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _next_buy_dt(bias: FuturesBias) -> datetime:
+    """Return the next upcoming buy datetime (ET) accounting for weekends."""
+    now = now_et()
+    buy_h, buy_m = _buy_time_for_bias(bias)
+    target = now.replace(hour=buy_h, minute=buy_m, second=0, microsecond=0)
+    if now >= target:
+        target += timedelta(days=1)
+    while target.weekday() >= 5:  # skip Sat/Sun
+        target += timedelta(days=1)
+    return target
+
+
+def _buy_timing_line(bias: FuturesBias) -> str:
+    """
+    Returns a natural-language timing line for Telegram game plans.
+    Examples:
+      'Buying in 43 min  (9:15 AM today, pre-market)'
+      'Buying in 11h 22min  (9:15 AM tomorrow, pre-market)'
+      'Buying in 2d 4h  (Monday 9:15 AM, pre-market — weekend)'
+    """
+    now    = now_et()
+    target = _next_buy_dt(bias)
+    diff   = target - now
+    total_mins = max(0, int(diff.total_seconds() / 60))
+    h, m   = divmod(total_mins, 60)
+    days   = h // 24
+    h      = h % 24
+
+    if days > 0:
+        countdown = f"{days}d {h}h"
+        when_note = f"Monday {target:%H:%M} ET — weekend" if target.weekday() == 0 else f"{target:%A} {target:%H:%M} ET"
+    elif h > 0:
+        countdown = f"{h}h {m:02d}min"
+        same_day  = target.date() == now.date()
+        when_note = f"{target:%I:%M %p} ET {'today' if same_day else 'tomorrow'}"
+    else:
+        countdown = f"{m} min"
+        when_note = f"{target:%I:%M %p} ET today"
+
+    if bias == FuturesBias.RED:
+        style = "bounce buy — red futures"
+    elif bias == FuturesBias.GREEN:
+        style = "early pre-market, fills at 9:30 open"
+    else:
+        style = "pre-market, fills at 9:30 open"
+
+    return f"Buying in <b>{countdown}</b>  ({when_note}, {style})"
+
+
+def _day_label(bias: FuturesBias) -> str:
+    """'TODAY' or 'TOMORROW' (or weekday name for weekend schedules)."""
+    now    = now_et()
+    target = _next_buy_dt(bias)
+    if target.date() == now.date():
+        return "TODAY"
+    elif (target.date() - now.date()).days == 1:
+        return "TOMORROW"
+    else:
+        return target.strftime("%A").upper()  # e.g. MONDAY
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Claude CLI  — AI market analysis
 # ──────────────────────────────────────────────────────────────────────────────
 
 def get_ai_analysis(picks: list[GrinderPick], bias: FuturesBias,
                     futures_detail: str, balance: float) -> str:
     """
-    Calls the `claude` CLI to analyse the top scan candidates and return
-    a short, actionable recommendation. Gracefully returns empty string
-    if claude CLI is not available.
+    Calls an available CLI helper to analyse the top scan candidates.
+    Falls back to deterministic output if no CLI is available or the CLI fails.
     """
     if not picks:
         return ""
 
-    # Build a concise data table for Claude
+    def _deterministic_fallback() -> str:
+        top = picks[0]
+        direction = "bullish" if top.yesterday_pct >= 0 else "mixed"
+        return (
+            f"- Top pick: {top.symbol} ({top.strategy_name})\n"
+            f"- Score: {top.score:.1f} | yesterday: {top.yesterday_pct:+.1f}% | rel vol: {top.rel_volume:.1f}x\n"
+            f"- Why: price is above the trend filters and closed near the high\n"
+            f"- Risk: lower volume or a weak open can fade the setup\n"
+            f"- Expected move: base case {direction}, no guarantee"
+        )
+
+    # Build a concise data table for the CLI, if one is present.
     lines = []
     for i, p in enumerate(picks[:5], 1):
         lines.append(
@@ -222,27 +444,30 @@ TASK — reply in 120 words max, plain text, bullet points:
 • What is the single biggest risk for this trade?
 • Expected move today: bearish / base / bull scenario in %"""
 
+    cli = next((name for name in ("claude", "codex") if shutil.which(name)), None)
+    if cli is None:
+        log("  Claude/Codex CLI not available — using deterministic analysis")
+        return _deterministic_fallback()
+
     try:
         result = subprocess.run(
-            ["claude", "-p", prompt, "--output-format", "text"],
+            [cli, "-p", prompt, "--output-format", "text"],
             capture_output=True, text=True, timeout=60,
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
-        # claude CLI might not support --output-format; retry without it
+        # Some CLI builds ignore or reject --output-format; retry without it.
         result2 = subprocess.run(
-            ["claude", "-p", prompt],
+            [cli, "-p", prompt],
             capture_output=True, text=True, timeout=60,
         )
         if result2.returncode == 0 and result2.stdout.strip():
             return result2.stdout.strip()
-    except FileNotFoundError:
-        log("  claude CLI not found — skipping AI analysis")
     except subprocess.TimeoutExpired:
-        log("  claude CLI timed out — skipping AI analysis")
+        log("  Claude/Codex CLI timed out — using deterministic analysis")
     except Exception as exc:
-        log(f"  claude CLI error: {exc}")
-    return ""
+        log(f"  Claude/Codex CLI error: {exc} — using deterministic analysis")
+    return _deterministic_fallback()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -348,6 +573,14 @@ def run_scan(balance: float) -> tuple[list[GrinderPick], FuturesBias, str, str, 
 
     log(f"Scanning {len(WATCHLIST)} Canadian tickers (main 8-criteria)...")
     md = GrinderMarketData()
+
+    # Batch-download all tickers at once (3-5x faster than sequential)
+    def _progress(done: int, total: int) -> None:
+        if done % 500 == 0 or done == total:
+            log(f"  Data: {done}/{total} tickers downloaded...")
+    md.prefetch(WATCHLIST, progress_cb=_progress)
+    log(f"  Prefetch complete — {len(md.all_snapshots())} tickers with data")
+
     picks = GrinderStrategy(md).scan(WATCHLIST)
     log(f"  Main strategy: {len(picks)} candidate(s).")
 
@@ -365,7 +598,9 @@ def run_scan(balance: float) -> tuple[list[GrinderPick], FuturesBias, str, str, 
         strategy_name = "Best Available" if picks else "No Strategy"
         log(f"  Best-effort: {len(picks)} candidate(s).")
 
-    if bias == FuturesBias.RED:
+    if bias == FuturesBias.GREEN:
+        buy_plan = "🚀 Early buy at 5:15 AM pre-market  (fills at 9:30 open)"
+    elif bias == FuturesBias.RED:
         buy_plan = "⏳ Wait for bounce — buy 11:00–12:00 PM ET"
     else:
         buy_plan = "🚀 Buy at 9:15 AM pre-market  (fills at 9:30 open)"
@@ -392,6 +627,7 @@ def build_scan_message(
     ai_analysis: str,
     label: str,
 ) -> str:
+    day   = _day_label(bias)
     header = f"🌅 <b>Le Grinder — {label}</b>"
 
     if not picks:
@@ -399,43 +635,46 @@ def build_scan_message(
             f"{header}\n\n"
             f"{_bias_line(bias, futures_detail)}\n\n"
             f"🔍 Scanned {len(WATCHLIST)} tickers — <b>no data returned from any ticker</b>.\n"
-            f"📋 Plan: <b>SKIP today</b> — check internet connection / yfinance."
+            f"📋 Plan: <b>SKIP {day}</b> — check internet connection / yfinance."
         )
 
-    top = picks[0]
-    deploy = balance * _DEPLOY_PCT / 100
+    top        = picks[0]
+    company_ln = _company_line(top.symbol)
+    company_dt = _company_details(top.symbol)
+    deploy     = balance * _DEPLOY_PCT / 100
     shares_est = int(deploy // top.last_close) if top.last_close > 0 else 0
-    stats = _get_trade_stats()
-    at_pnl = stats["total_pnl"]
-    at_color = _pnl_color(at_pnl)
-    is_best_effort = (strategy_name == "Best Available")
+    stats      = _get_trade_stats()
+    at_pnl     = stats["total_pnl"]
+    at_color   = _pnl_color(at_pnl)
+    is_best    = (strategy_name == "Best Available")
+    timing     = _buy_timing_line(bias)
 
-    # Others line (only for multi-pick strategies)
     others = "  ".join(
         f"<code>{p.symbol}</code> ${p.last_close:.2f} score {p.score:.0f}"
         for p in picks[1:4]
     )
 
-    if is_best_effort:
-        scan_line = (
+    if is_best:
+        scan_line   = (
             f"🔍 Scanned <b>{len(WATCHLIST)}</b> Canadian tickers\n"
-            f"   ⚠️ <b>No clean setups today</b>  |  Using: <b>Best Available Pick</b>"
+            f"   ⚠️ <b>No clean setups</b> — using Best Available pick"
         )
-        pick_banner = (
+        pick_header = (
             f"⚠️━━━━━━━━━━━━━━━━━━━━━━━━⚠️\n"
-            f"📌 <b>BEST AVAILABLE PICK: <code>{top.symbol}</code>  (${top.last_close:.2f} CAD)</b>\n"
+            f"📌 <b>{day}'S PICK (Best Available): <code>{top.symbol}</code>  "
+            f"(${top.last_close:.2f} CAD)</b>\n"
             f"⚠️━━━━━━━━━━━━━━━━━━━━━━━━⚠️\n"
-            f"<i>No ticker passed normal filters today — this is the highest-scoring\n"
-            f"stock with available data. Trade with reduced size if desired.</i>"
+            f"<i>No stock passed normal filters — highest-scoring from full universe.\n"
+            f"Trade with reduced size if desired.</i>"
         )
     else:
-        scan_line = (
+        scan_line   = (
             f"🔍 Scanned <b>{len(WATCHLIST)}</b> Canadian tickers\n"
             f"   ✅ <b>{len(picks)}</b> passed  |  Strategy: <b>{strategy_name}</b>"
         )
-        pick_banner = (
+        pick_header = (
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🏆 <b>TODAY'S PICK: <code>{top.symbol}</code>  (${top.last_close:.2f} CAD)</b>\n"
+            f"🏆 <b>{day}'S PICK: <code>{top.symbol}</code>  (${top.last_close:.2f} CAD)</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━"
         )
 
@@ -443,24 +682,29 @@ def build_scan_message(
         f"{header}\n\n"
         f"{_bias_line(bias, futures_detail)}\n\n"
         f"{scan_line}\n\n"
-        f"{pick_banner}\n"
-        f"<b>{'BEST AVAILABLE METRICS' if is_best_effort else 'WHY THIS STOCK'}:</b>\n"
-        f"  📈 Yesterday: <b>{top.yesterday_pct:+.2f}%</b>  on  <b>{top.rel_volume:.1f}× normal volume</b>\n"
-        f"  🔥 ATR(14): <b>{top.atr_pct:.2f}%</b> of price  →  daily range potential\n"
+        f"{pick_header}\n"
+        f"🏢 <b>{company_ln}</b>\n"
+        f"📝 {company_dt}\n\n"
+        f"<b>WHY THIS STOCK:</b>\n"
+        f"  📈 Yesterday: <b>{top.yesterday_pct:+.2f}%</b>  on  "
+        f"<b>{top.rel_volume:.1f}x normal volume</b>\n"
+        f"  🔥 ATR(14): <b>{top.atr_pct:.2f}%</b> of price\n"
         f"  💪 Closed: <b>{top.close_strength:.0%}</b> of day range\n"
-        f"  📊 Trend: EMA5 {'✅' if top.above_ema5 else '❌'}  EMA20 {'✅' if top.above_ema20 else '❌'}\n"
+        f"  📊 Trend: EMA5 {'✅' if top.above_ema5 else '❌'}  "
+        f"EMA20 {'✅' if top.above_ema20 else '❌'}\n"
         f"  🎯 Score: <b>{top.score:.1f}</b>  ({top.confidence})\n\n"
     )
 
-    if others and not is_best_effort:
+    if others and not is_best:
         msg += f"Other candidates:  {others}\n\n"
 
     msg += (
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>TODAY'S GAME PLAN:</b>\n"
+        f"<b>{day}'S GAME PLAN:</b>\n"
         f"  📋 {strategy_name}\n"
-        f"  ⏰ Entry: {buy_plan}\n"
-        f"  💰 Budget: <b>${balance:.2f}</b>  →  deploying <b>{_DEPLOY_PCT}%</b>  =  <b>${deploy:.2f} CAD</b>\n"
+        f"  ⏰ {timing}\n"
+        f"  💰 Budget: <b>${balance:.2f}</b>  →  deploying <b>{_DEPLOY_PCT}%</b>"
+        f"  =  <b>${deploy:.2f} CAD</b>\n"
         f"  🔢 Est. shares: ~{shares_est}  @  ${top.last_close:.2f}\n"
         f"  🏁 Exit: <b>3:55 PM ET hard sell</b>  (no stop loss)\n"
         f"  🎯 Target: <b>+1.5% to +3%</b> on momentum continuation\n\n"
@@ -469,7 +713,10 @@ def build_scan_message(
     )
 
     if ai_analysis:
-        msg += f"\n\n━━━━━━━━━━━━━━━━━━━━━━━━\n🤖 <b>AI Analysis (Claude):</b>\n{ai_analysis}"
+        msg += (
+            f"\n\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🤖 <b>Analysis:</b>\n{ai_analysis}"
+        )
 
     return msg
 
@@ -484,11 +731,18 @@ def build_buy_message(
 ) -> str:
     deploy     = balance * _DEPLOY_PCT / 100
     shares_est = int(deploy // pick.last_close) if pick.last_close > 0 else 0
-    entry_mode = "11:00 AM — Bounce buy (red bias)" if is_bounce else "9:15 AM — Pre-market order (fills at 9:30 open)"
+    if bias == FuturesBias.GREEN:
+        entry_mode = "5:15 AM — Early pre-market order (fills at 9:30 open)"
+    elif is_bounce:
+        entry_mode = "11:00 AM — Bounce buy (red bias)"
+    else:
+        entry_mode = "9:15 AM — Pre-market order (fills at 9:30 open)"
     bias_line  = _bias_line(bias, futures_detail)
 
     msg = (
-        f"🛒 <b>BUYING NOW — <code>{pick.symbol}</code></b>\n\n"
+        f"🛒 <b>BUYING NOW — <code>{pick.symbol}</code></b>\n"
+        f"🏢 <b>{_company_line(pick.symbol)}</b>\n"
+        f"📝 {_company_details(pick.symbol)}\n\n"
         f"⏰ <b>{entry_mode}</b>\n"
         f"💵 Entry: ~<b>${pick.last_close:.2f} CAD</b>\n"
         f"🔢 Est. shares: ~<b>{shares_est}</b>  ({_DEPLOY_PCT}% of ${balance:.2f})\n"
@@ -507,7 +761,7 @@ def build_buy_message(
     )
 
     if ai_analysis:
-        msg += f"\n\n🤖 <b>AI view:</b>\n{ai_analysis}"
+        msg += f"\n\n🤖 <b>Analysis:</b>\n{ai_analysis}"
 
     return msg
 
@@ -614,13 +868,24 @@ def wait_for_buy_window(
 ) -> bool:
     """
     Blocks until the correct buy window.
-    Green/Neutral → 9:15 AM
+    Green         → 5:15 AM
+    Neutral       → 9:15 AM
     Red           → sends 9:15 AM warning, then waits for 11:00 AM
     Returns False if the window has already passed.
     """
     now = now_et()
 
-    if bias != FuturesBias.RED:
+    if bias == FuturesBias.GREEN:
+        target  = now.replace(hour=5, minute=15, second=0, microsecond=0)
+        cutoff  = now.replace(hour=5, minute=25, second=0, microsecond=0)
+        if now > cutoff:
+            log("Green buy window (5:15–5:25) already passed.")
+            return False
+        if now < target:
+            _sleep_until(target, "5:15 AM green buy window")
+        return True
+
+    if bias == FuturesBias.NEUTRAL:
         target  = now.replace(hour=9, minute=15, second=0, microsecond=0)
         cutoff  = now.replace(hour=9, minute=25, second=0, microsecond=0)
         if now > cutoff:
@@ -630,24 +895,23 @@ def wait_for_buy_window(
             _sleep_until(target, "9:15 AM buy window")
         return True
 
-    else:
-        warn_time  = now.replace(hour=9, minute=15, second=0, microsecond=0)
-        buy_time   = now.replace(hour=11, minute=0,  second=0, microsecond=0)
-        cutoff_buy = now.replace(hour=12, minute=0,  second=0, microsecond=0)
+    warn_time  = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    buy_time   = now.replace(hour=11, minute=0,  second=0, microsecond=0)
+    cutoff_buy = now.replace(hour=12, minute=0,  second=0, microsecond=0)
 
-        if now > cutoff_buy:
-            log("Red bounce window (11:00–12:00) already passed — skipping today.")
-            return False
+    if now > cutoff_buy:
+        log("Red bounce window (11:00–12:00) already passed — skipping today.")
+        return False
 
-        # Send the 9:15 AM "waiting" message
-        if now < warn_time:
-            _sleep_until(warn_time, "9:15 AM red-bias warning")
-        if now <= warn_time + timedelta(minutes=10):
-            notify(build_red_waiting_message(pick, futures_detail))
+    # Send the 9:15 AM "waiting" message
+    if now < warn_time:
+        _sleep_until(warn_time, "9:15 AM red-bias warning")
+    if now <= warn_time + timedelta(minutes=10):
+        notify(build_red_waiting_message(pick, futures_detail))
 
-        if now < buy_time:
-            _sleep_until(buy_time, "11:00 AM bounce buy")
-        return True
+    if now < buy_time:
+        _sleep_until(buy_time, "11:00 AM bounce buy")
+    return True
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -870,7 +1134,7 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
 
         # Weekend
         if now.weekday() >= 5:
-            nxt  = _next_weekday_9am()
+            nxt  = _next_weekday_buy()
             secs = (nxt - now).total_seconds()
             log(f"Weekend — next window {nxt:%a %b %d %H:%M} ET ({secs/3600:.1f}h). Sleeping 30 min.")
             time.sleep(1800)
@@ -895,17 +1159,20 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
 
         # Near buy window → exit sleep loop
         if now.weekday() < 5:
-            buy_target = 9 if bias != FuturesBias.RED else 11
-            target_t   = now.replace(hour=buy_target, minute=15 if buy_target == 9 else 0,
+            buy_target = 5 if bias == FuturesBias.GREEN else 9 if bias == FuturesBias.NEUTRAL else 11
+            target_t   = now.replace(hour=buy_target, minute=15 if buy_target in (5, 9) else 0,
                                      second=0, microsecond=0)
             if 0 <= (target_t - now).total_seconds() <= 300:
                 log("Near buy window — exiting overnight loop.")
                 return bias
 
         # Past buy window for today → sleep until 5 PM
-        cutoff = now.replace(
-            hour=9, minute=25, second=0, microsecond=0
-        ) if bias != FuturesBias.RED else now.replace(hour=12, minute=5, second=0, microsecond=0)
+        if bias == FuturesBias.GREEN:
+            cutoff = now.replace(hour=5, minute=25, second=0, microsecond=0)
+        elif bias == FuturesBias.NEUTRAL:
+            cutoff = now.replace(hour=9, minute=25, second=0, microsecond=0)
+        else:
+            cutoff = now.replace(hour=12, minute=5, second=0, microsecond=0)
         if now > cutoff and now.hour < 17:
             log("Buy window passed — sleeping until 5 PM scan.")
             time.sleep(1800)
@@ -929,7 +1196,7 @@ def main() -> None:
     )
     parser.add_argument("--balance", type=float, default=None,
                         help="Cash in CAD (default: live fetch from Wealthsimple)")
-    parser.add_argument("--now", action="store_true",
+    parser.add_argument("--now", "--buy-now", action="store_true",
                         help="Skip all waiting and buy immediately (debug)")
     args = parser.parse_args()
 
@@ -938,6 +1205,7 @@ def main() -> None:
     log("Le Grinder — STARTING")
     log(f"Log file: {LOG_FILE}")
     log("=" * 60)
+    refresh_universe_if_stale()
 
     balance: float = args.balance or fetch_live_balance() or 100.0
     SESSION_FILE.write_text(json.dumps({
@@ -953,7 +1221,7 @@ def main() -> None:
         f"💰 Balance: <b>${balance:.2f} CAD</b>\n"
         f"📋 Watchlist: <b>{len(WATCHLIST)} Canadian tickers</b>  (TSX / TSXV / NEO)\n"
         f"📐 Strategy: 8-criteria momentum screen  +  Claude AI analysis\n"
-        f"⏰ Entry: 9:15 AM (green/neutral) or 11:00 AM (red)\n"
+        f"⏰ Entry: 5:15 AM (green), 9:15 AM (neutral), or 11:00 AM (red)\n"
         f"🏁 Exit: 3:55 PM daily  |  No stop loss\n\n"
         f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} CAD</b>"
         f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
