@@ -1167,18 +1167,26 @@ def wait_for_buy_window(
 # ──────────────────────────────────────────────────────────────────────────────
 
 def execute_buy(pick: GrinderPick, balance: float, bias: FuturesBias,
-                futures_detail: str, ai_analysis: str) -> bool:
+                futures_detail: str, ai_analysis: str,
+                fixed_shares: int | None = None) -> bool:
     is_bounce = (bias == FuturesBias.RED)
     deploy    = balance * _DEPLOY_PCT / 100
     shares_est = int(deploy // pick.last_close) if pick.last_close > 0 else 0
+    use_shares = fixed_shares or shares_est
 
     notify(build_buy_message(pick, balance, bias, futures_detail, ai_analysis, is_bounce))
-    log(f"Placing buy: {pick.symbol}  ~{shares_est} sh @ ~${pick.last_close:.2f}")
+    log(f"Placing buy: {pick.symbol}  ~{use_shares} sh @ ~${pick.last_close:.2f}")
 
-    result = subprocess.run(
-        [PYTHON, str(AUTO_SCRIPT), "buy", "--symbol", pick.symbol, "--max-dollars"],
-        cwd=ROOT, capture_output=True, text=True,
-    )
+    if fixed_shares:
+        result = subprocess.run(
+            [PYTHON, str(AUTO_SCRIPT), "buy", "--symbol", pick.symbol, "--shares", str(fixed_shares)],
+            cwd=ROOT, capture_output=True, text=True,
+        )
+    else:
+        result = subprocess.run(
+            [PYTHON, str(AUTO_SCRIPT), "buy", "--symbol", pick.symbol, "--max-dollars"],
+            cwd=ROOT, capture_output=True, text=True,
+        )
     for line in result.stdout.splitlines():
         print(f"  {line}", flush=True)
 
@@ -1494,6 +1502,8 @@ def main() -> None:
                         help="Use Yahoo Finance most active Canadian stocks (~755 tickers sorted by volume)")
     parser.add_argument("--buy-today", action="store_true",
                         help="Skip all timing (overnight wait + buy window) — scan and buy immediately")
+    parser.add_argument("--shares", type=int, default=None,
+                        help="Override buy to fixed share count (instead of 90% of balance)")
     args = parser.parse_args()
 
     # ── Startup ───────────────────────────────────────────────────────────
@@ -1734,10 +1744,18 @@ def main() -> None:
                 continue
             top = picks[0]
 
-        wait_after_pick(top, bias, fut_det)
+        if not args.buy_today:
+            wait_after_pick(top, bias, fut_det)
+        else:
+            log("Buy-today mode: skipping 5-min wait, buying immediately.")
+            notify(
+                f"⚡ <b>Buying now — <code>{top.symbol}</code></b>\n"
+                f"🏢 {_company_line(top.symbol)}\n"
+                f"📡 {_bias_line(bias, fut_det)}"
+            )
 
         # Execute buy
-        ok = execute_buy(top, balance, bias, fut_det, ai)
+        ok = execute_buy(top, balance, bias, fut_det, ai, fixed_shares=args.shares)
         if not ok:
             log("Buy failed — entering overnight loop.")
             continue
