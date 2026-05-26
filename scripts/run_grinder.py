@@ -29,6 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from kzer_bot.grinder_strategy import (
+    BestEffortStrategy,
     FallbackStrategy,
     FuturesBias,
     GrinderMarketData,
@@ -306,8 +307,14 @@ def run_scan(balance: float) -> tuple[list[GrinderPick], FuturesBias, str, str, 
     if not picks:
         log("  No main picks — running fallback...")
         picks = FallbackStrategy(md).scan(WATCHLIST)
-        strategy_name = "Fallback Original Strategy" if picks else "No Strategy"
+        strategy_name = "Fallback Original Strategy" if picks else ""
         log(f"  Fallback: {len(picks)} candidate(s).")
+
+    if not picks:
+        log("  No fallback picks — running best-effort guaranteed pick...")
+        picks = BestEffortStrategy(md).scan(WATCHLIST)
+        strategy_name = "Best Available" if picks else "No Strategy"
+        log(f"  Best-effort: {len(picks)} candidate(s).")
 
     if bias == FuturesBias.RED:
         buy_plan = "⏳ Wait for bounce — buy 11:00–12:00 PM ET"
@@ -342,8 +349,8 @@ def build_scan_message(
         return (
             f"{header}\n\n"
             f"{_bias_line(bias, futures_detail)}\n\n"
-            f"🔍 Scanned {len(WATCHLIST)} tickers — <b>no candidates passed</b> either strategy.\n"
-            f"📋 Plan: <b>SKIP today</b> — no valid setup found."
+            f"🔍 Scanned {len(WATCHLIST)} tickers — <b>no data returned from any ticker</b>.\n"
+            f"📋 Plan: <b>SKIP today</b> — check internet connection / yfinance."
         )
 
     top = picks[0]
@@ -352,30 +359,51 @@ def build_scan_message(
     stats = _get_trade_stats()
     at_pnl = stats["total_pnl"]
     at_color = _pnl_color(at_pnl)
+    is_best_effort = (strategy_name == "Best Available")
 
-    # Others line
+    # Others line (only for multi-pick strategies)
     others = "  ".join(
         f"<code>{p.symbol}</code> ${p.last_close:.2f} score {p.score:.0f}"
         for p in picks[1:4]
     )
 
+    if is_best_effort:
+        scan_line = (
+            f"🔍 Scanned <b>{len(WATCHLIST)}</b> Canadian tickers\n"
+            f"   ⚠️ <b>No clean setups today</b>  |  Using: <b>Best Available Pick</b>"
+        )
+        pick_banner = (
+            f"⚠️━━━━━━━━━━━━━━━━━━━━━━━━⚠️\n"
+            f"📌 <b>BEST AVAILABLE PICK: <code>{top.symbol}</code>  (${top.last_close:.2f} CAD)</b>\n"
+            f"⚠️━━━━━━━━━━━━━━━━━━━━━━━━⚠️\n"
+            f"<i>No ticker passed normal filters today — this is the highest-scoring\n"
+            f"stock with available data. Trade with reduced size if desired.</i>"
+        )
+    else:
+        scan_line = (
+            f"🔍 Scanned <b>{len(WATCHLIST)}</b> Canadian tickers\n"
+            f"   ✅ <b>{len(picks)}</b> passed  |  Strategy: <b>{strategy_name}</b>"
+        )
+        pick_banner = (
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🏆 <b>TODAY'S PICK: <code>{top.symbol}</code>  (${top.last_close:.2f} CAD)</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
+
     msg = (
         f"{header}\n\n"
         f"{_bias_line(bias, futures_detail)}\n\n"
-        f"🔍 Scanned <b>{len(WATCHLIST)}</b> Canadian tickers\n"
-        f"   ✅ <b>{len(picks)}</b> passed  |  Strategy: <b>{strategy_name}</b>\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🏆 <b>TODAY'S PICK: <code>{top.symbol}</code>  (${top.last_close:.2f} CAD)</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>WHY THIS STOCK:</b>\n"
+        f"{scan_line}\n\n"
+        f"{pick_banner}\n"
+        f"<b>{'BEST AVAILABLE METRICS' if is_best_effort else 'WHY THIS STOCK'}:</b>\n"
         f"  📈 Yesterday: <b>{top.yesterday_pct:+.2f}%</b>  on  <b>{top.rel_volume:.1f}× normal volume</b>\n"
-        f"  🔥 ATR(14): <b>{top.atr_pct:.2f}%</b> of price  →  high daily range potential\n"
-        f"  💪 Closed: <b>{top.close_strength:.0%}</b> of day range  (buyers dominated)\n"
+        f"  🔥 ATR(14): <b>{top.atr_pct:.2f}%</b> of price  →  daily range potential\n"
+        f"  💪 Closed: <b>{top.close_strength:.0%}</b> of day range\n"
         f"  📊 Trend: EMA5 {'✅' if top.above_ema5 else '❌'}  EMA20 {'✅' if top.above_ema20 else '❌'}\n"
         f"  🎯 Score: <b>{top.score:.1f}</b>  ({top.confidence})\n\n"
     )
 
-    if others:
+    if others and not is_best_effort:
         msg += f"Other candidates:  {others}\n\n"
 
     msg += (
@@ -933,10 +961,11 @@ def main() -> None:
 
         if not picks:
             notify(
-                "⚠️ <b>No candidates at buy time — skipping today</b>\n\n"
-                "Nothing passed the filters. Entering overnight loop for tomorrow."
+                "❌ <b>No data at buy time — skipping today</b>\n\n"
+                "yfinance returned no usable data for any ticker.\n"
+                "Check internet connection. Entering overnight loop for tomorrow."
             )
-            log("No candidates — skipping today.")
+            log("No data at all — skipping today.")
             continue
 
         top = picks[0]
@@ -953,8 +982,8 @@ def main() -> None:
             picks, _, _, strat_name, fut_det = run_scan(balance)
             ai = get_ai_analysis(picks, bias, fut_det, balance)
             if not picks:
-                notify("⚠️ <b>Bounce scan found nothing — skipping today.</b>")
-                log("Bounce scan empty — skipping.")
+                notify("❌ <b>Bounce scan returned no data — skipping today.</b>")
+                log("Bounce scan returned no data — skipping.")
                 continue
             top = picks[0]
 

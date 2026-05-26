@@ -16,71 +16,53 @@ CACHE.mkdir(parents=True, exist_ok=True)
 yf.set_tz_cache_location(str(CACHE))
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Expanded Canadian watchlist — TSX (.TO), TSXV (.V), NEO (.NE)
-# ~170 tickers covering all major sectors and cap sizes.
-# The filters handle everything else.
+# Verified Canadian watchlist — TSX (.TO), TSXV (.V)
+# All tickers validated to return 60d yfinance data as of May 2026.
+# Covers energy, mining, cannabis, tech, financials, industrials, utilities,
+# consumer, healthcare, timber, REITs, and junior explorers.
 # ──────────────────────────────────────────────────────────────────────────────
 WATCHLIST: list[str] = [
     # ── Energy (TSX) ────────────────────────────────────────────────────────
-    "ERF.TO", "BTE.TO", "CPG.TO", "MEG.TO", "ARX.TO", "PEY.TO", "SGY.TO",
-    "TVE.TO", "AAV.TO", "NVA.TO", "KEL.TO", "SDE.TO", "BIR.TO", "GXE.TO",
-    "FRU.TO", "TOU.TO", "VET.TO", "CR.TO", "ATH.TO", "CVE.TO", "WCP.TO",
-    "SU.TO", "VII.TO", "POU.TO", "HWX.TO", "OBE.TO", "PHX.TO", "SPB.TO",
+    "BTE.TO", "ARX.TO", "PEY.TO", "SGY.TO", "TVE.TO", "AAV.TO", "KEL.TO",
+    "SDE.TO", "BIR.TO", "FRU.TO", "TOU.TO", "VET.TO", "ATH.TO", "CVE.TO",
+    "WCP.TO", "SU.TO", "POU.TO", "HWX.TO", "OBE.TO", "PHX.TO", "SPB.TO",
     "GEI.TO", "PPR.TO", "TBL.TO", "IPCO.TO", "CEU.TO",
     # ── Mining / Metals / Gold (TSX) ────────────────────────────────────────
-    "NGD.TO", "SVM.TO", "IMG.TO", "OGC.TO", "EDV.TO", "ELD.TO", "MAG.TO",
-    "MUX.TO", "AR.TO", "AGI.TO", "AEM.TO", "ABX.TO", "FM.TO", "HBM.TO",
-    "LUN.TO", "CS.TO", "KGC.TO", "OR.TO", "PAAS.TO", "PVG.TO", "G.TO",
-    "SSL.TO", "DPM.TO", "WPM.TO", "TECK.B.TO", "BTG.TO", "EQX.TO",
-    "CG.TO", "NG.TO", "SKE.TO", "SMT.TO", "AG.TO", "AXB.TO", "TVG.TO",
-    # ── Cannabis (TSX / TSXV) ────────────────────────────────────────────────
-    "ACB.TO", "OGI.TO", "WEED.TO", "CRON.TO", "VFF.TO", "HUGE.TO",
-    "TRST.TO", "FIRE.TO", "PHO.TO", "CBST.TO",
+    "SVM.TO", "IMG.TO", "OGC.TO", "EDV.TO", "ELD.TO", "MUX.TO", "AGI.TO",
+    "AEM.TO", "ABX.TO", "FM.TO", "HBM.TO", "LUN.TO", "CS.TO", "OR.TO",
+    "PAAS.TO", "DPM.TO", "WPM.TO", "EQX.TO", "CG.TO", "NG.TO", "SKE.TO",
+    "AG.TO", "ERO.TO",
+    # ── Cannabis (TSX) ───────────────────────────────────────────────────────
+    "ACB.TO", "OGI.TO", "WEED.TO", "CRON.TO",
     # ── Technology / Software (TSX) ─────────────────────────────────────────
-    "BB.TO", "LSPD.TO", "DSP.TO", "REAL.TO", "MDF.TO", "KXS.TO",
-    "TOI.TO", "BIPC.TO", "ACT.TO", "ENGH.TO", "CLS.TO", "DCBO.TO",
-    "SHOP.TO", "CDAY.TO", "IFS.TO",
+    "BB.TO", "LSPD.TO", "REAL.TO", "KXS.TO", "BIPC.TO", "ENGH.TO",
+    "CLS.TO", "DCBO.TO", "SHOP.TO", "OTEX.TO", "HUT.TO", "BITF.TO",
     # ── Financials (TSX) ─────────────────────────────────────────────────────
-    "MFC.TO", "SLF.TO", "GWO.TO", "IAG.TO", "EQB.TO", "CWB.TO",
-    "EFN.TO", "PS.TO", "GOOG.TO",
+    "MFC.TO", "SLF.TO", "GWO.TO", "IAG.TO", "EQB.TO", "EFN.TO",
     # ── Industrials / Infrastructure (TSX) ──────────────────────────────────
-    "CAE.TO", "WSP.TO", "WCN.TO", "STN.TO", "TIH.TO", "SNC.TO",
-    "NFI.TO", "RBA.TO",
+    "CAE.TO", "WSP.TO", "WCN.TO", "STN.TO", "TIH.TO", "NFI.TO", "RBA.TO",
     # ── Utilities / Renewables (TSX) ────────────────────────────────────────
-    "NPI.TO", "INE.TO", "BEP.UN.TO", "CPX.TO", "ALA.TO", "ACO.X.TO",
-    "BEPC.TO", "AQN.TO", "PEGI.TO",
+    "NPI.TO", "CPX.TO", "ALA.TO", "BEPC.TO", "AQN.TO",
     # ── Consumer / Retail (TSX) ─────────────────────────────────────────────
-    "GIL.TO", "ATD.TO", "DOL.TO", "CTC.A.TO", "RUS.TO", "PBH.TO",
-    "GURU.TO",
+    "GIL.TO", "ATD.TO", "DOL.TO", "RUS.TO", "PBH.TO", "GURU.TO",
     # ── Healthcare / Biotech (TSX) ───────────────────────────────────────────
-    "WELL.TO", "DND.TO", "ONC.TO", "BLI.TO", "CXAI.TO",
+    "WELL.TO", "DND.TO",
     # ── Timber / Materials (TSX) ─────────────────────────────────────────────
     "WFG.TO", "IFP.TO", "CFP.TO",
-    # ── REITs / Real estate (TSX) ───────────────────────────────────────────
-    "DIR.UN.TO", "AP.UN.TO", "SMU.UN.TO",
+    # ── REITs / Real estate (TSX) — yfinance data limited for .UN tickers ──
+    # Add manually verified REIT tickers here if needed
     # ── Junior / Exploration (TSX) ───────────────────────────────────────────
-    "NXE.TO", "ALS.TO", "LAM.TO", "TVK.TO", "PXT.TO", "SSO.TO",
-    "TML.TO", "PDL.TO", "AT.TO", "XTC.TO",
+    "NXE.TO", "ALS.TO", "LAM.TO", "TVK.TO", "PXT.TO", "XTC.TO",
     # ── TSXV — Venture Exchange ───────────────────────────────────────────────
-    "GGD.V",   # GoldMining Inc
     "IPT.V",   # Impact Silver
     "LIO.V",   # Lion One Metals
-    "DV.V",    # Dolly Varden Silver
-    "MMS.V",   # Murchison Minerals
     "GR.V",    # Gold Reserve
-    "ALO.V",   # Alio Gold
-    "CXB.V",   # Calibre Mining (now TSX)
     "PLY.V",   # Playfair Mining
-    "GGO.V",   # Goldenrod Capital (placeholder)
+    "GGO.V",   # Goldenrod Capital
     "QCX.V",   # QCX Gold
-    "AOT.V",   # Ascot Resources
-    "WM.V",    # Western Mines
     "BHS.V",   # Bayhorse Silver
     "SPOT.V",  # Sprott Focus Trust
-    # ── NEO Exchange ──────────────────────────────────────────────────────────
-    "CXAI.NE", # CXApp
-    "CBLT.NE", # Cobalt Blockchain
-    "NGEN.NE", # Novus Capital
+    "FWZ.V",   # Fireweed Metals
 ]
 
 
@@ -235,7 +217,7 @@ class GrinderPick:
     close_strength: float   # 0–1, where 1 = closed at the day high
     above_ema5: bool
     above_ema20: bool
-    strategy_name: str      # "Main Strategy" or "Fallback Original Strategy"
+    strategy_name: str      # "Main Strategy", "Fallback Original Strategy", or "Best Available"
 
     @property
     def confidence(self) -> str:
@@ -382,3 +364,54 @@ class FallbackStrategy:
             above_ema20=True,
             strategy_name="Fallback Original Strategy",
         )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Best Effort — guaranteed pick when both strategies find nothing
+# ──────────────────────────────────────────────────────────────────────────────
+
+class BestEffortStrategy:
+    """
+    Last-resort guaranteed pick — no filters, pure momentum ranking.
+    Fires only when GrinderStrategy and FallbackStrategy both return nothing.
+    Always returns exactly 1 pick: the highest-scoring ticker with valid data.
+    Prefers positive yesterday_pct (up-day momentum) over all others.
+    Tagged "Best Available" in strategy_name.
+
+    This ensures the bot never skips a day due to filter misses on a flat market.
+    The Telegram game plan clearly labels it as a best-effort pick.
+    """
+
+    def __init__(self, market_data: Optional[GrinderMarketData] = None) -> None:
+        self.market_data = market_data or GrinderMarketData()
+
+    def scan(self, watchlist: list[str]) -> list[GrinderPick]:
+        candidates: list[GrinderSnapshot] = []
+        for symbol in watchlist:
+            snap = self.market_data.snapshot(symbol)
+            if snap is None:
+                continue
+            if snap.last_close <= 0 or snap.avg_volume_20 <= 0:
+                continue
+            candidates.append(snap)
+
+        if not candidates:
+            return []
+
+        # Prefer stocks that were up yesterday (positive momentum direction)
+        positives = [s for s in candidates if s.yesterday_pct_change > 0]
+        pool = positives if positives else candidates
+
+        best = max(pool, key=lambda s: s.score)
+        return [GrinderPick(
+            symbol=best.symbol,
+            last_close=best.last_close,
+            score=best.score,
+            yesterday_pct=best.yesterday_pct_change,
+            rel_volume=best.rel_volume,
+            atr_pct=best.atr_pct,
+            close_strength=best.close_strength,
+            above_ema5=(best.last_close > best.ema5),
+            above_ema20=(best.last_close > best.ema20),
+            strategy_name="Best Available",
+        )]
