@@ -73,7 +73,7 @@ _OVERNIGHT_SELL_HOUR   = 9     # sell overnight positions at market open
 _OVERNIGHT_SELL_MINUTE = 31
 _BUY_DELAY_MINUTES = 0
 _SHORTLIST_SIZE    = 150
-_FULL_REFRESH_TTL  = 12 * 3600
+_FULL_REFRESH_TTL  = 24 * 3600
 _CACHED_SCAN_TTL   = 18 * 3600
 _MIN_COVERAGE_FOR_CACHE = 0.35
 _DEPLOY_PCT           = 100       # 100% of balance deployed per trade
@@ -1361,8 +1361,7 @@ def _execute_sell_order(
 def _run_overnight_scan(label: str, balance: float, scan_type: str) -> None:
     """Fire a scan during the overnight hold loop and send result to Telegram."""
     try:
-        force_full = (scan_type == "5am")
-        sc_syms, full_ref = _choose_scan_symbols(force_full=force_full)
+        sc_syms, full_ref = _choose_scan_symbols(force_full=False)
         source = "full universe" if full_ref else f"shortlist ({len(sc_syms)})"
         log(f"Running {label} using {source}...")
         picks, scan_bias, buy_plan, strat_name, fut_det = run_scan(
