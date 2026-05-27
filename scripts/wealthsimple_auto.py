@@ -843,7 +843,7 @@ def cmd_keepalive(args) -> None:
     from datetime import datetime
     from playwright.sync_api import sync_playwright
 
-    INTERVAL = 15 * 60  # 15 minutes
+    INTERVAL = 2 * 60  # 2 minutes
     once = getattr(args, "once", False)
     print(f"[keepalive] Starting - refresh every {INTERVAL // 60} min", flush=True)
 

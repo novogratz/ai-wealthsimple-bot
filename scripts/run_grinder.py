@@ -40,6 +40,8 @@ from kzer_bot.grinder_strategy import (
     GrinderMarketData,
     GrinderPick,
     GrinderStrategy,
+    SmartGrinderStrategy,
+    SmartMarketContext,
     WATCHLIST,
     get_futures_bias,
 )
@@ -74,7 +76,10 @@ _SHORTLIST_SIZE    = 150
 _FULL_REFRESH_TTL  = 12 * 3600
 _CACHED_SCAN_TTL   = 18 * 3600
 _MIN_COVERAGE_FOR_CACHE = 0.35
-_DEPLOY_PCT       = 90        # % of balance deployed per trade
+_DEPLOY_PCT           = 100       # 100% of balance deployed per trade
+_PROFIT_TARGET_PCT    = 5.0       # sell immediately when unrealized >= +5%
+_LATE_LOCK_PCT        = 2.0       # sell at 3:55 PM if unrealized >= +2% (else hold overnight)
+_MIN_SMART_HOLD_SCORE = 20        # hold overnight if re-scan smart score still >= this
 _UNIVERSE_MAX_AGE = 7 * 86400  # refresh universe.json if older than 7 days
 UNIVERSE_FILE     = ROOT / "data" / "universe.json"
 UNIVERSE_SCRIPT   = ROOT / "scripts" / "update_universe.py"
@@ -606,7 +611,7 @@ def _start_keepalive() -> "subprocess.Popen | None":
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        log(f"Keepalive started (PID {proc.pid}) — refreshing WS session every 15 min")
+        log(f"Keepalive started (PID {proc.pid}) — refreshing WS session every 2 min")
         return proc
     except Exception as exc:
         log(f"Keepalive start failed: {exc}")
@@ -729,17 +734,41 @@ def run_scan(balance: float, scan_symbols: list[str] | None = None,
     md.prefetch(scan_symbols, progress_cb=_progress)
     log(f"  Prefetch complete — {len(md.all_snapshots())} tickers with data")
 
-    picks = GrinderStrategy(md).scan(scan_symbols)
-    log(f"  Main strategy: {len(picks)} candidate(s).")
+    # Tier 0 — Smart multi-signal composite (primary)
+    log("  Fetching market context (TSX + sector ETFs)...")
+    try:
+        ctx = SmartMarketContext.load_or_fetch()
+        sector_parts = "  |  ".join(
+            f"{k.replace('.TO', '')}: {v:+.1f}%"
+            for k, v in ctx.sector_returns.items()
+        )
+        log(f"  TSX 5d: {ctx.tsx_5d_pct:+.2f}%  |  {sector_parts}")
+        if ctx.trending:
+            log(f"  Yahoo trending: {len(ctx.trending)} TSX stocks")
+    except Exception as exc:
+        log(f"  Market context unavailable: {exc}")
+        ctx = None
 
-    strategy_name = "Main Strategy"
+    picks = SmartGrinderStrategy(md, ctx).scan(scan_symbols)
+    log(f"  Smart strategy: {len(picks)} candidate(s).")
+    strategy_name = "Smart Strategy"
+
+    # Tier 1 — Main 8-criteria (fallback)
     if not picks:
         _log_scan_diagnostics(md)
+        log("  No smart picks — running main 8-criteria...")
+        picks = GrinderStrategy(md).scan(scan_symbols)
+        strategy_name = "Main Strategy"
+        log(f"  Main strategy: {len(picks)} candidate(s).")
+
+    # Tier 2 — Relaxed fallback
+    if not picks:
         log("  No main picks — running fallback...")
         picks = FallbackStrategy(md).scan(scan_symbols)
         strategy_name = "Fallback Original Strategy" if picks else ""
         log(f"  Fallback: {len(picks)} candidate(s).")
 
+    # Tier 3 — Guaranteed pick
     if not picks:
         log("  No fallback picks — running best-effort guaranteed pick...")
         picks = BestEffortStrategy(md).scan(scan_symbols)
@@ -817,6 +846,19 @@ def _bias_line(bias: FuturesBias, futures_detail: str) -> str:
 
 def _criteria_explanation(pick: GrinderPick) -> str:
     strat = pick.strategy_name
+    if strat == "Smart Strategy":
+        return (
+            f"━━━ <b>SMART STRATEGY (composite)</b> ━━━━\n"
+            f"  ✅ Price: <b>${pick.last_close:.2f}</b>  ($1.50–$50.00)  |  Above EMA20\n"
+            f"  ✅ Yesterday: <b>{pick.yesterday_pct:+.2f}%</b>  |  "
+            f"Rel Vol: <b>{pick.rel_volume:.1f}x</b>\n"
+            f"  ✅ Multi-timeframe momentum cascade (1d / 5d / 20d)\n"
+            f"  ✅ Volume accumulation trend (5d vs 20d avg)\n"
+            f"  ✅ OBV smart-money direction signal (10-session)\n"
+            f"  ✅ Relative strength vs TSX composite (5d)\n"
+            f"  ✅ Breakout proximity to 20-day high\n"
+            f"  🎯 Composite score: <b>{pick.score:.1f} / 100</b>"
+        )
     if strat == "Main Strategy":
         return (
             f"━━━ <b>8-CRITERIA PASSED</b> ━━━━\n"
@@ -1338,6 +1380,62 @@ def _run_overnight_scan(label: str, balance: float, scan_type: str) -> None:
 # Hold + 30-min updates + sell
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _morning_hold_decision(symbol: str, entry: float, shares: float,
+                           cost: float, balance: float) -> bool:
+    """
+    At 9:31 AM, decide: keep holding or sell and rotate.
+    Returns True = keep holding (skip sell + skip new buy today).
+    Returns False = sell now and let main loop find a new pick.
+    Criteria: stock still above EMA20 AND smart composite score >= _MIN_SMART_HOLD_SCORE.
+    """
+    log(f"Morning hold check for {symbol}...")
+    try:
+        from kzer_bot.grinder_strategy import (
+            GrinderMarketData as _GMD,
+            SmartGrinderStrategy as _SGS,
+            SmartMarketContext as _SMC,
+        )
+        _md  = _GMD()
+        _ctx = _SMC.load_or_fetch()
+        _md.prefetch([symbol])
+        snap = _md.snapshot(symbol)
+        if snap is None:
+            log(f"  No data for {symbol} — rotating out")
+            return False
+        if snap.last_close <= snap.ema20:
+            log(f"  {symbol} below EMA20 — rotating out")
+            notify(
+                f"🔄 <b>Morning Decision — rotating out of <code>{symbol}</code></b>\n\n"
+                f"📉 Stock fell below EMA20 — trend broken\n"
+                f"🔍 Scanning for new pick at 9:35 AM..."
+            )
+            return False
+        picks = _SGS(_md, _ctx).scan([symbol])
+        score = picks[0].score if picks else 0
+        if score >= _MIN_SMART_HOLD_SCORE:
+            log(f"  {symbol} smart score {score:.1f} ≥ {_MIN_SMART_HOLD_SCORE} — HOLDING")
+            pos_pct = (snap.last_close - entry) / entry * 100 if entry > 0 else 0
+            notify(
+                f"📊 <b>Morning Decision — holding <code>{symbol}</code></b>\n\n"
+                f"🎯 Smart score: <b>{score:.1f}/100</b> — still trending\n"
+                f"💼 {shares:.4f} sh @ ${entry:.2f}  |  Now ${snap.last_close:.2f}"
+                f" ({pos_pct:+.1f}%)\n"
+                f"✅ Holding another day — no new buy today\n"
+                f"🎯 Target: +{_PROFIT_TARGET_PCT:.0f}%  |  3:55 PM lock: +{_LATE_LOCK_PCT:.0f}%"
+            )
+            return True
+        log(f"  {symbol} score {score:.1f} < {_MIN_SMART_HOLD_SCORE} — rotating out")
+        notify(
+            f"🔄 <b>Morning Decision — rotating out of <code>{symbol}</code></b>\n\n"
+            f"📊 Smart score: <b>{score:.1f}</b> — momentum faded\n"
+            f"🔍 Scanning for new pick at 9:35 AM..."
+        )
+        return False
+    except Exception as exc:
+        log(f"  Morning hold check error: {exc} — defaulting to sell")
+        return False
+
+
 def hold_and_sell(balance: float = 0.0) -> None:
     if not POS_FILE.exists():
         log("No open position — nothing to hold.")
@@ -1448,33 +1546,71 @@ def hold_and_sell(balance: float = 0.0) -> None:
 
             time.sleep(60)
 
-        # ── Execute sell at 9:31 AM ────────────────────────────────────────
-        _sleep_until(next_sell, "9:31 AM market-open sell")
-        _execute_sell_order(symbol, entry, shares, cost, strat, label="9:31 AM ET")
-        return  # main loop will scan + buy new pick at 9:35 AM
+        # ── Morning decision: sell or hold another day ─────────────────────
+        _sleep_until(next_sell, "9:31 AM morning decision")
+        if _morning_hold_decision(symbol, entry, shares, cost, balance):
+            log("Morning hold: continuing into daytime monitoring")
+            last_update_t = 0.0
+            # fall through to daytime monitoring loop below
+        else:
+            _execute_sell_order(symbol, entry, shares, cost, strat, label="9:31 AM ET")
+            return  # main loop will scan + buy new pick at 9:35 AM
 
     notify(
-        f"📊 <b>Position open — monitoring until 3:55 PM</b>\n\n"
+        f"📊 <b>Position open — autonomous hold</b>\n\n"
         f"🎫 <code>{symbol}</code>  |  {shares:.4f} sh @ ${entry:.2f}\n"
         f"💰 Cost: <b>${cost:.2f} CAD</b>  |  📋 {strat}\n"
-        f"⏰ Updates every 30 min  |  Hard sell at <b>3:55 PM ET</b>"
+        f"🎯 Profit target: <b>+{_PROFIT_TARGET_PCT:.0f}%</b>  |  "
+        f"Late lock: <b>+{_LATE_LOCK_PCT:.0f}%</b> at 3:55 PM\n"
+        f"🌙 Below target at 3:55 PM → hold overnight, no stop loss"
     )
 
     while True:
         now = now_et()
 
-        # ── Force-sell at 3:55 PM ─────────────────────────────────────────
+        # ── 3:55 PM: sell if profitable enough, else hold overnight ───────
         if now.hour > _SELL_HOUR or (now.hour == _SELL_HOUR and now.minute >= _SELL_MINUTE):
-            _execute_sell_order(symbol, entry, shares, cost, strat, label="3:55 PM ET")
+            try:
+                snap_eod = md.snapshot(symbol)
+                price_eod = snap_eod.last_price if snap_eod else entry
+            except Exception:
+                price_eod = entry
+            eod_pct = (price_eod - entry) / entry * 100 if entry > 0 else 0
+            if eod_pct >= _LATE_LOCK_PCT:
+                log(f"3:55 PM lock-in: {eod_pct:+.1f}% ≥ +{_LATE_LOCK_PCT:.0f}% — selling")
+                _execute_sell_order(symbol, entry, shares, cost, strat, "3:55 PM lock-in")
+            else:
+                log(f"3:55 PM: {eod_pct:+.1f}% — below lock, holding overnight")
+                notify(
+                    f"🌙 <b>Holding overnight — <code>{symbol}</code></b>\n\n"
+                    f"💼 {shares:.4f} sh @ ${entry:.2f}  |  ~${price_eod:.2f} ({eod_pct:+.1f}%)\n"
+                    f"📋 Below +{_LATE_LOCK_PCT:.0f}% threshold — no stop loss, holding for recovery\n"
+                    f"⏰ Morning decision at <b>9:31 AM tomorrow</b>"
+                )
             return
 
-        # ── 30-min update ─────────────────────────────────────────────────
+        # ── 30-min update + profit target check ───────────────────────────
         if time.time() - last_update_t >= UPDATE_INTERVAL:
             try:
                 snap = md.snapshot(symbol)
                 if snap:
-                    notify(build_update_message(symbol, entry, snap.last_price, shares, cost))
-                    log(f"30-min update: ${snap.last_price:.2f} ({(snap.last_price/entry-1)*100:+.2f}%)")
+                    price   = snap.last_price
+                    pnl_pct = (price - entry) / entry * 100 if entry > 0 else 0
+
+                    # Profit target: sell immediately if up 5%+ (after 10:30 AM)
+                    after_1030 = now.hour > 10 or (now.hour == 10 and now.minute >= 30)
+                    if pnl_pct >= _PROFIT_TARGET_PCT and after_1030:
+                        log(f"PROFIT TARGET: {pnl_pct:+.1f}% ≥ +{_PROFIT_TARGET_PCT:.0f}% — selling now")
+                        notify(
+                            f"🎯 <b>PROFIT TARGET HIT — selling <code>{symbol}</code></b>\n\n"
+                            f"📈 Unrealized: <b>{pnl_pct:+.1f}%</b>  |  Price: ${price:.2f}\n"
+                            f"💰 Locking in gains — executing sell now"
+                        )
+                        _execute_sell_order(symbol, entry, shares, cost, strat, "Profit Target")
+                        return
+
+                    notify(build_update_message(symbol, entry, price, shares, cost))
+                    log(f"30-min update: ${price:.2f} ({pnl_pct:+.2f}%)")
             except Exception as exc:
                 log(f"30-min update error: {exc}")
             last_update_t = time.time()
@@ -1713,7 +1849,8 @@ def main() -> None:
                 f"⏰ Selling at 3:55 PM ET"
             )
         hold_and_sell(balance=balance)
-        POS_FILE.unlink(missing_ok=True)
+        if not POS_FILE.exists():
+            POS_FILE.unlink(missing_ok=True)
 
     # ── Single-ticker mode (skip 4000-stock scan, buy immediately) ────────
     if args.ticker:
@@ -1873,10 +2010,14 @@ def main() -> None:
         if now.hour < 9 or (now.hour == 9 and now.minute < 30):
             wait_for_fill_confirm(top.symbol)
 
-        # Hold + sell (3:55 PM or 9:31 AM next day if after-hours)
+        # Hold + sell (autonomous: profit target / 3:55 lock / overnight)
         hold_and_sell(balance=balance)
+        if POS_FILE.exists():
+            # hold_and_sell returned without selling (morning hold decision)
+            log("Position still open (autonomous hold) — skipping new buy, re-monitoring.")
+            continue
         POS_FILE.unlink(missing_ok=True)
-        log("Day complete — re-entering overnight loop.")
+        log("Position closed — re-entering overnight loop.")
 
 
 if __name__ == "__main__":

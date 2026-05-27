@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import time
+import urllib.request
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -15,12 +16,15 @@ import yfinance as yf
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-ROOT           = Path(__file__).resolve().parents[1]
-YF_CACHE       = ROOT / "data" / "yfinance_cache"
-SNAPSHOT_CACHE = ROOT / "data" / "grinder_snapshot_cache.json"
-MARKET_CAP_CACHE = ROOT / "data" / "market_cap_cache.json"
-FUTURES_CACHE   = ROOT / "data" / "futures_bias_cache.json"
-UNIVERSE_FILE  = ROOT / "data" / "universe.json"
+ROOT                = Path(__file__).resolve().parents[1]
+YF_CACHE            = ROOT / "data" / "yfinance_cache"
+SNAPSHOT_CACHE      = ROOT / "data" / "grinder_snapshot_cache.json"
+MARKET_CAP_CACHE    = ROOT / "data" / "market_cap_cache.json"
+FUTURES_CACHE       = ROOT / "data" / "futures_bias_cache.json"
+UNIVERSE_FILE       = ROOT / "data" / "universe.json"
+SMART_CONTEXT_CACHE = ROOT / "data" / "smart_context_cache.json"
+
+_SECTOR_ETFS = ["XEG.TO", "XGD.TO", "XIT.TO", "XFN.TO", "XRE.TO"]
 YF_CACHE.mkdir(parents=True, exist_ok=True)
 yf.set_tz_cache_location(str(YF_CACHE))
 
@@ -242,6 +246,7 @@ class GrinderMarketData:
 
     def __init__(self) -> None:
         self._cache: dict[str, Optional[GrinderSnapshot]] = {}
+        self._frames: dict[str, pd.DataFrame] = {}
         self._market_cap_cache: dict[str, Optional[float]] = {}
         self._market_cap_disk_loaded = False
         self._disk_loaded = False
@@ -303,6 +308,10 @@ class GrinderMarketData:
         except Exception:
             pass
 
+    def get_frame(self, symbol: str) -> Optional[pd.DataFrame]:
+        """Return the raw OHLCV DataFrame for a symbol (populated after prefetch)."""
+        return self._frames.get(symbol)
+
     def snapshot(self, symbol: str) -> Optional[GrinderSnapshot]:
         self._load_disk_cache()
         if symbol in self._cache:
@@ -322,7 +331,8 @@ class GrinderMarketData:
         progress_cb(done, total) called after each batch if provided.
         """
         self._load_disk_cache()
-        to_fetch = [s for s in symbols if s not in self._cache]
+        # Also re-fetch symbols whose frames are missing (needed by SmartGrinderStrategy)
+        to_fetch = [s for s in symbols if s not in self._cache or s not in self._frames]
         total    = len(to_fetch)
         done     = 0
 
@@ -359,16 +369,19 @@ class GrinderMarketData:
                     time.sleep(1.5 * attempt)
 
             for sym in batch:
-                if sym in self._cache:
+                if sym in self._cache and sym in self._frames:
                     continue
                 try:
                     df = _extract_ticker_frame(raw, sym)
                     if df.empty:
-                        self._cache[sym] = self._fetch_one(sym)
+                        if sym not in self._cache:
+                            self._cache[sym] = self._fetch_one(sym)
                     else:
+                        self._frames[sym] = df
                         self._cache[sym] = _build_snapshot(sym, df)
                 except Exception:
-                    self._cache[sym] = None
+                    if sym not in self._cache:
+                        self._cache[sym] = None
 
             done += len(batch)
             if progress_cb:
@@ -416,6 +429,7 @@ class GrinderMarketData:
             daily = _history_with_retry(symbol, period="60d", interval="1d")
             if daily.empty:
                 return None
+            self._frames[symbol] = daily
             return _build_snapshot(symbol, daily)
         except Exception:
             return None
@@ -753,3 +767,252 @@ class BestEffortStrategy:
             above_ema20   = (best.last_close > best.ema20),
             strategy_name = "Best Available",
         )]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Smart Strategy — composite 5-signal screener (primary tier)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class SmartSignals:
+    """Extra per-ticker signals computed from 60-day OHLCV history."""
+    pct_5d:    float   # 5-day price return %
+    pct_20d:   float   # 20-day price return %
+    high_20d:  float   # 20-day price high (breakout reference)
+    vol_trend: float   # 5d avg vol / 20d avg vol  (>1 = rising)
+    obv_score: float   # direction-weighted volume score, -1 to +1
+
+
+def _build_smart_signals(df: pd.DataFrame) -> SmartSignals:
+    df = df.dropna(subset=["Close", "High", "Volume"])
+    n   = len(df)
+    cls = df["Close"].values.astype(float)
+    hig = df["High"].values.astype(float)
+    vol = df["Volume"].values.astype(float)
+
+    pct_5d   = float((cls[-1] - cls[-6]) / cls[-6] * 100) if n >= 7  else 0.0
+    pct_20d  = float((cls[-1] - cls[-21]) / cls[-21] * 100) if n >= 22 else 0.0
+    high_20d = float(hig[-20:].max()) if n >= 20 else float(cls[-1])
+
+    vol_5d    = float(vol[-5:].mean())  if n >= 5  else float(vol.mean())
+    vol_20d   = float(vol[-20:].mean()) if n >= 20 else float(vol.mean())
+    vol_trend = vol_5d / vol_20d if vol_20d > 0 else 1.0
+
+    # OBV direction: volume-weighted up/down ratio over last 10 sessions
+    days = min(10, n - 1)
+    vw_sum = vw_tot = 0.0
+    for i in range(-days, 0):
+        direction = 1 if cls[i] > cls[i - 1] else (-1 if cls[i] < cls[i - 1] else 0)
+        vw_sum += direction * vol[i]
+        vw_tot += vol[i]
+    obv_score = vw_sum / vw_tot if vw_tot > 0 else 0.0
+
+    return SmartSignals(pct_5d=pct_5d, pct_20d=pct_20d,
+                        high_20d=high_20d, vol_trend=vol_trend, obv_score=obv_score)
+
+
+def _fetch_yahoo_trending() -> set:
+    """Try to fetch trending TSX tickers from Yahoo Finance screener (best-effort)."""
+    trending: set = set()
+    urls = [
+        ("https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
+         "?formatted=true&lang=en-CA&region=CA&scrIds=day_gainers&count=25"),
+        ("https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
+         "?formatted=true&lang=en-CA&region=CA&scrIds=most_actives&count=25"),
+    ]
+    hdrs = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/120.0.0.0 Safari/537.36"),
+        "Accept": "application/json",
+    }
+    for url in urls:
+        try:
+            req = urllib.request.Request(url, headers=hdrs)
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode())
+                for q in (data.get("finance", {})
+                              .get("result", [{}])[0]
+                              .get("quotes", [])):
+                    sym = str(q.get("symbol", ""))
+                    if ".TO" in sym or ".V" in sym:
+                        trending.add(sym)
+        except Exception:
+            pass
+    return trending
+
+
+@dataclass
+class SmartMarketContext:
+    """TSX / sector context fetched once per scan — shared by all tickers."""
+    tsx_5d_pct:     float
+    sector_returns: dict   # ETF symbol → 5d return %
+    trending:       set    # Yahoo Finance trending TSX symbols
+
+    @classmethod
+    def load_or_fetch(cls, max_age: int = 7_200) -> "SmartMarketContext":
+        if SMART_CONTEXT_CACHE.exists():
+            try:
+                if time.time() - SMART_CONTEXT_CACHE.stat().st_mtime < max_age:
+                    raw = json.loads(SMART_CONTEXT_CACHE.read_text(encoding="utf-8"))
+                    return cls(
+                        tsx_5d_pct=float(raw["tsx_5d_pct"]),
+                        sector_returns={k: float(v) for k, v in raw["sector_returns"].items()},
+                        trending=set(raw.get("trending", [])),
+                    )
+            except Exception:
+                pass
+        return cls._fetch()
+
+    @classmethod
+    def _fetch(cls) -> "SmartMarketContext":
+        tsx_pct = 0.0
+        sectors: dict = {}
+        trending: set = set()
+
+        syms = ["^GSPTSE"] + _SECTOR_ETFS
+        try:
+            raw = yf.download(
+                syms, period="30d", interval="1d",
+                auto_adjust=False, progress=False,
+                group_by="ticker", threads=False, timeout=15,
+            )
+            for sym in syms:
+                try:
+                    df = _extract_ticker_frame(raw, sym).dropna(subset=["Close"])
+                    if len(df) < 6:
+                        continue
+                    c = df["Close"].values.astype(float)
+                    pct = float((c[-1] - c[-6]) / c[-6] * 100)
+                    if sym == "^GSPTSE":
+                        tsx_pct = pct
+                    else:
+                        sectors[sym] = pct
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            trending = _fetch_yahoo_trending()
+        except Exception:
+            pass
+
+        ctx = cls(tsx_5d_pct=tsx_pct, sector_returns=sectors, trending=trending)
+        try:
+            SMART_CONTEXT_CACHE.write_text(json.dumps({
+                "tsx_5d_pct": tsx_pct,
+                "sector_returns": sectors,
+                "trending": list(trending),
+            }, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+        return ctx
+
+
+class SmartGrinderStrategy:
+    """
+    Primary screener — composite 5-signal score replaces hard-filter approach.
+
+    Signals:
+      A. Momentum cascade  — 1d + 5d + 20d alignment (confirms continuation)
+      B. Breakout          — proximity to 20-day high (institutional conviction)
+      C. Volume build      — 5d avg vol vs 20d avg (rising = smart money loading)
+      D. OBV direction     — volume-weighted up/down over 10 sessions
+      E. Relative strength — stock 5d return vs TSX composite
+
+    Base filters: price $1.50–$50 | avg vol ≥100k | yesterday ≥+0.5% | above EMA20 | mktcap ≥$25M
+    Score: 0–100 composite  (≥50 = HIGH, ≥25 = MEDIUM, <25 = LOW)
+    """
+
+    MIN_PRICE      = 0.10    # allow micro-caps
+    MAX_PRICE      = 100.00
+    MIN_AVG_VOL    = 30_000  # low bar — volume quality handled by score
+    MIN_YDAY_VOL   = 10_000
+    MIN_PCT_CHG    = 0.5
+    SCAN_LIMIT     = 200
+
+    def __init__(
+        self,
+        market_data: Optional[GrinderMarketData] = None,
+        ctx: Optional[SmartMarketContext] = None,
+    ) -> None:
+        self.md  = market_data or GrinderMarketData()
+        self.ctx = ctx or SmartMarketContext.load_or_fetch()
+
+    def scan(self, watchlist: list) -> list:
+        scored: list = []
+        for sym in watchlist:
+            snap = self.md.snapshot(sym)
+            if snap is None or not self._base_ok(snap):
+                continue
+            df = self.md.get_frame(sym)
+            if df is None or len(df) < 7:
+                continue
+            sig   = _build_smart_signals(df)
+            score = self._score(snap, sig)
+            if score > 0:
+                scored.append((score, snap, sig))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        out: list = []
+        for score, snap, _sig in scored[:self.SCAN_LIMIT]:
+            out.append(GrinderPick(
+                symbol         = snap.symbol,
+                last_close     = snap.last_close,
+                score          = round(score, 2),
+                yesterday_pct  = snap.yesterday_pct_change,
+                rel_volume     = snap.rel_volume,
+                atr_pct        = snap.atr_pct,
+                close_strength = snap.close_strength,
+                above_ema5     = snap.last_close > snap.ema5,
+                above_ema20    = True,
+                strategy_name  = "Smart Strategy",
+            ))
+        return out
+
+    def _base_ok(self, snap: GrinderSnapshot) -> bool:
+        return (
+            self.MIN_PRICE <= snap.last_close <= self.MAX_PRICE
+            and snap.avg_volume_20 >= self.MIN_AVG_VOL
+            and snap.yesterday_volume >= self.MIN_YDAY_VOL
+            and snap.yesterday_pct_change >= self.MIN_PCT_CHG
+            and snap.last_close > snap.ema20
+        )
+
+    def _score(self, snap: GrinderSnapshot, sig: SmartSignals) -> float:
+        s = 0.0
+
+        # A — Momentum cascade (0-40)
+        s += min(20.0, snap.yesterday_pct_change * 2.5)   # 1-day momentum
+        if sig.pct_5d  > 0: s += 10.0                     # 5-day aligned
+        if sig.pct_20d > 0: s += 10.0                     # 20-day aligned
+
+        # B — Breakout proximity (0-15)
+        if sig.high_20d > 0:
+            prox = snap.last_close / sig.high_20d
+            if   prox >= 0.99: s += 15.0   # at / breaking 20d high
+            elif prox >= 0.97: s += 10.0
+            elif prox >= 0.95: s +=  5.0
+
+        # C — Volume conviction (0-20)
+        s += min(10.0, snap.rel_volume * 3.33)             # relative volume
+        s += min(10.0, max(0.0, (sig.vol_trend - 1.0) * 10.0))  # rising vol trend
+
+        # D — OBV smart-money (0-10)
+        s += max(0.0, sig.obv_score * 10.0)
+
+        # E — Relative strength vs TSX (0-10)
+        rs = sig.pct_5d - self.ctx.tsx_5d_pct
+        if   rs > 5: s += 10.0
+        elif rs > 2: s +=  7.0
+        elif rs > 0: s +=  4.0
+
+        # Bonuses: close quality + ATR + trending (0-10)
+        s += snap.close_strength * 2.5
+        s += min(2.5, snap.atr_pct * 0.5)
+        if snap.symbol in self.ctx.trending:
+            s += 5.0
+
+        return s
