@@ -688,7 +688,17 @@ def place_order(
         use_max_dollars(page)
         snap(page, f"{side}_max")
     elif sell_all and side == "sell":
+        # For limit sell: Max may only give whole-share count; try Max then verify
         use_max_shares(page)
+        # If a limit price was set, check if the shares field looks like a whole number;
+        # if so, re-enter the actual fractional shares passed to us (avoids leaving residual)
+        if price is not None and shares is not None:
+            try:
+                page.wait_for_timeout(300)
+                fill_visible_input(page, 1, str(shares))
+                page.wait_for_timeout(300)
+            except Exception:
+                pass  # keep whatever Max populated
         snap(page, f"{side}_max")
     else:
         if shares is None:

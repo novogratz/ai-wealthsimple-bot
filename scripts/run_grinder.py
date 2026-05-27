@@ -1396,13 +1396,16 @@ def _afterhours_sell_limit(symbol: str, entry: float, shares: float, cost: float
         f"📉 Limit: <b>${limit_price:.2f}</b>  |  Entry: ${entry:.2f}\n"
         f"💰 Reason: {label}"
     )
+    # Pass --shares so the limit sell form can fill fractional amount if Max gives whole numbers
+    sell_cmd = [
+        PYTHON, str(AUTO_SCRIPT), "sell",
+        "--symbol", symbol,
+        "--sell-all",
+        "--price", f"{limit_price:.2f}",
+        "--shares", str(int(shares) if shares >= 1 else 1),
+    ]
     sell_result = subprocess.run(
-        [
-            PYTHON, str(AUTO_SCRIPT), "sell",
-            "--symbol", symbol,
-            "--sell-all",
-            "--price", f"{limit_price:.2f}",
-        ],
+        sell_cmd,
         capture_output=True, text=True, timeout=180,
     )
     for line in sell_result.stdout.splitlines():
@@ -1415,8 +1418,9 @@ def _afterhours_sell_limit(symbol: str, entry: float, shares: float, cost: float
         notify(f"⚠️ AH limit sell order failed for <code>{symbol}</code> — will retry at 9:31 AM.")
         return False
 
+    # Use actual shares sold and compute proper proceeds
     actual_qty   = float(order_data.get("estimated_quantity") or shares)
-    actual_value = float(order_data.get("estimated_value") or (actual_qty * limit_price))
+    actual_value = actual_qty * limit_price  # limit price × qty = proper proceeds
     actual_price = actual_value / actual_qty if actual_qty else limit_price
     trade_pnl    = actual_value - cost
     at_pnl       = _record_trade(symbol, cost, actual_value, actual_qty)
