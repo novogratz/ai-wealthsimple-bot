@@ -659,9 +659,6 @@ def place_order(
         else:
             print("  Already in Limit mode (extended hours) — skipping type switch")
 
-        # Close any open dropdown before filling price, then fill
-        page.keyboard.press("Escape")
-        page.wait_for_timeout(300)
         snap(page, "limit_selected")
 
         print(f"Entering limit price ${price:.2f}...")
