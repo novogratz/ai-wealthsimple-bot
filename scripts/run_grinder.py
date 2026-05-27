@@ -86,8 +86,8 @@ UNIVERSE_SCRIPT   = ROOT / "scripts" / "update_universe.py"
 
 # ── After-hours / extended-hours trading ──────────────────────────────────────
 _AH_BUY_START_HOUR  = 16   # 4:00 PM ET — AH buy window opens
-_AH_BUY_END_HOUR    = 19   # 7:30 PM ET — stop new AH entries
-_AH_BUY_END_MINUTE  = 30
+_AH_BUY_END_HOUR    = 19   # 7:50 PM ET — stop new AH entries (AH closes 8 PM)
+_AH_BUY_END_MINUTE  = 50
 _AH_PROFIT_PCT      = 3.0  # sell AH position immediately at +3%
 _AH_LIMIT_PREMIUM   = 0.005  # pay up to 0.5% above current AH price on limit buy
 _AH_SELL_PREMIUM    = 0.01   # set limit sell target at +1% above AH entry
