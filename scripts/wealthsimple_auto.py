@@ -639,9 +639,14 @@ def place_order(
 
     if price is not None:
         print(f"Setting Limit order type ({side})...")
-        # If "Market" button is absent, WS already put us in Limit mode (e.g. AH)
-        has_market_btn = page.locator('button:has-text("Market")').count() > 0
-        if has_market_btn:
+        # Use is_visible() so hidden dropdown options don't trigger a false positive
+        try:
+            market_btn_visible = page.locator('button:has-text("Market")').first.is_visible(timeout=500)
+        except Exception:
+            market_btn_visible = False
+
+        if market_btn_visible:
+            # Currently in Market mode — switch to Limit
             try:
                 page.locator('button:has-text("Market")').first.click(timeout=3000)
                 page.wait_for_timeout(400)
@@ -649,17 +654,26 @@ def place_order(
                     'li:has-text("Limit"), button:has-text("Limit"), [role="option"]:has-text("Limit")'
                 ).first.click(timeout=3000)
                 page.wait_for_timeout(600)
-                snap(page, "limit_selected")
             except PWTimeout:
                 print("  Warning: could not switch to Limit - will still try to fill price")
         else:
-            print("  Already in Limit mode (extended hours) — skipping switch")
-            snap(page, "limit_selected")
+            print("  Already in Limit mode (extended hours) — skipping type switch")
 
-        # Fill limit price (first visible input = price field in limit mode)
+        # Close any open dropdown before filling price, then fill
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+        snap(page, "limit_selected")
+
         print(f"Entering limit price ${price:.2f}...")
         try:
-            fill_visible_input(page, 0, f"{price:.2f}")
+            # Try label-targeted input first; fall back to index 0
+            limit_input = page.get_by_label("Limit price", exact=False).first
+            if limit_input.is_visible(timeout=1000):
+                limit_input.click()
+                page.keyboard.press("Control+A")
+                page.keyboard.type(f"{price:.2f}", delay=50)
+            else:
+                fill_visible_input(page, 0, f"{price:.2f}")
             page.wait_for_timeout(400)
         except Exception as e:
             print(f"  Warning: could not fill limit price: {e}")
