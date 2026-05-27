@@ -2,7 +2,7 @@
 """
 Le Grinder
 ====================================
-Quant rules  : 1 trade/day  |  no stop loss  |  hard exit 3:55 PM ET
+Quant rules  : intraday rotation  |  no stop loss  |  +5% profit target  |  3:55 PM late-lock
 Edge source  : momentum continuation on high-volume up-days + EMA trend filter
 Entry timing : 9:31 AM ET every weekday, with same-morning catch-up on restart
 AI analysis  : claude CLI analyses top candidates each morning
@@ -1000,7 +1000,7 @@ def build_scan_message(
             f"  (~{shares_est} sh,  ${deploy:.0f} CAD)"
         )
         plan_steps.append(
-            f"  3️⃣  <b>3:55 PM ET</b> — Sell <code>{top.symbol}</code>  (hard exit, no stop loss)"
+            f"  3️⃣  Autonomous exit — +{_PROFIT_TARGET_PCT:.0f}% target anytime or +{_LATE_LOCK_PCT:.0f}% lock at 3:55 PM"
         )
     else:
         plan_steps.append(
@@ -1008,7 +1008,7 @@ def build_scan_message(
             f"  (~{shares_est} sh,  ${deploy:.0f} CAD)"
         )
         plan_steps.append(
-            f"  2️⃣  <b>3:55 PM ET</b> — Sell <code>{top.symbol}</code>  (hard exit, no stop loss)"
+            f"  2️⃣  Autonomous exit — +{_PROFIT_TARGET_PCT:.0f}% target anytime or +{_LATE_LOCK_PCT:.0f}% lock at 3:55 PM  |  Intraday rotation enabled"
         )
 
     plan_body = "\n".join(plan_steps)
@@ -1065,7 +1065,7 @@ def build_buy_message(
         f"{_criteria_explanation(pick)}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📋 <b>PLAN:</b>  {pick.strategy_name}\n"
-        f"🏁 Hard sell at <b>3:55 PM ET</b>  — no stop loss, time-based exit only"
+        f"🎯 Exit: +{_PROFIT_TARGET_PCT:.0f}% target  |  +{_LATE_LOCK_PCT:.0f}% lock at 3:55 PM  |  No stop loss — intraday rotation enabled"
     )
 
     if ai_analysis:
@@ -1258,7 +1258,7 @@ def execute_buy(pick: GrinderPick, balance: float, bias: FuturesBias,
         f"🎫 <code>{pick.symbol}</code>\n"
         f"🔢 Shares: <b>{actual_qty:.4f}</b>  |  💵 Entry: <b>${pick.last_close:.2f} CAD</b>\n"
         f"💰 Invested: <b>${actual_cost:.2f} CAD</b>\n"
-        f"⏰ Auto-sell: <b>3:55 PM ET</b>  |  No stop loss\n\n"
+        f"🎯 Target: <b>+{_PROFIT_TARGET_PCT:.0f}%</b>  |  3:55 PM lock if +{_LATE_LOCK_PCT:.0f}%  |  No stop loss\n\n"
         f"{at_color} All-time PnL: <b>${at_pnl:+.2f} CAD</b>"
     )
     log(f"Buy confirmed: {actual_qty:.4f} sh @ ${pick.last_close:.2f}  cost ${actual_cost:.2f}")
@@ -1482,16 +1482,16 @@ def hold_and_sell(balance: float = 0.0) -> None:
                 f"🎫 <code>{symbol}</code>  {shares:.4f} sh @ ~${entry:.2f}\n"
                 f"💰 Deploying: <b>${cost:.2f} CAD</b>  |  📋 {strat}\n"
                 f"📋 Pre-market order — fills at <b>9:30 AM ET open</b>  ({mins_to_open} min)\n"
-                f"🔄 Sell: <b>9:31 AM ET tomorrow</b>  →  New pick buy: <b>9:35 AM ET</b>\n"
-                f"🏁 Final exit: <b>3:55 PM ET</b>  |  Updates every 30 min"
+                f"🔄 Morning decision at <b>9:31 AM ET</b> — hold if trending or rotate to new pick\n"
+                f"🎯 Target: +{_PROFIT_TARGET_PCT:.0f}%  |  3:55 PM lock: +{_LATE_LOCK_PCT:.0f}%  |  No stop loss"
             )
         else:
             notify(
                 f"📊 <b>Position open — overnight hold</b>\n\n"
                 f"🎫 <code>{symbol}</code>  |  {shares:.4f} sh @ ${entry:.2f}\n"
                 f"💰 Cost: <b>${cost:.2f} CAD</b>  |  📋 {strat}\n"
-                f"🌙 Selling at <b>9:31 AM ET tomorrow</b>  →  Buying new pick at 9:35 AM\n"
-                f"🏁 Final exit: <b>3:55 PM ET</b>  |  Updates every 30 min"
+                f"🔄 Morning decision at <b>9:31 AM ET</b> — hold if trending or rotate to new pick\n"
+                f"🎯 Target: +{_PROFIT_TARGET_PCT:.0f}%  |  3:55 PM lock: +{_LATE_LOCK_PCT:.0f}%  |  No stop loss"
             )
 
         fill_notified = not pre_open
@@ -1787,7 +1787,7 @@ def main() -> None:
             f"💰 Balance: <b>${balance:.2f} CAD</b>\n"
             f"📋 Target: <b>{args.ticker.upper()}</b>\n"
             f"⏰ Buying immediately — no scan, no wait\n"
-            f"🏁 Exit: 3:55 PM daily  |  No stop loss\n\n"
+            f"🎯 Exit: +{_PROFIT_TARGET_PCT:.0f}% target  |  3:55 PM lock if +{_LATE_LOCK_PCT:.0f}%  |  Intraday rotation  |  No stop loss\n\n"
             f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} CAD</b>"
             f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
         )
@@ -1798,7 +1798,7 @@ def main() -> None:
             f"📋 Watchlist: <b>{len(WATCHLIST)} tickers</b>  (Yahoo most active CA — volume sorted)\n"
             f"📐 Strategy: 8-criteria momentum screen  +  Claude AI analysis\n"
             f"⏰ Entry: 9:31 AM ET every weekday\n"
-            f"🏁 Exit: 3:55 PM daily  |  No stop loss\n\n"
+            f"🎯 Exit: +{_PROFIT_TARGET_PCT:.0f}% target  |  3:55 PM lock if +{_LATE_LOCK_PCT:.0f}%  |  Intraday rotation  |  No stop loss\n\n"
             f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} CAD</b>"
             f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
         )
@@ -1809,7 +1809,7 @@ def main() -> None:
             f"📋 Watchlist: <b>{len(WATCHLIST)} tickers</b>  (hardcoded — no rate limits)\n"
             f"📐 Strategy: 8-criteria momentum screen  +  Claude AI analysis\n"
             f"⏰ Entry: 9:31 AM ET every weekday\n"
-            f"🏁 Exit: 3:55 PM daily  |  No stop loss\n\n"
+            f"🎯 Exit: +{_PROFIT_TARGET_PCT:.0f}% target  |  3:55 PM lock if +{_LATE_LOCK_PCT:.0f}%  |  Intraday rotation  |  No stop loss\n\n"
             f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} CAD</b>"
             f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
         )
@@ -1820,7 +1820,7 @@ def main() -> None:
             f"📋 Watchlist: <b>{len(WATCHLIST)} Canadian tickers</b>  (TSX / TSXV / NEO)\n"
             f"📐 Strategy: 8-criteria momentum screen  +  Claude AI analysis\n"
             f"⏰ Entry: 9:31 AM ET every weekday\n"
-            f"🏁 Exit: 3:55 PM daily  |  No stop loss\n\n"
+            f"🎯 Exit: +{_PROFIT_TARGET_PCT:.0f}% target  |  3:55 PM lock if +{_LATE_LOCK_PCT:.0f}%  |  Intraday rotation  |  No stop loss\n\n"
             f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} CAD</b>"
             f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
         )
@@ -1839,14 +1839,14 @@ def main() -> None:
                 f"🎫 <code>{pos['symbol']}</code>  "
                 f"{pos.get('shares', 0):.4f} sh @ ~${pos.get('buyPrice', 0):.2f}\n"
                 f"📋 Pre-market order fills at <b>9:30 AM ET open</b>  ({_mins} min)\n"
-                f"🏁 Auto-sell at <b>3:55 PM ET</b>"
+                f"🎯 Autonomous exit: +{_PROFIT_TARGET_PCT:.0f}% target  |  lock at 3:55 PM if +{_LATE_LOCK_PCT:.0f}%"
             )
         else:
             notify(
                 f"▶️ <b>Bot restarted — resuming position</b>\n\n"
                 f"🎫 <code>{pos['symbol']}</code>  "
                 f"{pos.get('shares', 0):.4f} sh @ ${pos.get('buyPrice', 0):.2f}\n"
-                f"⏰ Selling at 3:55 PM ET"
+                f"🎯 Autonomous: +{_PROFIT_TARGET_PCT:.0f}% target  |  +{_LATE_LOCK_PCT:.0f}% lock at 3:55 PM"
             )
         hold_and_sell(balance=balance)
         if not POS_FILE.exists():
@@ -1906,7 +1906,7 @@ def main() -> None:
         notify(
             f"⚡ <b>Le Grinder — BUY TODAY Mode</b>\n\n"
             f"Scanning <b>{len(WATCHLIST)}</b> tickers and buying <b>immediately</b>.\n"
-            f"⏰ No timing wait — scan → buy → hold → sell at 3:55 PM\n"
+            f"⚡ No timing wait — scan → buy → autonomous exit → intraday rotation\n"
             f"💰 Balance: <b>${balance:.2f} CAD</b>"
         )
 
@@ -2010,14 +2010,42 @@ def main() -> None:
         if now.hour < 9 or (now.hour == 9 and now.minute < 30):
             wait_for_fill_confirm(top.symbol)
 
-        # Hold + sell (autonomous: profit target / 3:55 lock / overnight)
-        hold_and_sell(balance=balance)
-        if POS_FILE.exists():
-            # hold_and_sell returned without selling (morning hold decision)
-            log("Position still open (autonomous hold) — skipping new buy, re-monitoring.")
-            continue
-        POS_FILE.unlink(missing_ok=True)
-        log("Position closed — re-entering overnight loop.")
+        # Intraday trading loop: hold, sell when done, rotate to next mover if time allows
+        while True:
+            hold_and_sell(balance=balance)
+            if POS_FILE.exists():
+                log("Position still open (autonomous hold) — re-monitoring tomorrow.")
+                break
+            POS_FILE.unlink(missing_ok=True)
+
+            # Intraday rotation: if market still open (before 3:30 PM), find next mover
+            _now = now_et()
+            _cutoff = _now.replace(hour=15, minute=30, second=0, microsecond=0)
+            if not (_now.weekday() < 5 and _now < _cutoff):
+                log("Position closed — no time for intraday rotation, entering overnight loop.")
+                break
+
+            log("Position closed with time remaining — scanning for next intraday mover...")
+            fresh = fetch_live_balance(retries=2)
+            if fresh:
+                balance = fresh
+            sc_syms, _ = _choose_scan_symbols()
+            _picks, _rebias, _, _strat, _futdet = run_scan(balance, scan_symbols=sc_syms)
+            if not _picks:
+                log("No intraday picks found — entering overnight loop.")
+                break
+            top = _picks[0]
+            notify(
+                f"⚡ <b>INTRADAY ROTATION — <code>{top.symbol}</code></b>\n\n"
+                f"🔄 Previous position closed — locking in next mover\n"
+                f"🎯 Score: <b>{top.score:.1f}</b>  |  Yesterday: {top.yesterday_pct:+.1f}%"
+                f"  |  Vol: {top.rel_volume:.1f}x  |  ${top.last_close:.2f}\n"
+                f"📋 Strategy: <b>{top.strategy_name}</b>  |  No stop loss"
+            )
+            ok = execute_buy(top, balance, _rebias, _futdet, "")
+            if not ok:
+                log("Intraday re-buy failed — entering overnight loop.")
+                break
 
 
 if __name__ == "__main__":
