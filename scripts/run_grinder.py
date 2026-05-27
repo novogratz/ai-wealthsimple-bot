@@ -1477,11 +1477,21 @@ def hold_and_sell(balance: float = 0.0) -> None:
 
     now = now_et()
 
-    # ── Overnight path: bought after 3:55 PM → sell at 9:31 AM next trading day ──
-    if now.hour > _SELL_HOUR or (now.hour == _SELL_HOUR and now.minute >= _SELL_MINUTE):
+    # ── Overnight path: after 3:55 PM, OR position bought on a previous calendar day ──
+    pos_time      = _parse_ts(pos.get("time"))
+    bought_prev_day = pos_time is not None and pos_time.date() < now.date()
+    is_overnight  = (
+        now.hour > _SELL_HOUR or
+        (now.hour == _SELL_HOUR and now.minute >= _SELL_MINUTE) or
+        bought_prev_day
+    )
+    if is_overnight:
         next_sell = now.replace(
             hour=_OVERNIGHT_SELL_HOUR, minute=_OVERNIGHT_SELL_MINUTE, second=0, microsecond=0,
-        ) + timedelta(days=1)
+        )
+        # if 9:31 AM is already past today, push to tomorrow
+        if now >= next_sell:
+            next_sell += timedelta(days=1)
         while next_sell.weekday() >= 5:
             next_sell += timedelta(days=1)
 
