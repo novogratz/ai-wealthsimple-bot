@@ -638,44 +638,31 @@ def place_order(
     snap(page, f"{side}_tab")
 
     if price is not None:
-        print(f"Switching to Limit order ({side})...")
-        try:
-            page.locator('button:has-text("Market")').first.click(timeout=3000)
-            page.wait_for_timeout(400)
-            page.locator(
-                'li:has-text("Limit"), button:has-text("Limit"), [role="option"]:has-text("Limit")'
-            ).first.click(timeout=3000)
-            page.wait_for_timeout(600)
-            snap(page, "limit_selected")
-            print(f"Entering limit price ${price:.2f}...")
-            fill_visible_input(page, 0, f"{price:.2f}")
-            page.wait_for_timeout(300)
-            # Enable extended hours trading if the toggle is present
+        print(f"Setting Limit order type ({side})...")
+        # If "Market" button is absent, WS already put us in Limit mode (e.g. AH)
+        has_market_btn = page.locator('button:has-text("Market")').count() > 0
+        if has_market_btn:
             try:
-                ext_toggled = page.evaluate("""
-                    () => {
-                        const labels = [...document.querySelectorAll('label, span, div')];
-                        const label = labels.find(el =>
-                            /extended.hours|after.hours|pre.market/i.test(el.textContent)
-                        );
-                        if (!label) return false;
-                        const cb = label.querySelector('input[type="checkbox"]')
-                            || label.previousElementSibling
-                            || label.nextElementSibling;
-                        if (cb && cb.type === 'checkbox' && !cb.checked) {
-                            cb.click(); return true;
-                        }
-                        // try clicking the label itself as a toggle
-                        label.click(); return 'label_clicked';
-                    }
-                """)
-                if ext_toggled:
-                    print(f"  Extended hours toggle: {ext_toggled}")
-                    page.wait_for_timeout(300)
-            except Exception:
-                pass
-        except PWTimeout:
-            print("  Warning: could not switch to Limit - proceeding as Market")
+                page.locator('button:has-text("Market")').first.click(timeout=3000)
+                page.wait_for_timeout(400)
+                page.locator(
+                    'li:has-text("Limit"), button:has-text("Limit"), [role="option"]:has-text("Limit")'
+                ).first.click(timeout=3000)
+                page.wait_for_timeout(600)
+                snap(page, "limit_selected")
+            except PWTimeout:
+                print("  Warning: could not switch to Limit - will still try to fill price")
+        else:
+            print("  Already in Limit mode (extended hours) — skipping switch")
+            snap(page, "limit_selected")
+
+        # Fill limit price (first visible input = price field in limit mode)
+        print(f"Entering limit price ${price:.2f}...")
+        try:
+            fill_visible_input(page, 0, f"{price:.2f}")
+            page.wait_for_timeout(400)
+        except Exception as e:
+            print(f"  Warning: could not fill limit price: {e}")
             price = None
     else:
         print("Keeping Market order type.")

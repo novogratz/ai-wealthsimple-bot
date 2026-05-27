@@ -2139,6 +2139,10 @@ def main() -> None:
                 f"💡 Attempting limit sell + AH rotation..."
             )
             _run_afterhours_strategy(balance, sell_existing=True)
+            # If position still open (sell failed), fall through to overnight hold
+            if POS_FILE.exists():
+                log("AH sell failed — falling back to overnight hold.")
+                hold_and_sell(balance=balance)
         elif _pre_open:
             _open_t = _now.replace(hour=9, minute=30, second=0, microsecond=0)
             _mins = max(0, int((_open_t - _now).total_seconds() / 60))
