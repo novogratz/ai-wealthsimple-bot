@@ -7,15 +7,20 @@ ai-wealthsimple-bot/
 ├── kzer_bot/
 │   ├── grinder_strategy.py   ← Le Grinder strategy (MAIN)
 │   │     GrinderSnapshot      — 10-field frozen dataclass w/ computed properties
-│   │     GrinderMarketData    — yfinance wrapper w/ in-memory snapshot cache
+│   │     GrinderMarketData    — yfinance wrapper w/ in-memory snapshot + frame cache
 │   │       .prefetch()        — batch yf.download (200/batch, threaded, 3-5x faster)
+│   │       .get_frame(sym)    — returns raw OHLCV DataFrame for SmartStrategy signals
 │   │       .all_snapshots()   — returns all cached snapshots (for diagnostics)
 │   │     FuturesBias          — Enum: GREEN / RED / NEUTRAL
 │   │     get_futures_bias()   — ES=F 1h bars, compare to 24h ago
 │   │     GrinderPick          — frozen result dataclass w/ .confidence property
-│   │     GrinderStrategy      — 8-criteria scanner, sorted by score
-│   │     FallbackStrategy     — relaxed fallback (rel vol ≥ 1.0x)
-│   │     BestEffortStrategy   — guaranteed pick, no filters, highest score wins
+│   │     SmartSignals         — frozen dataclass: pct_5d, pct_20d, high_20d, vol_trend, obv_score
+│   │     SmartMarketContext   — TSX + sector ETF returns, trending tickers (cached 2h)
+│   │       .load_or_fetch()   — returns cached or fresh context
+│   │     SmartGrinderStrategy — tier 0: composite 0-100 score, no hard cap filters
+│   │     GrinderStrategy      — tier 1: 8-criteria scanner, sorted by score
+│   │     FallbackStrategy     — tier 2: relaxed fallback (rel vol ≥ 1.0x)
+│   │     BestEffortStrategy   — tier 3: guaranteed pick, no filters, highest score wins
 │   │     WATCHLIST            — loaded from data/universe.json (4052 TSX/TSXV tickers)
 │   │                            falls back to 100-ticker hardcoded list if file missing
 │   │
@@ -42,16 +47,18 @@ ai-wealthsimple-bot/
 ├── scripts/
 │   ├── run_grinder.py         ← Le Grinder orchestrator (MAIN ENTRY POINT)
 │   │     refresh_universe_if_stale() — auto-refresh data/universe.json if >7 days old
-│   │     run_scan()           — futures + 3-tier strategy (main/fallback/best-effort)
+│   │     run_scan()           — futures + 4-tier strategy (smart/main/fallback/best-effort)
 │   │     _log_scan_diagnostics() — logs top-5 by score + exact filter failures
-│   │     _buy_timing_line()   — "Buying in 11h 20min (09:15 AM tomorrow)"
+│   │     _buy_timing_line()   — "Buying in 11h 20min (9:35 AM tomorrow)"
 │   │     _day_label()         — "TODAY" / "TOMORROW" / "MONDAY"
 │   │     get_ai_analysis()    — calls `claude -p "..."` subprocess
-│   │     wait_for_buy_window() — 9:15 AM or 11:00 AM depending on bias
+│   │     wait_for_buy_window() — 9:35 AM or 11:00 AM depending on bias
 │   │     execute_buy()        — calls wealthsimple_auto.py buy --max-dollars
-│   │     hold_and_sell()      — 60s loop, 30-min Telegram, 3:55 PM sell
+│   │     _morning_hold_decision() — at 9:31 AM: hold or rotate (EMA20 + smart score ≥ 20)
+│   │                                honours forceSell flag in position file
+│   │     hold_and_sell()      — autonomous: profit target +5%, 3:55 PM lock +2%, overnight
 │   │     wait_overnight()     — fires 5 AM and 5 PM scans, sleeps between
-│   │     main()               — startup → universe refresh → resume check → main loop
+│   │     main()               — intraday rotation loop: sell → re-scan → buy → repeat until 3:30 PM
 │   │
 │   ├── update_universe.py     ← Fetches full TSX/TSXV listing from TMX public API
 │   │     _fetch(url, suffix)  — GET tsx.com/json/company-directory → yfinance symbols
@@ -84,8 +91,19 @@ ai-wealthsimple-bot/
     └── yfinance_cache/        ← yfinance tz cache
 ```
 
-## Score formula (v3.3)
+## Score formula (v3.4)
 
+### Smart Strategy (tier 0) — composite 0–100
+```
+Signal A: Momentum cascade  (0–40 pts) — 1d/5d/20d return alignment
+Signal B: Breakout proximity (0–15 pts) — closeness to 20-day high
+Signal C: Volume conviction  (0–20 pts) — rel_vol + 5d/20d vol trend
+Signal D: OBV smart-money   (0–10 pts) — direction-weighted vol 10 sessions
+Signal E: Relative strength  (0–10 pts) — 5d return vs ^GSPTSE
+Bonuses: close strength + ATR + Yahoo trending (0–5 pts)
+```
+
+### Legacy score (tiers 1–3)
 ```python
 score = yesterday_pct_change * (rel_volume ** 1.5) * atr_pct * (1 + close_strength)
 
@@ -95,10 +113,10 @@ rel_volume           = yesterday_volume / avg_volume_20
 atr_pct              = atr14 / last_close * 100
 close_strength       = (last_close - yesterday_low) / (yesterday_high - yesterday_low)
 
-# Confidence thresholds:
-# score >= 50 → HIGH  (strong setup)
-# score >= 20 → MEDIUM
-# score  < 20 → LOW   (use fallback)
+# Confidence thresholds (both scorers):
+# score >= 50 (smart) or raw score → HIGH  (strong setup)
+# score >= 20                       → MEDIUM
+# score  < 20                       → LOW   (use fallback)
 ```
 
 ## Wealthsimple automation protocol
@@ -151,13 +169,17 @@ All messages are sent as HTML via `send_message()`. Key events:
 | Event | When | Key content |
 |---|---|---|
 | Startup | Bot launch | Balance, watchlist size, strategy summary |
-| Resume | Restart with open position | Symbol, entry, cost |
+| Resume | Restart with open position | Symbol, entry, cost, autonomous exit rules |
 | Game plan | 5 AM / startup scan | Pick, score, why, plan, AI analysis |
-| Red waiting | 9:15 AM (red days) | Why we wait, what to watch |
-| Buying now | 9:15 AM or 11 AM | Edge reasoning, AI view |
+| Red waiting | 9:35 AM (red days) | Why we wait, what to watch |
+| Buying now | 9:35 AM or 11 AM | Edge reasoning, AI view |
 | Fill confirmed | 9:31 AM (pre-market buys) | Live balance after fill |
+| Morning decision | 9:31 AM | Hold another day or rotate to new pick |
 | 30-min update | Every 30 min in session | Price, P&L, time to sell |
-| Closing | 3:55 PM | Est. exit price, P&L |
+| Profit target | Any time (after 10:30 AM) | +5% hit — selling now |
+| 3:55 PM lock | 3:55 PM if ≥ +2% | Lock in gain |
+| Overnight hold | 3:55 PM if < +2% | Holding — morning decision tomorrow |
+| Intraday rotation | After any sell before 3:30 PM | New pick found — buying immediately |
 | Sold | After sell executes | Trade P&L, all-time PnL, record |
 | 5 PM preview | 5:00 PM | Next day's top pick + plan |
 
@@ -180,10 +202,13 @@ get_ai_analysis(picks, bias, futures_detail, balance)
   "shares": 18.5831,
   "estimatedCost": 89.59,
   "sellAll": true,
-  "strategyName": "Main Strategy",
-  "time": "2026-05-25T09:15:32.123456-04:00"
+  "strategyName": "Smart Strategy",
+  "time": "2026-05-25T09:35:32.123456-04:00",
+  "forceSell": false
 }
 ```
+
+Set `forceSell: true` to guarantee the position sells at the next 9:31 AM morning decision, bypassing the hold/rotate check.
 
 ## Environment variables
 

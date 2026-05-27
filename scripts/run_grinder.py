@@ -1387,8 +1387,23 @@ def _morning_hold_decision(symbol: str, entry: float, shares: float,
     Returns True = keep holding (skip sell + skip new buy today).
     Returns False = sell now and let main loop find a new pick.
     Criteria: stock still above EMA20 AND smart composite score >= _MIN_SMART_HOLD_SCORE.
+    If position file has forceSell=true, always rotates out.
     """
     log(f"Morning hold check for {symbol}...")
+    # Honour explicit force-sell flag (e.g. user overrides or overnight session issue)
+    try:
+        if POS_FILE.exists():
+            _pos = json.loads(POS_FILE.read_text())
+            if _pos.get("forceSell"):
+                log(f"  forceSell=true — rotating out of {symbol} unconditionally")
+                notify(
+                    f"🔄 <b>9:31 AM — Selling <code>{symbol}</code> (forced exit)</b>\n\n"
+                    f"📋 Position flagged for mandatory exit\n"
+                    f"🔍 Scanning for new pick at 9:35 AM..."
+                )
+                return False
+    except Exception:
+        pass
     try:
         from kzer_bot.grinder_strategy import (
             GrinderMarketData as _GMD,

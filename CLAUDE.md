@@ -3,11 +3,11 @@
 ## What this is
 
 **Le Grinder** is a 24/7 autonomous Canadian stock day-trading bot that:
-- Scans the full TSX + TSXV universe (~4,000 tickers) each morning via a 3-tier momentum strategy
+- Scans the full TSX + TSXV + NEO universe (~4,000 tickers) via a 4-tier momentum strategy
 - Checks US futures (ES=F) to decide *when* to buy (open vs bounce)
-- Places one trade per day via Wealthsimple browser automation (Playwright + Edge)
-- Sends all updates to Telegram with smart timing ("Buying in 11h 20min — tomorrow")
-- Uses Claude CLI for AI-powered pick analysis every morning
+- Trades freely between 9:31 AM and 3:30 PM — **intraday rotation** after each exit (no trading fees)
+- Exits autonomously: +5% profit target anytime, +2% lock-in at 3:55 PM, or holds overnight if flat
+- Sends all updates to Telegram with smart timing and game plans
 - Writes all output to `data/grinder.log` for easy debugging
 
 ## Key files
@@ -15,7 +15,7 @@
 | File | Role |
 |---|---|
 | `scripts/run_grinder.py` | **Main entry point** — 24/7 loop, orchestrates everything |
-| `kzer_bot/grinder_strategy.py` | Strategy logic: 8-criteria scan, fallback, best-effort, futures bias, watchlist |
+| `kzer_bot/grinder_strategy.py` | Strategy logic: SmartGrinderStrategy (composite 0-100), 8-criteria, fallback, best-effort, futures bias |
 | `scripts/update_universe.py` | Fetches full TSX/TSXV ticker list from TMX API → `data/universe.json` |
 | `kzer_bot/market_data.py` | Old yfinance data layer (used by hold loop live price checks) |
 | `kzer_bot/telegram.py` | Telegram helpers: `send_message()`, `trade_message()`, `load_dotenv()` |
@@ -65,9 +65,13 @@ WS_PASSWORD=yourpassword
 
 `WS_EMAIL` / `WS_PASSWORD` power the auto-login recovery: if the session expires mid-run, `wealthsimple_auto.py` detects the login page and re-authenticates automatically.
 
-## Strategy summary (v3.3)
+## Strategy summary (v3.4)
 
-### 3-tier picks (never skips a day)
+### 4-tier picks (never skips a day)
+
+**Tier 0 — Smart Strategy (primary):**  
+Composite 0–100 score. price $0.10–$100 | avg vol ≥ 30k | yesterday ≥ +0.5% | above EMA20  
+5 signals: momentum cascade (1d/5d/20d) + breakout proximity + volume build + OBV smart-money + relative strength vs TSX
 
 **Tier 1 — Main (8 criteria):**  
 price $2–$40 | avg vol ≥ 300k | yesterday +1.5–+12% | rel vol ≥ 1.5× | ATR14 ≥ 1.5% | above EMA20 | above EMA5 | close strength ≥ 0.40
@@ -76,16 +80,23 @@ price $2–$40 | avg vol ≥ 300k | yesterday +1.5–+12% | rel vol ≥ 1.5× | 
 Fires when main finds nothing. price $1–$40 | avg vol ≥ 100k | pct +1–15% | rel vol ≥ 1.0× | above EMA20
 
 **Tier 3 — Best Available (guaranteed):**  
-Fires when both above fail. No filters — picks highest-scoring ticker with positive momentum from full universe. Tagged "Best Available" with warning in Telegram.
+No filters — highest-scoring ticker with positive momentum from full universe.
 
-**Score:** `yesterday_pct × rel_volume^1.5 × atr_pct × (1 + close_strength)`
+**Smart score:** composite 0–100 (momentum cascade 40 pts + breakout 15 + volume build 20 + OBV 10 + rel strength 10 + bonuses 5)  
+**Legacy score:** `yesterday_pct × rel_volume^1.5 × atr_pct × (1 + close_strength)`
 
 **Futures bias (ES=F):**
-- ≥ +0.3% → GREEN → buy at 9:15 AM
+- ≥ +0.3% → GREEN → buy at 9:35 AM
 - ≤ -0.3% → RED   → wait, buy 11:00–12:00 PM
-- else     → NEUTRAL → buy at 9:15 AM
+- else     → NEUTRAL → buy at 9:35 AM
 
-**Exit:** hard market sell at 3:55 PM ET. No stop loss. One trade per day.
+**Exit rules (autonomous — no stop losses):**
+- +5% unrealized (after 10:30 AM) → sell immediately, rotate to next pick
+- 3:55 PM: if unrealized ≥ +2% → sell and lock in; else hold overnight
+- 9:31 AM next day: hold decision (EMA20 + smart score ≥ 20) or rotate
+- `forceSell: true` in position file → always sells at 9:31 AM
+
+**Intraday rotation:** after any sell, if before 3:30 PM → re-scan shortlist and buy next mover (free, no fees)
 
 ## Daily schedule
 
@@ -93,11 +104,13 @@ Fires when both above fail. No filters — picks highest-scoring ticker with pos
 |---|---|
 | Startup | Auto-refresh universe if >7 days old |
 | 5:00 AM | Futures check + full scan + AI analysis → Telegram game plan with countdown |
-| 9:15 AM | Buy (green/neutral) — pre-market order, fills at 9:30 open |
-| 9:15 AM | Red days: "Waiting for bounce" Telegram message |
+| 9:31 AM | Morning hold decision for overnight positions (sell or keep) |
+| 9:35 AM | Buy (green/neutral) — market order |
 | 11:00 AM | Buy (red bias) — bounce window |
 | Every 30 min | Position update to Telegram (price / P&L / time-to-sell) |
-| 3:55 PM | Hard sell everything |
+| Any time | Profit target hit (+5%) → sell + rotate to next pick |
+| 3:30 PM | Last entry cutoff for intraday rotation |
+| 3:55 PM | Lock-in sell if ≥ +2%; else hold overnight |
 | 5:00 PM | Next-day preview scan |
 
 ## Universe management
