@@ -24,7 +24,7 @@ FUTURES_CACHE       = ROOT / "data" / "futures_bias_cache.json"
 UNIVERSE_FILE       = ROOT / "data" / "universe.json"
 SMART_CONTEXT_CACHE = ROOT / "data" / "smart_context_cache.json"
 
-_SECTOR_ETFS = ["XEG.TO", "XGD.TO", "XIT.TO", "XFN.TO", "XRE.TO"]
+_SECTOR_ETFS = ["XLK", "XLV", "XLE", "XLF", "XLI", "XLY"]
 YF_CACHE.mkdir(parents=True, exist_ok=True)
 yf.set_tz_cache_location(str(YF_CACHE))
 
@@ -35,45 +35,94 @@ yf.set_tz_cache_location(str(YF_CACHE))
 # ──────────────────────────────────────────────────────────────────────────────
 
 _HARDCODED_WATCHLIST: list[str] = [
-    # ── Energy (TSX) ──────────────────────────────────────────────────────────
-    "BTE.TO", "ARX.TO", "PEY.TO", "SGY.TO", "TVE.TO", "AAV.TO", "KEL.TO",
-    "SDE.TO", "BIR.TO", "FRU.TO", "TOU.TO", "VET.TO", "ATH.TO", "CVE.TO",
-    "WCP.TO", "SU.TO", "POU.TO", "HWX.TO", "OBE.TO", "PHX.TO", "SPB.TO",
-    "GEI.TO", "PPR.TO", "TBL.TO", "IPCO.TO", "CEU.TO",
-    # ── Mining / Metals / Gold (TSX) ──────────────────────────────────────────
-    "SVM.TO", "IMG.TO", "OGC.TO", "EDV.TO", "ELD.TO", "MUX.TO", "AGI.TO",
-    "AEM.TO", "ABX.TO", "FM.TO", "HBM.TO", "LUN.TO", "CS.TO", "OR.TO",
-    "PAAS.TO", "DPM.TO", "WPM.TO", "EQX.TO", "CG.TO", "NG.TO", "SKE.TO",
-    "AG.TO", "ERO.TO",
-    # ── Cannabis (TSX) ────────────────────────────────────────────────────────
-    "ACB.TO", "OGI.TO", "WEED.TO", "CRON.TO",
-    # ── Technology / Software (TSX) ───────────────────────────────────────────
-    "BB.TO", "LSPD.TO", "REAL.TO", "KXS.TO", "BIPC.TO", "ENGH.TO",
-    "CLS.TO", "DCBO.TO", "SHOP.TO", "OTEX.TO", "KEEL.TO", "HUT.TO",
-    # ── Financials (TSX) ──────────────────────────────────────────────────────
-    "MFC.TO", "SLF.TO", "GWO.TO", "IAG.TO", "EQB.TO", "EFN.TO",
-    # ── Industrials / Infrastructure (TSX) ────────────────────────────────────
-    "CAE.TO", "WSP.TO", "WCN.TO", "STN.TO", "TIH.TO", "NFI.TO", "RBA.TO",
-    # ── Utilities / Renewables (TSX) ──────────────────────────────────────────
-    "NPI.TO", "CPX.TO", "ALA.TO", "BEPC.TO", "AQN.TO",
-    # ── Consumer / Retail (TSX) ───────────────────────────────────────────────
-    "GIL.TO", "ATD.TO", "DOL.TO", "RUS.TO", "PBH.TO", "GURU.TO",
-    # ── Healthcare / Biotech (TSX) ────────────────────────────────────────────
-    "WELL.TO", "DND.TO",
-    # ── Timber / Materials (TSX) ──────────────────────────────────────────────
-    "WFG.TO", "IFP.TO", "CFP.TO",
-    # ── Junior / Exploration (TSX) ────────────────────────────────────────────
-    "NXE.TO", "ALS.TO", "LAM.TO", "TVK.TO", "PXT.TO", "XTC.TO",
-    # ── TSXV ──────────────────────────────────────────────────────────────────
-    "LIO.V", "GR.V", "PLY.V", "GGO.V", "QCX.V", "BHS.V", "FWZ.V",
+    # ── Mega-cap Tech ─────────────────────────────────────────────────────────
+    "AAPL", "MSFT", "NVDA", "AMD", "META", "GOOGL", "AMZN", "TSLA",
+    # ── Semiconductors ───────────────────────────────────────────────────────
+    "AVGO", "QCOM", "MU", "MRVL", "AMAT", "LRCX", "KLAC", "INTC",
+    "TXN", "ON", "MCHP", "WOLF", "SMCI", "ARM", "SLAB",
+    # ── Cloud / Enterprise SaaS ───────────────────────────────────────────────
+    "CRM", "NOW", "SNOW", "PLTR", "ORCL", "ADBE", "WDAY", "TEAM",
+    # ── Cybersecurity ────────────────────────────────────────────────────────
+    "PANW", "CRWD", "ZS", "FTNT", "DDOG", "NET", "CYBR", "S",
+    # ── Fintech / Crypto ─────────────────────────────────────────────────────
+    "V", "MA", "PYPL", "SQ", "COIN", "HOOD", "SOFI", "AFRM",
+    "MARA", "RIOT", "CLSK", "HUT", "CIFR",
+    # ── Banks / Finance ──────────────────────────────────────────────────────
+    "JPM", "BAC", "GS", "MS", "C", "WFC", "BX", "BLK", "SCHW",
+    "IBKR", "RJF",
+    # ── Energy ───────────────────────────────────────────────────────────────
+    "XOM", "CVX", "COP", "OXY", "MRO", "DVN", "FANG", "HES", "EOG",
+    "SLB", "HAL", "BKR", "NOG", "SM",
+    # ── Healthcare / Biotech ─────────────────────────────────────────────────
+    "LLY", "NVO", "ABBV", "MRK", "PFE", "BMY", "AMGN", "GILD",
+    "REGN", "VRTX", "MRNA", "BNTX", "BIIB", "ALNY", "EXAS",
+    "RXRX", "ACHR",
+    # ── Consumer / Retail ────────────────────────────────────────────────────
+    "WMT", "COST", "TGT", "HD", "LOW", "NKE", "DIS", "NFLX",
+    "UBER", "LYFT", "DASH", "BKNG", "ABNB",
+    # ── AI / Data / Infra ────────────────────────────────────────────────────
+    "DELL", "HPE", "IONQ", "RGTI", "QUBT", "LUNR", "RKLB",
+    # ── EVs / Clean Energy ───────────────────────────────────────────────────
+    "RIVN", "LCID", "NIO", "LI", "XPEV", "ENPH", "FSLR",
+    "F", "GM", "PLUG",
+    # ── Industrials / Defense ────────────────────────────────────────────────
+    "GE", "CAT", "BA", "RTX", "LMT", "NOC", "DE", "HON",
+    # ── Media / Gaming ───────────────────────────────────────────────────────
+    "RBLX", "EA", "TTWO", "SPOT", "NFLX",
+    # ── High-beta momentum ───────────────────────────────────────────────────
+    "GME", "AMC", "BBBY", "UWMC", "CLOV", "SPCE",
+    "SNDL", "NKLA", "WKHS", "RIDE", "GOEV",
+    # ── S&P 500 high-volume liquid names ─────────────────────────────────────
+    "AAON", "ACM", "AES", "AIG", "AIZ", "AJG", "AKAM", "ALB", "ALGN",
+    "ALK", "ALL", "ALLE", "ANET", "AON", "APA", "APD", "APH", "APTV",
+    "ARE", "ATO", "AVB", "AVGO", "AWK", "AXP", "AZO", "BBY", "BDX",
+    "BEN", "BIO", "BK", "BMRN", "BR", "BRKB", "BRO", "BSX", "BXP",
+    "CB", "CBOE", "CBRE", "CDW", "CE", "CF", "CHD", "CHRW", "CHTR",
+    "CI", "CINF", "CLX", "CMCSA", "CMS", "CNC", "CNP", "COF", "COO",
+    "CPRT", "CPT", "CSX", "CTAS", "CTLT", "CTSH", "CTVA", "CVS",
+    "D", "DAL", "DE", "DFS", "DG", "DHI", "DHR", "DLR", "DLTR",
+    "DOV", "DPZ", "DRI", "DTE", "DUK", "DVA", "EFX", "EG", "EIX",
+    "EL", "EMN", "EMR", "EOG", "ES", "ESS", "EW", "EXC", "EXPD",
+    "EXPE", "EXR", "FAST", "FDX", "FIS", "FISV", "FLT", "FMC",
+    "FOX", "FOXA", "FRC", "FRT", "GD", "GL", "HAS", "HCA", "HII",
+    "HLT", "HOLX", "HPQ", "HRL", "HSIC", "HST", "HSY", "HWM",
+    "ICE", "IDXX", "IEX", "IFF", "ILMN", "INCY", "IP", "IPG",
+    "IQV", "IR", "IRM", "ISRG", "IT", "ITW", "IVZ", "J", "JBHT",
+    "JCI", "JKHY", "JNJ", "JNPR", "K", "KEY", "KHC", "KIM", "KLAC",
+    "KMB", "KMI", "KMX", "KO", "KR", "L", "LDOS", "LEN", "LH",
+    "LIN", "LKQ", "LNC", "LNT", "LUV", "LVS", "LYB", "LYV",
+    "MAA", "MAR", "MAS", "MCD", "MCHP", "MCK", "MCO", "MDLZ",
+    "MDT", "MET", "MGM", "MHK", "MKC", "MKTX", "MLM", "MMC",
+    "MNST", "MO", "MOS", "MPC", "MPW", "MPWR", "MRO", "MSCI",
+    "MSI", "MTB", "MTCH", "MTD", "MU", "NDAQ", "NEE", "NEM",
+    "NFLX", "NI", "NKE", "NLOK", "NLSN", "NRG", "NSC", "NTAP",
+    "NTRS", "NUE", "NVAX", "NVR", "NWL", "NWS", "NWSA", "NXPI",
+    "O", "OGN", "OKE", "OMC", "OPEN", "OPK", "ORLY", "OTIS",
+    "PARA", "PAYC", "PAYX", "PEG", "PEP", "PFG", "PGR", "PH",
+    "PHM", "PKG", "PKI", "PLD", "PM", "PNC", "PNR", "PNW", "POOL",
+    "PPG", "PPL", "PRU", "PSA", "PSX", "PTC", "PVH", "PWR",
+    "QRVO", "RCL", "RE", "REG", "REGN", "RF", "RHI", "RJF",
+    "RL", "RMD", "ROK", "ROL", "ROP", "ROST", "RSG", "RTX",
+    "SBAC", "SBUX", "SEE", "SHW", "SIVB", "SJM", "SNA", "SNPS",
+    "SO", "SPG", "SPGI", "SRE", "STT", "STX", "STZ", "SWK",
+    "SWKS", "SYF", "SYK", "SYY", "T", "TAP", "TDG", "TDY", "TEL",
+    "TER", "TFC", "TFX", "TGT", "TJX", "TMO", "TMUS", "TPR",
+    "TRMB", "TROW", "TRV", "TSCO", "TT", "TTWO", "TWTR", "TXN",
+    "TXT", "TYL", "UAL", "UDR", "UHS", "ULTA", "UNH", "UNP",
+    "UPS", "URI", "USB", "VFC", "VLO", "VMC", "VNO", "VNT",
+    "VRSK", "VRSN", "VRTX", "VTR", "VZ", "WAB", "WAT", "WBA",
+    "WBD", "WDC", "WEC", "WELL", "WHR", "WM", "WMB", "WRB",
+    "WRK", "WST", "WTW", "WY", "WYNN", "XEL", "XYL", "YUM",
+    "ZBH", "ZBRA", "ZION", "ZTS",
 ]
 
 
 def _load_watchlist() -> list[str]:
-    """Load universe from data/universe.json; fall back to hardcoded list."""
+    """Load US stock universe from data/us_universe.json; fall back to hardcoded list."""
     try:
-        if UNIVERSE_FILE.exists():
-            data = json.loads(UNIVERSE_FILE.read_text(encoding="utf-8"))
+        us_file = ROOT / "data" / "us_universe.json"
+        if us_file.exists():
+            data = json.loads(us_file.read_text(encoding="utf-8"))
             syms = data.get("symbols", [])
             if len(syms) > 0:
                 return syms
@@ -556,12 +605,12 @@ class GrinderPick:
 
 class GrinderStrategy:
     """
-    8-criteria main strategy:
-      1. Price $2.00-$40.00          - volatile sweet spot
-      2. 20-day avg volume >= 300,000 - enough liquidity to enter/exit
-      3. Yesterday % change +1.5-+12% - real momentum, not noise
+    8-criteria main strategy (US stocks / NYSE / NASDAQ):
+      1. Price $1.00-$1000            - covers penny to large cap
+      2. 20-day avg volume >= 500,000 - liquid enough to enter/exit
+      3. Yesterday % change +1.5-+15% - real momentum, not noise
       4. Rel. volume >= 1.5x          - elevated = institutional conviction
-      5. ATR(14) >= 1.5% of price     - stock needs room to run 1-3 %
+      5. ATR(14) >= 1.0% of price     - room to run 1-3 %
       6. Close > 20-day EMA           - confirmed medium-term uptrend
       7. Close > 5-day EMA            - short-term trend intact
       8. Close strength >= 0.40       - closed in upper 60 % of day range
@@ -569,15 +618,15 @@ class GrinderStrategy:
     Score = yesterday_pct x rel_volume^1.5 x atr_pct x (1 + close_strength)
     """
 
-    MIN_PRICE     = 2.00
-    MAX_PRICE     = 40.00
-    MIN_MARKET_CAP = 25_000_000
-    MIN_AVG_VOL   = 300_000
-    MIN_YDAY_VOL  = 100_000
+    MIN_PRICE     = 1.00
+    MAX_PRICE     = 1000.00
+    MIN_MARKET_CAP = 100_000_000
+    MIN_AVG_VOL   = 500_000
+    MIN_YDAY_VOL  = 200_000
     MIN_PCT_CHG   = 1.5
-    MAX_PCT_CHG   = 12.0
+    MAX_PCT_CHG   = 15.0
     MIN_REL_VOL   = 1.5
-    MIN_ATR_PCT   = 1.5
+    MIN_ATR_PCT   = 1.0
     MIN_CLOSE_STR = 0.40
     MARKET_CAP_SCAN_LIMIT = 120
 
@@ -645,23 +694,23 @@ class GrinderStrategy:
 
 class FallbackStrategy:
     """
-    Relaxed momentum fallback:
-      1. Price $1.00-$40.00
-      2. 20-day avg vol >= 100,000
-      3. Yesterday % change +1.0-+15%
-      4. Rel. volume >= 1.0x  (lowered from 1.2x — catches quiet-volume days)
+    Relaxed momentum fallback (US stocks):
+      1. Price $1.00-$1000
+      2. 20-day avg vol >= 200,000
+      3. Yesterday % change +1.0-+20%
+      4. Rel. volume >= 1.0x
       5. Close > 20-day EMA
     Score = yesterday_pct x rel_volume x (1 + close_strength)
     """
 
     MIN_PRICE   = 1.00
-    MAX_PRICE   = 40.00
-    MIN_MARKET_CAP = 25_000_000
-    MIN_AVG_VOL = 100_000
+    MAX_PRICE   = 1000.00
+    MIN_MARKET_CAP = 100_000_000
+    MIN_AVG_VOL = 200_000
     MIN_YDAY_VOL = 100_000
     MIN_PCT_CHG = 1.0
-    MAX_PCT_CHG = 15.0
-    MIN_REL_VOL = 1.0  # lowered: catches stocks up on quiet volume
+    MAX_PCT_CHG = 20.0
+    MIN_REL_VOL = 1.0
     MARKET_CAP_SCAN_LIMIT = 120
 
     def __init__(self, market_data: Optional[GrinderMarketData] = None) -> None:
@@ -741,10 +790,10 @@ class BestEffortStrategy:
                 continue
             if snap.last_close <= 0 or snap.avg_volume_20 <= 0:
                 continue
-            if snap.yesterday_volume < 100_000:
+            if snap.yesterday_volume < 200_000:
                 continue
             market_cap = self.market_data.market_cap(symbol)
-            if market_cap is None or market_cap < 25_000_000:
+            if market_cap is None or market_cap < 100_000_000:
                 continue
             candidates.append(snap)
 
@@ -812,13 +861,13 @@ def _build_smart_signals(df: pd.DataFrame) -> SmartSignals:
 
 
 def _fetch_yahoo_trending() -> set:
-    """Try to fetch trending TSX tickers from Yahoo Finance screener (best-effort)."""
+    """Try to fetch trending US tickers from Yahoo Finance screener (best-effort)."""
     trending: set = set()
     urls = [
         ("https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
-         "?formatted=true&lang=en-CA&region=CA&scrIds=day_gainers&count=25"),
+         "?formatted=true&lang=en-US&region=US&scrIds=day_gainers&count=25"),
         ("https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
-         "?formatted=true&lang=en-CA&region=CA&scrIds=most_actives&count=25"),
+         "?formatted=true&lang=en-US&region=US&scrIds=most_actives&count=25"),
     ]
     hdrs = {
         "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -835,7 +884,8 @@ def _fetch_yahoo_trending() -> set:
                               .get("result", [{}])[0]
                               .get("quotes", [])):
                     sym = str(q.get("symbol", ""))
-                    if ".TO" in sym or ".V" in sym:
+                    # US stocks — no exchange suffix
+                    if sym and "." not in sym:
                         trending.add(sym)
         except Exception:
             pass
@@ -870,7 +920,7 @@ class SmartMarketContext:
         sectors: dict = {}
         trending: set = set()
 
-        syms = ["^GSPTSE"] + _SECTOR_ETFS
+        syms = ["^GSPC"] + _SECTOR_ETFS
         try:
             raw = yf.download(
                 syms, period="30d", interval="1d",
@@ -884,7 +934,7 @@ class SmartMarketContext:
                         continue
                     c = df["Close"].values.astype(float)
                     pct = float((c[-1] - c[-6]) / c[-6] * 100)
-                    if sym == "^GSPTSE":
+                    if sym == "^GSPC":
                         tsx_pct = pct
                     else:
                         sectors[sym] = pct
@@ -925,10 +975,10 @@ class SmartGrinderStrategy:
     Score: 0–100 composite  (≥50 = HIGH, ≥25 = MEDIUM, <25 = LOW)
     """
 
-    MIN_PRICE      = 0.10    # allow micro-caps
-    MAX_PRICE      = 100.00
-    MIN_AVG_VOL    = 30_000  # low bar — volume quality handled by score
-    MIN_YDAY_VOL   = 10_000
+    MIN_PRICE      = 1.00
+    MAX_PRICE      = 1000.00
+    MIN_AVG_VOL    = 100_000  # US stocks are liquid — low bar, score handles quality
+    MIN_YDAY_VOL   = 50_000
     MIN_PCT_CHG    = 0.5
     SCAN_LIMIT     = 200
 

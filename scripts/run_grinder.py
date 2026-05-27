@@ -84,6 +84,16 @@ _UNIVERSE_MAX_AGE = 7 * 86400  # refresh universe.json if older than 7 days
 UNIVERSE_FILE     = ROOT / "data" / "universe.json"
 UNIVERSE_SCRIPT   = ROOT / "scripts" / "update_universe.py"
 
+# ── After-hours / extended-hours trading ──────────────────────────────────────
+_AH_BUY_START_HOUR  = 16   # 4:00 PM ET — AH buy window opens
+_AH_BUY_END_HOUR    = 19   # 7:30 PM ET — stop new AH entries
+_AH_BUY_END_MINUTE  = 30
+_AH_PROFIT_PCT      = 3.0  # sell AH position immediately at +3%
+_AH_LIMIT_PREMIUM   = 0.005  # pay up to 0.5% above current AH price on limit buy
+_AH_SELL_PREMIUM    = 0.01   # set limit sell target at +1% above AH entry
+_AH_MIN_PCT         = 0.3    # minimum after-hours gain to be a candidate (+0.3%)
+_AH_WATCHLIST_SIZE  = 80     # number of tickers to scan for AH plays
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Core helpers
@@ -450,37 +460,8 @@ def _time_until_sell() -> float:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def refresh_universe_if_stale() -> None:
-    """Re-fetch TSX/TSXV universe from TMX API if file is missing or >7 days old."""
-    needs_refresh = True
-    if UNIVERSE_FILE.exists():
-        age = time.time() - UNIVERSE_FILE.stat().st_mtime
-        needs_refresh = age > _UNIVERSE_MAX_AGE
-
-    if not needs_refresh:
-        try:
-            count = json.loads(UNIVERSE_FILE.read_text())["count"]
-            log(f"Universe: {count} tickers (file up to date)")
-        except Exception:
-            pass
-        return
-
-    log("Universe file missing or stale — refreshing from TMX API...")
-    try:
-        result = subprocess.run(
-            [PYTHON, str(UNIVERSE_SCRIPT)],
-            cwd=ROOT, capture_output=True, text=True, timeout=60,
-        )
-        if result.returncode == 0:
-            count = json.loads(UNIVERSE_FILE.read_text())["count"]
-            log(f"Universe updated: {count} tickers")
-            # Reload WATCHLIST with fresh data
-            import kzer_bot.grinder_strategy as _gs
-            importlib.reload(_gs)
-            from kzer_bot.grinder_strategy import WATCHLIST as _WL  # noqa: F401
-        else:
-            log(f"Universe refresh failed — using existing list: {result.stderr[:200]}")
-    except Exception as exc:
-        log(f"Universe refresh error: {exc} — using existing list")
+    """US mode — no TMX fetch needed. Log current watchlist size."""
+    log(f"US stock mode — using hardcoded NYSE/NASDAQ universe ({len(WATCHLIST)} tickers)")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -584,7 +565,7 @@ def get_ai_analysis(picks: list[GrinderPick], bias: FuturesBias,
 SETUP:
 - Date: {now_et():%Y-%m-%d}
 - US Futures bias: {bias.value.upper()} ({futures_detail})
-- Account: ~${balance:.0f} CAD  |  1 trade/day  |  all-in  |  exit 3:55 PM ET  |  no stop loss
+- Account: ~${balance:.0f} USD  |  1 trade/day  |  all-in  |  exit 3:55 PM ET  |  no stop loss
 
 TOP SCAN RESULTS (8-criteria momentum screen):
 {picks_block}
@@ -640,13 +621,14 @@ def fetch_live_balance(retries: int = 3) -> float | None:
             continue
 
         for line in r.stdout.splitlines():
-            if line.startswith("LIVE_BALANCE_CAD:"):
-                try:
-                    val = float(line[len("LIVE_BALANCE_CAD:"):].replace(",", ""))
-                    log(f"  Balance: ${val:.2f} CAD")
-                    return val
-                except ValueError:
-                    pass
+            for prefix in ("LIVE_BALANCE_USD:", "LIVE_BALANCE_CAD:"):
+                if line.startswith(prefix):
+                    try:
+                        val = float(line[len(prefix):].replace(",", ""))
+                        log(f"  Balance: ${val:.2f} USD")
+                        return val
+                    except ValueError:
+                        pass
         log(f"  Could not parse balance (attempt {attempt})")
         time.sleep(15)
 
@@ -685,17 +667,17 @@ def _log_scan_diagnostics(md: GrinderMarketData) -> None:
     log("  Top 5 by momentum score (main strategy filter failures):")
     for s in top:
         fails = []
-        if not (2.0 <= s.last_close <= 40.0):
+        if not (1.0 <= s.last_close <= 1000.0):
             fails.append(f"price=${s.last_close:.2f}")
-        if s.avg_volume_20 < 300_000:
-            fails.append(f"avgvol={s.avg_volume_20/1e3:.0f}k<300k")
+        if s.avg_volume_20 < 500_000:
+            fails.append(f"avgvol={s.avg_volume_20/1e3:.0f}k<500k")
         pct = s.yesterday_pct_change
-        if not (1.5 <= pct <= 12.0):
+        if not (1.5 <= pct <= 15.0):
             fails.append(f"pct={pct:+.1f}%")
         if s.rel_volume < 1.5:
             fails.append(f"relvol={s.rel_volume:.1f}x<1.5x")
-        if s.atr_pct < 1.5:
-            fails.append(f"atr={s.atr_pct:.1f}%<1.5%")
+        if s.atr_pct < 1.0:
+            fails.append(f"atr={s.atr_pct:.1f}%<1.0%")
         if s.last_close <= s.ema20:
             fails.append("below_ema20")
         if s.last_close <= s.ema5:
@@ -724,7 +706,7 @@ def run_scan(balance: float, scan_symbols: list[str] | None = None,
     bias, futures_detail = get_futures_bias()
     log(f"  Bias: {bias.value.upper()}  |  {futures_detail}")
 
-    log(f"Scanning {len(scan_symbols)} Canadian tickers (main 8-criteria)...")
+    log(f"Scanning {len(scan_symbols)} US tickers (NYSE/NASDAQ) (main 8-criteria)...")
     md = GrinderMarketData()
 
     # Batch-download all tickers at once (3-5x faster than sequential)
@@ -742,7 +724,7 @@ def run_scan(balance: float, scan_symbols: list[str] | None = None,
             f"{k.replace('.TO', '')}: {v:+.1f}%"
             for k, v in ctx.sector_returns.items()
         )
-        log(f"  TSX 5d: {ctx.tsx_5d_pct:+.2f}%  |  {sector_parts}")
+        log(f"  SPX 5d: {ctx.tsx_5d_pct:+.2f}%  |  {sector_parts}")
         if ctx.trending:
             log(f"  Yahoo trending: {len(ctx.trending)} TSX stocks")
     except Exception as exc:
@@ -934,25 +916,25 @@ def build_scan_message(
 
     if is_best:
         scan_line   = (
-            f"🔍 Scanned <b>{len(WATCHLIST)}</b> Canadian tickers\n"
+            f"🔍 Scanned <b>{len(WATCHLIST)}</b> US tickers (NYSE/NASDAQ)\n"
             f"   ⚠️ <b>No clean setups</b> — using Best Available pick"
         )
         pick_header = (
             f"⚠️━━━━━━━━━━━━━━━━━━━━━━━━⚠️\n"
             f"📌 <b>{day}'S PICK (Best Available): <code>{top.symbol}</code>  "
-            f"(${top.last_close:.2f} CAD)</b>\n"
+            f"(${top.last_close:.2f} USD)</b>\n"
             f"⚠️━━━━━━━━━━━━━━━━━━━━━━━━⚠️\n"
             f"<i>No stock passed normal filters — highest-scoring from full universe.\n"
             f"Trade with reduced size if desired.</i>"
         )
     else:
         scan_line   = (
-            f"🔍 Scanned <b>{len(WATCHLIST)}</b> Canadian tickers\n"
+            f"🔍 Scanned <b>{len(WATCHLIST)}</b> US tickers (NYSE/NASDAQ)\n"
             f"   ✅ <b>{len(picks)}</b> passed  |  Strategy: <b>{strategy_name}</b>"
         )
         pick_header = (
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🏆 <b>{day}'S PICK: <code>{top.symbol}</code>  (${top.last_close:.2f} CAD)</b>\n"
+            f"🏆 <b>{day}'S PICK: <code>{top.symbol}</code>  (${top.last_close:.2f} USD)</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━"
         )
 
@@ -997,7 +979,7 @@ def build_scan_message(
         )
         plan_steps.append(
             f"  2️⃣  <b>9:35 AM ET</b> — Buy <code>{top.symbol}</code>  ~${top.last_close:.2f}"
-            f"  (~{shares_est} sh,  ${deploy:.0f} CAD)"
+            f"  (~{shares_est} sh,  ${deploy:.0f} USD)"
         )
         plan_steps.append(
             f"  3️⃣  Autonomous exit — +{_PROFIT_TARGET_PCT:.0f}% target anytime or +{_LATE_LOCK_PCT:.0f}% lock at 3:55 PM"
@@ -1005,7 +987,7 @@ def build_scan_message(
     else:
         plan_steps.append(
             f"  1️⃣  <b>9:35 AM ET</b> — Buy <code>{top.symbol}</code>  ~${top.last_close:.2f}"
-            f"  (~{shares_est} sh,  ${deploy:.0f} CAD)"
+            f"  (~{shares_est} sh,  ${deploy:.0f} USD)"
         )
         plan_steps.append(
             f"  2️⃣  Autonomous exit — +{_PROFIT_TARGET_PCT:.0f}% target anytime or +{_LATE_LOCK_PCT:.0f}% lock at 3:55 PM  |  Intraday rotation enabled"
@@ -1018,9 +1000,9 @@ def build_scan_message(
         f"📅 <b>{plan_title}  @pmarx</b>\n"
         f"{plan_body}\n\n"
         f"  📡 Futures: <b>{bias.value.upper()}</b>  |  Strategy: <b>{strategy_name}</b>\n"
-        f"  💰 Budget: <b>${balance:.2f}</b>  →  deploying <b>{_DEPLOY_PCT}%</b> = <b>${deploy:.2f} CAD</b>\n"
+        f"  💰 Budget: <b>${balance:.2f}</b>  →  deploying <b>{_DEPLOY_PCT}%</b> = <b>${deploy:.2f} USD</b>\n"
         f"  🎯 Target: <b>+1.5% to +3%</b> momentum continuation\n\n"
-        f"{at_color} All-time PnL: <b>${at_pnl:+.2f} CAD</b>"
+        f"{at_color} All-time PnL: <b>${at_pnl:+.2f} USD</b>"
         f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
     )
 
@@ -1051,9 +1033,9 @@ def build_buy_message(
         f"🏢 <b>{_company_line(pick.symbol)}</b>\n"
         f"📝 {_company_details(pick.symbol)}\n\n"
         f"⏰ <b>{entry_mode}</b>\n"
-        f"💵 Entry: ~<b>${pick.last_close:.2f} CAD</b>\n"
+        f"💵 Entry: ~<b>${pick.last_close:.2f} USD</b>\n"
         f"🔢 Est. shares: ~<b>{shares_est}</b>  ({_DEPLOY_PCT}% of ${balance:.2f})\n"
-        f"💰 Deploying: <b>${deploy:.2f} CAD</b>\n\n"
+        f"💰 Deploying: <b>${deploy:.2f} USD</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>EDGE FOR THIS TRADE:</b>\n"
         f"  ✅ Yesterday: <b>{pick.yesterday_pct:+.2f}%</b>  on  <b>{pick.rel_volume:.1f}× volume</b> → continuation setup\n"
@@ -1122,10 +1104,10 @@ def build_update_message(
     return (
         f"{color} <b>Position Update — <code>{symbol}</code></b>  |  {now_et():%H:%M} ET\n\n"
         f"  {arrow} Price: <b>${price:.2f}</b>  (entry ${entry:.2f})\n"
-        f"  {color} Unrealized P&L: <b>${unrealized:+.2f} CAD ({pnl_pct:+.2f}%)</b>\n"
-        f"  💼 Position value: <b>${shares * price:.2f} CAD</b>\n\n"
+        f"  {color} Unrealized P&L: <b>${unrealized:+.2f} USD ({pnl_pct:+.2f}%)</b>\n"
+        f"  💼 Position value: <b>${shares * price:.2f} USD</b>\n\n"
         f"  ⏰ Selling in <b>{time_str}</b>  ({sell_label})\n"
-        f"  {at_color} All-time: <b>${stats['total_pnl']:+.2f} CAD</b>"
+        f"  {at_color} All-time: <b>${stats['total_pnl']:+.2f} USD</b>"
         f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
     )
 
@@ -1144,15 +1126,15 @@ def build_sell_message(
     return (
         f"🏁 <b>ALL SOLD — <code>{symbol}</code></b>\n\n"
         f"  ⏰ 3:55 PM ET — Hard close executed\n"
-        f"  Entry: ${entry:.2f}  →  Exit: <b>${exit_price:.2f} CAD</b>\n"
+        f"  Entry: ${entry:.2f}  →  Exit: <b>${exit_price:.2f} USD</b>\n"
         f"  🔢 Shares sold: {shares:.4f}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>TODAY'S RESULT:</b>\n"
-        f"  {color} P&L: <b>${trade_pnl:+.2f} CAD ({pnl_pct:+.2f}%)</b>\n"
+        f"  {color} P&L: <b>${trade_pnl:+.2f} USD ({pnl_pct:+.2f}%)</b>\n"
         f"  💰 Invested: ${cost:.2f}  →  Proceeds: <b>${proceeds:.2f}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>ACCOUNT:</b>\n"
-        f"  {at_color} All-time PnL: <b>${at_pnl:+.2f} CAD</b>"
+        f"  {at_color} All-time PnL: <b>${at_pnl:+.2f} USD</b>"
         f"  ({stats['total_pnl_pct']:+.2f}% ROI)\n"
         f"  🏆 Record: <b>{stats['wins']}W / {stats['losses']}L</b>"
         f"  ({win_rate:.0f}% win rate)  |  {stats['count']} total trades\n"
@@ -1256,10 +1238,10 @@ def execute_buy(pick: GrinderPick, balance: float, bias: FuturesBias,
     notify(
         f"✅ <b>Buy order submitted</b>\n\n"
         f"🎫 <code>{pick.symbol}</code>\n"
-        f"🔢 Shares: <b>{actual_qty:.4f}</b>  |  💵 Entry: <b>${pick.last_close:.2f} CAD</b>\n"
-        f"💰 Invested: <b>${actual_cost:.2f} CAD</b>\n"
+        f"🔢 Shares: <b>{actual_qty:.4f}</b>  |  💵 Entry: <b>${pick.last_close:.2f} USD</b>\n"
+        f"💰 Invested: <b>${actual_cost:.2f} USD</b>\n"
         f"🎯 Target: <b>+{_PROFIT_TARGET_PCT:.0f}%</b>  |  3:55 PM lock if +{_LATE_LOCK_PCT:.0f}%  |  No stop loss\n\n"
-        f"{at_color} All-time PnL: <b>${at_pnl:+.2f} CAD</b>"
+        f"{at_color} All-time PnL: <b>${at_pnl:+.2f} USD</b>"
     )
     log(f"Buy confirmed: {actual_qty:.4f} sh @ ${pick.last_close:.2f}  cost ${actual_cost:.2f}")
     return True
@@ -1274,7 +1256,7 @@ def wait_for_fill_confirm(symbol: str) -> None:
         time.sleep(secs)
     log("Confirming fill at 9:45 AM...")
     balance = fetch_live_balance(retries=2)
-    bal_str = f"${balance:.2f} CAD" if balance else "N/A"
+    bal_str = f"${balance:.2f} USD" if balance else "N/A"
     notify(
         f"✅ <b>Graphite order filled!</b>\n\n"
         f"🎫 <code>{symbol}</code>  filled at market open\n"
@@ -1299,6 +1281,281 @@ def wait_after_pick(pick: GrinderPick, bias: FuturesBias, futures_detail: str) -
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# After-hours / extended-hours trading
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _is_afterhours_window() -> bool:
+    """True if we're in the weekday 4:00 PM – 7:30 PM ET after-hours window."""
+    n = now_et()
+    if n.weekday() >= 5:
+        return False
+    after_open  = n.hour >= _AH_BUY_START_HOUR
+    before_close = n.hour < _AH_BUY_END_HOUR or (
+        n.hour == _AH_BUY_END_HOUR and n.minute < _AH_BUY_END_MINUTE
+    )
+    return after_open and before_close
+
+
+def _scan_afterhours(watchlist: list[str]) -> list[dict]:
+    """
+    Scan top tickers for after-hours momentum.
+    Returns list of dicts sorted by AH gain, filtered to min _AH_MIN_PCT.
+    Uses yf fast_info (one-by-one but lightweight) for speed.
+    """
+    import yfinance as yf
+    picks = []
+    subset = watchlist[:_AH_WATCHLIST_SIZE]
+    log(f"After-hours scan: checking {len(subset)} tickers...")
+    for sym in subset:
+        try:
+            fi = yf.Ticker(sym).fast_info
+            close = fi.previous_close
+            last  = fi.last_price
+            if not close or not last or close <= 0:
+                continue
+            ah_pct = (last / close - 1) * 100
+            if ah_pct < _AH_MIN_PCT:
+                continue
+            picks.append({
+                "symbol":  sym,
+                "close":   round(close, 4),
+                "ah_price": round(last, 4),
+                "ah_pct":  round(ah_pct, 2),
+                "score":   round(ah_pct, 2),
+            })
+        except Exception:
+            pass
+    picks.sort(key=lambda x: x["score"], reverse=True)
+    return picks
+
+
+def _afterhours_buy(pick: dict, balance: float) -> bool:
+    """Place a limit buy order during extended hours for the given AH pick."""
+    sym        = pick["symbol"]
+    ah_price   = pick["ah_price"]
+    limit_price = round(ah_price * (1 + _AH_LIMIT_PREMIUM), 2)
+    shares_est  = max(1, int(balance / limit_price))
+
+    notify(
+        f"🌙 <b>After-hours limit BUY — <code>{sym}</code></b>\n\n"
+        f"📈 AH gain: <b>+{pick['ah_pct']:.2f}%</b>  from close ${pick['close']:.2f}\n"
+        f"💵 Current AH price: ${ah_price:.2f}  |  Limit: <b>${limit_price:.2f}</b>\n"
+        f"📦 ~{shares_est} shares  |  💰 ~${balance:.0f} USD\n"
+        f"🎯 AH profit target: +{_AH_PROFIT_PCT:.0f}%  |  Fallback: sell at 9:35 AM"
+    )
+
+    buy_result = subprocess.run(
+        [
+            PYTHON, str(AUTO_SCRIPT), "buy",
+            "--symbol", sym,
+            "--shares", str(shares_est),
+            "--price",  f"{limit_price:.2f}",
+        ],
+        capture_output=True, text=True, timeout=180,
+    )
+    for line in buy_result.stdout.splitlines():
+        print(f"  {line}", flush=True)
+
+    order_data = _parse_order_result(buy_result.stdout)
+    if not order_data.get("submitted") and buy_result.returncode != 0:
+        log(f"AH buy failed for {sym}")
+        notify(f"❌ After-hours buy failed for <code>{sym}</code>.")
+        return False
+
+    actual_shares = float(order_data.get("estimated_quantity") or shares_est)
+    actual_value  = float(order_data.get("estimated_value") or (actual_shares * limit_price))
+    actual_price  = actual_value / actual_shares if actual_shares else limit_price
+
+    pos = {
+        "symbol":        sym,
+        "buyPrice":      actual_price,
+        "shares":        actual_shares,
+        "estimatedCost": actual_value,
+        "sellAll":       True,
+        "strategyName":  "After-Hours Limit",
+        "afterHours":    True,
+        "time":          now_et().isoformat(),
+    }
+    POS_FILE.write_text(json.dumps(pos, indent=2))
+    _append_trade_history(sym, "BUY", actual_price, actual_shares, actual_value, 0.0, "After-Hours Limit")
+
+    log(f"AH buy confirmed: {actual_shares:.4f} sh {sym} @ ${actual_price:.2f}  cost ${actual_value:.2f}")
+    notify(
+        f"✅ <b>AH buy confirmed — <code>{sym}</code></b>\n\n"
+        f"💰 {actual_shares:.4f} sh @ ${actual_price:.2f}  (cost ${actual_value:.2f})\n"
+        f"🎯 Profit target: +{_AH_PROFIT_PCT:.0f}%  |  Exits at 9:35 AM if not hit"
+    )
+    return True
+
+
+def _afterhours_sell_limit(symbol: str, entry: float, shares: float, cost: float,
+                            limit_price: float, label: str = "AH target") -> bool:
+    """Place a limit sell order during extended hours."""
+    notify(
+        f"🎯 <b>AH limit SELL — <code>{symbol}</code></b>\n\n"
+        f"📉 Limit: <b>${limit_price:.2f}</b>  |  Entry: ${entry:.2f}\n"
+        f"💰 Reason: {label}"
+    )
+    sell_result = subprocess.run(
+        [
+            PYTHON, str(AUTO_SCRIPT), "sell",
+            "--symbol", symbol,
+            "--sell-all",
+            "--price", f"{limit_price:.2f}",
+        ],
+        capture_output=True, text=True, timeout=180,
+    )
+    for line in sell_result.stdout.splitlines():
+        print(f"  {line}", flush=True)
+
+    order_data = _parse_order_result(sell_result.stdout)
+    submitted  = order_data.get("submitted") or sell_result.returncode == 0
+    if not submitted:
+        log(f"AH limit sell failed for {symbol}")
+        notify(f"⚠️ AH limit sell order failed for <code>{symbol}</code> — will retry at 9:31 AM.")
+        return False
+
+    actual_qty   = float(order_data.get("estimated_quantity") or shares)
+    actual_value = float(order_data.get("estimated_value") or (actual_qty * limit_price))
+    actual_price = actual_value / actual_qty if actual_qty else limit_price
+    trade_pnl    = actual_value - cost
+    at_pnl       = _record_trade(symbol, cost, actual_value, actual_qty)
+
+    _append_trade_history(symbol, "SELL", actual_price, actual_qty, cost, trade_pnl, "After-Hours Limit")
+    POS_FILE.unlink(missing_ok=True)
+    notify(build_sell_message(symbol, entry, actual_price, actual_qty, cost, trade_pnl, at_pnl))
+    log(f"AH sell confirmed: ${trade_pnl:+.2f} trade P&L  |  All-time: ${at_pnl:+.2f}")
+    return True
+
+
+def _afterhours_hold_loop(symbol: str, entry: float, shares: float,
+                           cost: float, strat: str) -> None:
+    """
+    Monitor an after-hours position every 10 min.
+    Sell immediately at +3% via limit order, else hold to 7:45 PM then overnight.
+    """
+    import yfinance as yf
+
+    log(f"AH hold loop: {symbol}  {shares:.4f} sh @ ${entry:.2f}")
+    notify(
+        f"📊 <b>After-hours position</b> — <code>{symbol}</code>\n\n"
+        f"💰 {shares:.4f} sh @ ${entry:.2f}  |  cost ${cost:.2f}\n"
+        f"🎯 AH profit target: +{_AH_PROFIT_PCT:.0f}%  |  Auto-sell at 7:45 PM or 9:35 AM"
+    )
+
+    while True:
+        n = now_et()
+        # At 7:45 PM → AH window closing, hold overnight and let 9:31 AM handle it
+        past_ah_close = n.hour > 19 or (n.hour == 19 and n.minute >= 45)
+        if past_ah_close:
+            log(f"AH window closed — {symbol} held overnight, 9:31 AM decision tomorrow")
+            notify(
+                f"🌙 <b>AH window closed — holding overnight</b>\n\n"
+                f"🎫 <code>{symbol}</code>  @ ${entry:.2f}\n"
+                f"📋 No stop loss — morning decision at <b>9:31 AM ET</b>"
+            )
+            return
+
+        # Check profit target every cycle
+        try:
+            fi    = yf.Ticker(symbol).fast_info
+            price = fi.last_price
+            if price and entry > 0:
+                pnl_pct = (price - entry) / entry * 100
+                if pnl_pct >= _AH_PROFIT_PCT:
+                    log(f"AH PROFIT TARGET: {pnl_pct:+.1f}% — limit sell now")
+                    notify(
+                        f"🎯 <b>AH PROFIT TARGET HIT — <code>{symbol}</code></b>\n\n"
+                        f"📈 {pnl_pct:+.1f}%  |  AH price: ${price:.2f}\n"
+                        f"💰 Placing limit sell at ${price:.2f}"
+                    )
+                    _afterhours_sell_limit(symbol, entry, shares, cost, round(price, 2), "AH profit target")
+                    return
+                log(f"AH update: {symbol}  ${price:.2f}  ({pnl_pct:+.2f}%)")
+        except Exception as exc:
+            log(f"AH price check error: {exc}")
+
+        time.sleep(600)  # 10-min intervals during AH
+
+
+def _run_afterhours_strategy(balance: float, sell_existing: bool = False) -> None:
+    """
+    Full after-hours routine:
+    1. If sell_existing → limit-sell the current position first.
+    2. Scan for best AH mover, place limit buy.
+    3. Monitor with _afterhours_hold_loop().
+    """
+    if not _is_afterhours_window():
+        log("Not in AH window — skipping after-hours strategy.")
+        return
+
+    # ── Step 1: limit-sell the existing position ──────────────────────────
+    if sell_existing and POS_FILE.exists():
+        try:
+            pos    = json.loads(POS_FILE.read_text())
+            sym    = pos["symbol"]
+            entry  = float(pos.get("buyPrice", 0))
+            shares = float(pos.get("shares", 0))
+            cost   = float(pos.get("estimatedCost", shares * entry))
+
+            import yfinance as yf
+            fi  = yf.Ticker(sym).fast_info
+            ah  = fi.last_price or entry
+            limit_price = round(max(ah, entry * 1.003), 2)  # at least entry+0.3%
+
+            log(f"AH limit sell of existing position: {sym} @ ${limit_price:.2f}")
+            sold = _afterhours_sell_limit(sym, entry, shares, cost,
+                                           limit_price, "AH strategy entry")
+            if not sold:
+                log("AH sell of existing position failed — not placing new AH buy.")
+                return
+        except Exception as exc:
+            log(f"AH sell step error: {exc}")
+            return
+
+    # ── Step 2: scan for best AH mover ────────────────────────────────────
+    if POS_FILE.exists():
+        log("Position still open after AH sell attempt — skipping AH buy scan.")
+        return
+
+    from kzer_bot.grinder_strategy import _load_watchlist
+    watchlist = _load_watchlist()
+    picks = _scan_afterhours(watchlist)
+
+    if not picks:
+        log("No AH picks found — holding cash until market open.")
+        notify(
+            f"🌙 <b>After-hours scan complete</b>\n\n"
+            f"No tickers meet the +{_AH_MIN_PCT:.1f}% AH threshold — holding cash.\n"
+            f"📅 Next entry: <b>9:35 AM ET tomorrow</b>"
+        )
+        return
+
+    top = picks[:5]
+    top_str = "\n".join(
+        f"  • <code>{p['symbol']}</code>  AH: <b>+{p['ah_pct']:.2f}%</b>  @ ${p['ah_price']:.2f}"
+        for p in top
+    )
+    log(f"AH top picks: {[p['symbol'] for p in top]}")
+    notify(
+        f"🔍 <b>After-hours scan results</b>\n\n"
+        f"{top_str}\n\n"
+        f"🛒 Buying top pick: <b>{top[0]['symbol']}</b>"
+    )
+
+    bought = _afterhours_buy(top[0], balance)
+    if not bought:
+        return
+
+    # ── Step 3: monitor the AH position ───────────────────────────────────
+    pos    = json.loads(POS_FILE.read_text())
+    entry  = float(pos.get("buyPrice", top[0]["ah_price"]))
+    shares = float(pos.get("shares", 1))
+    cost   = float(pos.get("estimatedCost", balance))
+    _afterhours_hold_loop(top[0]["symbol"], entry, shares, cost, "After-Hours Limit")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Sell execution helper (used for both 9:31 AM overnight sell and 3:55 PM sell)
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -1315,7 +1572,7 @@ def _execute_sell_order(
     notify(
         f"⏳ <b>Closing at {label}</b>\n\n"
         f"🎫 <code>{symbol}</code>  |  💵 ${exit_price:.2f}\n"
-        f"{_pnl_arrow(unrealized)} Est. P&L: <b>${unrealized:+.2f} CAD ({pnl_pct:+.2f}%)</b>"
+        f"{_pnl_arrow(unrealized)} Est. P&L: <b>${unrealized:+.2f} USD ({pnl_pct:+.2f}%)</b>"
     )
 
     sell_result = None
@@ -1504,7 +1761,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
             notify(
                 f"⏳ <b>Order placed — pending fill at open</b>\n\n"
                 f"🎫 <code>{symbol}</code>  {shares:.4f} sh @ ~${entry:.2f}\n"
-                f"💰 Deploying: <b>${cost:.2f} CAD</b>  |  📋 {strat}\n"
+                f"💰 Deploying: <b>${cost:.2f} USD</b>  |  📋 {strat}\n"
                 f"📋 Pre-market order — fills at <b>9:30 AM ET open</b>  ({mins_to_open} min)\n"
                 f"🔄 Morning decision at <b>9:31 AM ET</b> — hold if trending or rotate to new pick\n"
                 f"🎯 Target: +{_PROFIT_TARGET_PCT:.0f}%  |  3:55 PM lock: +{_LATE_LOCK_PCT:.0f}%  |  No stop loss"
@@ -1513,7 +1770,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
             notify(
                 f"📊 <b>Position open — overnight hold</b>\n\n"
                 f"🎫 <code>{symbol}</code>  |  {shares:.4f} sh @ ${entry:.2f}\n"
-                f"💰 Cost: <b>${cost:.2f} CAD</b>  |  📋 {strat}\n"
+                f"💰 Cost: <b>${cost:.2f} USD</b>  |  📋 {strat}\n"
                 f"🔄 Morning decision at <b>9:31 AM ET</b> — hold if trending or rotate to new pick\n"
                 f"🎯 Target: +{_PROFIT_TARGET_PCT:.0f}%  |  3:55 PM lock: +{_LATE_LOCK_PCT:.0f}%  |  No stop loss"
             )
@@ -1559,7 +1816,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
                             notify(
                                 f"⏳ <b>Order Pending — <code>{symbol}</code></b>  |  {cur2:%H:%M} ET\n\n"
                                 f"📋 Pre-market order fills at <b>9:30 AM ET open</b>\n"
-                                f"🎫 {shares:.4f} sh @ ~${entry:.2f}  |  💰 ${cost:.2f} CAD\n"
+                                f"🎫 {shares:.4f} sh @ ~${entry:.2f}  |  💰 ${cost:.2f} USD\n"
                                 f"⏰ Market opens in <b>{mins_left} min</b>\n"
                                 f"🔄 Sell at 9:31 AM → buy new pick at 9:35 AM"
                             )
@@ -1583,7 +1840,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
     notify(
         f"📊 <b>Position open — autonomous hold</b>\n\n"
         f"🎫 <code>{symbol}</code>  |  {shares:.4f} sh @ ${entry:.2f}\n"
-        f"💰 Cost: <b>${cost:.2f} CAD</b>  |  📋 {strat}\n"
+        f"💰 Cost: <b>${cost:.2f} USD</b>  |  📋 {strat}\n"
         f"🎯 Profit target: <b>+{_PROFIT_TARGET_PCT:.0f}%</b>  |  "
         f"Late lock: <b>+{_LATE_LOCK_PCT:.0f}%</b> at 3:55 PM\n"
         f"🌙 Below target at 3:55 PM → hold overnight, no stop loss"
@@ -1612,6 +1869,22 @@ def hold_and_sell(balance: float = 0.0) -> None:
                     f"⏰ Morning decision at <b>9:31 AM tomorrow</b>"
                 )
             return
+
+        # ── forceSell flag check — immediate exit ─────────────────────────
+        if POS_FILE.exists():
+            try:
+                _pos_check = json.loads(POS_FILE.read_text())
+                if _pos_check.get("forceSell"):
+                    log(f"forceSell flag detected — selling {symbol} immediately")
+                    notify(
+                        f"🔄 <b>Force sell triggered — <code>{symbol}</code></b>\n\n"
+                        f"📋 Position flagged for immediate exit\n"
+                        f"🔍 Will scan for new pick after sell..."
+                    )
+                    _execute_sell_order(symbol, entry, shares, cost, strat, "Force Sell")
+                    return
+            except Exception:
+                pass
 
         # ── 30-min update + profit target check ───────────────────────────
         if time.time() - last_update_t >= UPDATE_INTERVAL:
@@ -1744,7 +2017,7 @@ def main() -> None:
         description="Le Grinder — 1 trade/day, no stop, 3:55 PM exit"
     )
     parser.add_argument("--balance", type=float, default=None,
-                        help="Cash in CAD (default: live fetch from Wealthsimple)")
+                        help="Cash in USD (default: live fetch from Wealthsimple)")
     parser.add_argument("--now", "--buy-now", action="store_true",
                         help="Skip all waiting and buy immediately (debug)")
     parser.add_argument("--ticker", type=str, default=None,
@@ -1800,7 +2073,7 @@ def main() -> None:
         "startingBalance": balance,
         "startTime": now_et().isoformat(),
     }))
-    log(f"Starting balance: ${balance:.2f} CAD")
+    log(f"Starting balance: ${balance:.2f} USD")
 
     stats = _get_trade_stats()
     at_color = _pnl_color(stats["total_pnl"])
@@ -1808,54 +2081,65 @@ def main() -> None:
     if args.ticker:
         notify(
             f"🎯 <b>Le Grinder — Single-Ticker Mode</b>\n\n"
-            f"💰 Balance: <b>${balance:.2f} CAD</b>\n"
+            f"💰 Balance: <b>${balance:.2f} USD</b>\n"
             f"📋 Target: <b>{args.ticker.upper()}</b>\n"
             f"⏰ Buying immediately — no scan, no wait\n"
             f"🎯 Exit: +{_PROFIT_TARGET_PCT:.0f}% target  |  3:55 PM lock if +{_LATE_LOCK_PCT:.0f}%  |  Intraday rotation  |  No stop loss\n\n"
-            f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} CAD</b>"
+            f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} USD</b>"
             f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
         )
     elif args.yahoo:
         notify(
             f"🚀 <b>Le Grinder started — Yahoo Most Active Mode</b>\n\n"
-            f"💰 Balance: <b>${balance:.2f} CAD</b>\n"
+            f"💰 Balance: <b>${balance:.2f} USD</b>\n"
             f"📋 Watchlist: <b>{len(WATCHLIST)} tickers</b>  (Yahoo most active CA — volume sorted)\n"
             f"📐 Strategy: 8-criteria momentum screen  +  Claude AI analysis\n"
             f"⏰ Entry: 9:31 AM ET every weekday\n"
             f"🎯 Exit: +{_PROFIT_TARGET_PCT:.0f}% target  |  3:55 PM lock if +{_LATE_LOCK_PCT:.0f}%  |  Intraday rotation  |  No stop loss\n\n"
-            f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} CAD</b>"
+            f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} USD</b>"
             f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
         )
     elif args.lite:
         notify(
             f"🚀 <b>Le Grinder started — Lite Mode</b>\n\n"
-            f"💰 Balance: <b>${balance:.2f} CAD</b>\n"
+            f"💰 Balance: <b>${balance:.2f} USD</b>\n"
             f"📋 Watchlist: <b>{len(WATCHLIST)} tickers</b>  (hardcoded — no rate limits)\n"
             f"📐 Strategy: 8-criteria momentum screen  +  Claude AI analysis\n"
             f"⏰ Entry: 9:31 AM ET every weekday\n"
             f"🎯 Exit: +{_PROFIT_TARGET_PCT:.0f}% target  |  3:55 PM lock if +{_LATE_LOCK_PCT:.0f}%  |  Intraday rotation  |  No stop loss\n\n"
-            f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} CAD</b>"
+            f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} USD</b>"
             f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
         )
     else:
         notify(
             f"🚀 <b>Le Grinder started successfully</b>\n\n"
-            f"💰 Balance: <b>${balance:.2f} CAD</b>\n"
-            f"📋 Watchlist: <b>{len(WATCHLIST)} Canadian tickers</b>  (TSX / TSXV / NEO)\n"
+            f"💰 Balance: <b>${balance:.2f} USD</b>\n"
+            f"📋 Watchlist: <b>{len(WATCHLIST)} US tickers (NYSE/NASDAQ)</b>  (TSX / TSXV / NEO)\n"
             f"📐 Strategy: 8-criteria momentum screen  +  Claude AI analysis\n"
             f"⏰ Entry: 9:31 AM ET every weekday\n"
             f"🎯 Exit: +{_PROFIT_TARGET_PCT:.0f}% target  |  3:55 PM lock if +{_LATE_LOCK_PCT:.0f}%  |  Intraday rotation  |  No stop loss\n\n"
-            f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} CAD</b>"
+            f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} USD</b>"
             f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
         )
 
     # ── Resume open position ───────────────────────────────────────────────
     if POS_FILE.exists():
-        pos = json.loads(POS_FILE.read_text())
+        pos  = json.loads(POS_FILE.read_text())
         _now = now_et()
         _pre_open = _now.hour < 9 or (_now.hour == 9 and _now.minute < 30)
         log(f"Open position found: {pos['symbol']} — resuming hold/sell loop.")
-        if _pre_open:
+
+        if _is_afterhours_window():
+            # After-hours window: limit-sell existing position then scan for AH buy
+            log("After-hours window — running AH strategy on existing position.")
+            notify(
+                f"🌙 <b>After-hours window detected</b>\n\n"
+                f"🎫 Holding <code>{pos['symbol']}</code>  "
+                f"{pos.get('shares', 0):.4f} sh @ ${pos.get('buyPrice', 0):.2f}\n"
+                f"💡 Attempting limit sell + AH rotation..."
+            )
+            _run_afterhours_strategy(balance, sell_existing=True)
+        elif _pre_open:
             _open_t = _now.replace(hour=9, minute=30, second=0, microsecond=0)
             _mins = max(0, int((_open_t - _now).total_seconds() / 60))
             notify(
@@ -1865,6 +2149,7 @@ def main() -> None:
                 f"📋 Pre-market order fills at <b>9:30 AM ET open</b>  ({_mins} min)\n"
                 f"🎯 Autonomous exit: +{_PROFIT_TARGET_PCT:.0f}% target  |  lock at 3:55 PM if +{_LATE_LOCK_PCT:.0f}%"
             )
+            hold_and_sell(balance=balance)
         else:
             notify(
                 f"▶️ <b>Bot restarted — resuming position</b>\n\n"
@@ -1872,9 +2157,8 @@ def main() -> None:
                 f"{pos.get('shares', 0):.4f} sh @ ${pos.get('buyPrice', 0):.2f}\n"
                 f"🎯 Autonomous: +{_PROFIT_TARGET_PCT:.0f}% target  |  +{_LATE_LOCK_PCT:.0f}% lock at 3:55 PM"
             )
-        hold_and_sell(balance=balance)
-        if not POS_FILE.exists():
-            POS_FILE.unlink(missing_ok=True)
+            hold_and_sell(balance=balance)
+        # nothing to clean up here — hold_and_sell / AH strategy manages pos file
 
     # ── Single-ticker mode (skip 4000-stock scan, buy immediately) ────────
     if args.ticker:
@@ -1931,7 +2215,7 @@ def main() -> None:
             f"⚡ <b>Le Grinder — BUY TODAY Mode</b>\n\n"
             f"Scanning <b>{len(WATCHLIST)}</b> tickers and buying <b>immediately</b>.\n"
             f"⚡ No timing wait — scan → buy → autonomous exit → intraday rotation\n"
-            f"💰 Balance: <b>${balance:.2f} CAD</b>"
+            f"💰 Balance: <b>${balance:.2f} USD</b>"
         )
 
     # ── Main loop ─────────────────────────────────────────────────────────
@@ -2046,7 +2330,14 @@ def main() -> None:
             _now = now_et()
             _cutoff = _now.replace(hour=15, minute=30, second=0, microsecond=0)
             if not (_now.weekday() < 5 and _now < _cutoff):
-                log("Position closed — no time for intraday rotation, entering overnight loop.")
+                log("Position closed — no time for intraday rotation.")
+                # After-hours window: scan for AH momentum play
+                if _is_afterhours_window():
+                    log("AH window open — running after-hours strategy.")
+                    fresh_ah = fetch_live_balance(retries=2)
+                    if fresh_ah:
+                        balance = fresh_ah
+                    _run_afterhours_strategy(balance, sell_existing=False)
                 break
 
             log("Position closed with time remaining — scanning for next intraday mover...")

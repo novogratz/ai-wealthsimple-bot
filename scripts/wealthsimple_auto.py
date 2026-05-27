@@ -273,41 +273,39 @@ def get_live_balance(page) -> float | None:
     page.wait_for_timeout(6000)
     snap(page, "balance_check_home")
 
-    # Try multiple strategies to find the balance
+    # Find the highest USD balance across all Non-registered accounts on the home page
     text = page.locator("body").inner_text()
 
-    # Strategy 1: Look for "Unregistered" followed by a dollar amount
-    # Patterns to try:
-    patterns = [
-        r"Unregistered.*?\$([0-9,.]+)",
-        r"Non-registered.*?\$([0-9,.]+)",
-        r"Personal.*?\$([0-9,.]+)",
-        r"Available to trade.*?\$([0-9,.]+)",
-    ]
+    # Strategy 1: Find all Non-registered/Unregistered/Personal lines with a USD amount,
+    # then return the largest USD value (the account we'll trade from)
+    try:
+        best_usd = 0.0
+        for m in re.finditer(
+            r"(Non-registered|Unregistered|Personal)[^\n]*?\$([0-9,.]+)\s*USD",
+            text, flags=re.IGNORECASE
+        ):
+            val = parse_money(m.group(2))
+            if val is not None and val > best_usd:
+                best_usd = val
+        if best_usd > 0:
+            print(f"  Found best Non-registered USD balance: ${best_usd:.2f}")
+            return best_usd
+    except Exception:
+        pass
 
-    for pattern in patterns:
+    # Strategy 2: Available to trade (fallback)
+    for pattern in [
+        r"Available to trade\s+\$?([0-9,.]+)",
+        r"Non-registered.*?\$([0-9,.]+)",
+        r"Unregistered.*?\$([0-9,.]+)",
+        r"Personal.*?\$([0-9,.]+)",
+    ]:
         match = re.search(pattern, text, flags=re.DOTALL | re.IGNORECASE)
         if match:
             val = parse_money(match.group(1))
             if val is not None and val > 0:
                 print(f"  Found balance using pattern '{pattern}': ${val}")
                 return val
-
-    # Strategy 2: Look for specific data-testids or roles if available
-    try:
-        # Wealthsimple often uses specific components for account rows
-        rows = page.locator('[data-testid*="account-row"], [role="link"]:has-text("Unregistered")').all()
-        for row in rows:
-            row_text = row.inner_text()
-            if "Unregistered" in row_text or "Non-registered" in row_text:
-                match = re.search(r"\$([0-9,.]+)", row_text)
-                if match:
-                    val = parse_money(match.group(1))
-                    if val is not None:
-                        print(f"  Found balance in account row: ${val}")
-                        return val
-    except Exception:
-        pass
 
     return None
 
@@ -435,8 +433,8 @@ def cmd_balance(_args) -> None:
 
             balance = get_live_balance(page)
             if balance is not None:
-                print(f"LIVE_BALANCE_CAD:{balance:.2f}")
-                print(f"[OK] Live balance fetched: ${balance:.2f} CAD")
+                print(f"LIVE_BALANCE_USD:{balance:.2f}")
+                print(f"[OK] Live balance fetched: ${balance:.2f} USD")
             else:
                 print("[ERROR] Could not find balance on page.")
                 snap(page, "balance_fail")
@@ -556,35 +554,60 @@ def choose_unregistered_account(page, side: str) -> None:
     page.wait_for_timeout(900)
     snap(page, f"{side}_acct_picker")
 
-    # Use JS to directly click the first Non-registered / Unregistered option in the DOM.
-    # Coordinate-based clicks land on elements behind the picker overlay.
-    for label in ["Non-registered", "Unregistered", "Personal"]:
-        found = page.evaluate(f"""
-            () => {{
-                const all = [
-                    ...document.querySelectorAll('[role="option"]'),
-                    ...document.querySelectorAll('li'),
-                    ...document.querySelectorAll('button'),
-                ];
-                for (const el of all) {{
-                    if (el.textContent.trim().startsWith('{label}') || el.innerText?.includes('{label}')) {{
-                        const radio = el.querySelector('input[type="radio"]');
-                        if (radio) {{ radio.click(); return true; }}
-                        el.click();
-                        return true;
-                    }}
-                }}
-                return false;
-            }}
-        """)
-        if found:
-            page.wait_for_timeout(700)
-            snap(page, f"{side}_acct_selected")
-            print(f"  Selected {label} account via JS click")
-            return
+    # Pick the Non-registered / Unregistered / Personal account with the highest USD balance.
+    # "USD" alone must NOT be used as a search term — every account row contains the word "USD"
+    # and it would match TFSA ($0.00 USD) before the real trading account.
+    found = page.evaluate("""
+        () => {
+            const all = [
+                ...document.querySelectorAll('[role="option"]'),
+                ...document.querySelectorAll('li'),
+            ];
+
+            let bestEl  = null;
+            let bestUsd = -1;
+
+            for (const el of all) {
+                const text = (el.textContent || el.innerText || '').trim();
+                // Skip registered accounts
+                if (/^(TFSA|RRSP|FHSA|LIRA|RESP|RDSP)/i.test(text)) continue;
+                // Must be a non-registered flavour
+                if (!/^(Non-registered|Unregistered|Personal)/i.test(text)) continue;
+
+                // Parse USD amount — e.g. "$66.52 USD" or "$102.47USD"
+                const m = text.match(/\\$([0-9][0-9,.]*)\\s*USD/);
+                const usd = m ? parseFloat(m[1].replace(/,/g, '')) : 0;
+
+                if (usd > bestUsd) { bestUsd = usd; bestEl = el; }
+            }
+
+            // If no USD found in any account, fall back to first non-registered
+            if (!bestEl) {
+                for (const el of all) {
+                    const text = (el.textContent || el.innerText || '').trim();
+                    if (/^(TFSA|RRSP|FHSA|LIRA|RESP|RDSP)/i.test(text)) continue;
+                    if (/^(Non-registered|Unregistered|Personal)/i.test(text)) {
+                        bestEl = el; break;
+                    }
+                }
+            }
+
+            if (!bestEl) return false;
+            const radio = bestEl.querySelector('input[type="radio"]');
+            if (radio) { radio.click(); return true; }
+            bestEl.click();
+            return true;
+        }
+    """)
+
+    if found:
+        page.wait_for_timeout(700)
+        snap(page, f"{side}_acct_selected")
+        print("  Selected Non-registered (highest USD) account via JS click")
+        return
 
     snap(page, f"{side}_acct_fail")
-    raise RuntimeError(f"Unregistered account not found - see data/screen_{side}_acct_fail.png")
+    raise RuntimeError(f"Non-registered account not found - see data/screen_{side}_acct_fail.png")
 
 
 def place_order(
@@ -614,8 +637,8 @@ def place_order(
     page.wait_for_timeout(800)
     snap(page, f"{side}_tab")
 
-    if price is not None and side == "buy":
-        print("Switching to Limit order...")
+    if price is not None:
+        print(f"Switching to Limit order ({side})...")
         try:
             page.locator('button:has-text("Market")').first.click(timeout=3000)
             page.wait_for_timeout(400)
@@ -627,6 +650,30 @@ def place_order(
             print(f"Entering limit price ${price:.2f}...")
             fill_visible_input(page, 0, f"{price:.2f}")
             page.wait_for_timeout(300)
+            # Enable extended hours trading if the toggle is present
+            try:
+                ext_toggled = page.evaluate("""
+                    () => {
+                        const labels = [...document.querySelectorAll('label, span, div')];
+                        const label = labels.find(el =>
+                            /extended.hours|after.hours|pre.market/i.test(el.textContent)
+                        );
+                        if (!label) return false;
+                        const cb = label.querySelector('input[type="checkbox"]')
+                            || label.previousElementSibling
+                            || label.nextElementSibling;
+                        if (cb && cb.type === 'checkbox' && !cb.checked) {
+                            cb.click(); return true;
+                        }
+                        // try clicking the label itself as a toggle
+                        label.click(); return 'label_clicked';
+                    }
+                """)
+                if ext_toggled:
+                    print(f"  Extended hours toggle: {ext_toggled}")
+                    page.wait_for_timeout(300)
+            except Exception:
+                pass
         except PWTimeout:
             print("  Warning: could not switch to Limit - proceeding as Market")
             price = None
@@ -818,10 +865,11 @@ def cmd_sell(args) -> None:
             ctx, page = open_browser(p)
             try:
                 page = navigate_to_stock(page, strip_exchange(args.symbol))
-                result = place_order(page, "sell", args.shares, None, confirm=True, sell_all=args.sell_all)
+                result = place_order(page, "sell", args.shares, args.price, confirm=True, sell_all=args.sell_all)
                 result["symbol"] = args.symbol
                 label = "all shares" if args.sell_all else f"{args.shares} shares"
-                print(f"\n[OK] Sell order: {label} x {args.symbol} (Market)")
+                order_type = f"Limit @ ${args.price:.2f}" if args.price else "Market"
+                print(f"\n[OK] Sell order: {label} x {args.symbol} ({order_type})")
             except Exception as e:
                 print(f"\n[ERROR] Sell failed: {e}")
             finally:
@@ -907,6 +955,7 @@ def main() -> None:
     sell_p = sub.add_parser("sell", help="Prepare a sell order")
     sell_p.add_argument("--symbol", required=True)
     sell_p.add_argument("--shares", type=int, default=None)
+    sell_p.add_argument("--price", type=float, default=None, help="Limit price (omit for Market)")
     sell_p.add_argument("--sell-all", action="store_true", help="Click Max/Sell all on the sell ticket")
 
     ka_p = sub.add_parser("keepalive", help="Refresh WS session every 15 min; auto-login on expiry")
