@@ -4,8 +4,7 @@ Le Grinder
 ====================================
 Quant rules  : 1 trade/day  |  no stop loss  |  hard exit 3:55 PM ET
 Edge source  : momentum continuation on high-volume up-days + EMA trend filter
-Entry timing : Green/Neutral futures → 9:15 AM pre-market (fills at 9:30 open)
-               Red futures          → wait for bounce, buy 11:00–12:00 PM
+Entry timing : 9:31 AM ET every weekday, with same-morning catch-up on restart
 AI analysis  : claude CLI analyses top candidates each morning
 
 Usage:
@@ -62,9 +61,15 @@ DATA.mkdir(exist_ok=True)
 
 _LOG_MAX_BYTES = 5 * 1024 * 1024  # rotate at 5 MB
 
-_SELL_HOUR        = 15
-_SELL_MINUTE      = 55
-_BUY_DELAY_MINUTES = 5
+_SELL_HOUR             = 15
+_SELL_MINUTE           = 55
+_BUY_HOUR              = 9
+_BUY_MINUTE            = 35    # 4 min after overnight sell to allow fill settlement
+_BUY_CATCHUP_HOUR      = 10
+_BUY_CATCHUP_MINUTE    = 0
+_OVERNIGHT_SELL_HOUR   = 9     # sell overnight positions at market open
+_OVERNIGHT_SELL_MINUTE = 31
+_BUY_DELAY_MINUTES = 0
 _SHORTLIST_SIZE    = 150
 _FULL_REFRESH_TTL  = 12 * 3600
 _CACHED_SCAN_TTL   = 18 * 3600
@@ -114,11 +119,7 @@ def _pnl_arrow(v: float) -> str:
 
 
 def _buy_time_for_bias(bias: FuturesBias) -> tuple[int, int]:
-    if bias == FuturesBias.GREEN:
-        return 5, 15
-    if bias == FuturesBias.RED:
-        return 11, 0
-    return 9, 15
+    return _BUY_HOUR, _BUY_MINUTE
 
 
 def _load_name_map() -> dict[str, str]:
@@ -425,7 +426,7 @@ def _append_trade_history(symbol: str, side: str, price: float, shares: float,
 
 
 def _next_weekday_buy() -> datetime:
-    candidate = now_et().replace(hour=5, minute=15, second=0, microsecond=0)
+    candidate = now_et().replace(hour=_BUY_HOUR, minute=_BUY_MINUTE, second=0, microsecond=0)
     if now_et() >= candidate:
         candidate += timedelta(days=1)
     while candidate.weekday() >= 5:
@@ -497,9 +498,9 @@ def _buy_timing_line(bias: FuturesBias) -> str:
     """
     Returns a natural-language timing line for Telegram game plans.
     Examples:
-      'Buying in 43 min  (9:15 AM today, pre-market)'
-      'Buying in 11h 22min  (9:15 AM tomorrow, pre-market)'
-      'Buying in 2d 4h  (Monday 9:15 AM, pre-market — weekend)'
+      'Buying in 43 min  (9:31 AM ET today)'
+      'Buying in 11h 22min  (9:31 AM ET tomorrow)'
+      'Buying in 2d 4h  (Monday 9:31 ET - weekend)'
     """
     now    = now_et()
     target = _next_buy_dt(bias)
@@ -520,12 +521,7 @@ def _buy_timing_line(bias: FuturesBias) -> str:
         countdown = f"{m} min"
         when_note = f"{target:%I:%M %p} ET today"
 
-    if bias == FuturesBias.RED:
-        style = "bounce buy — red futures"
-    elif bias == FuturesBias.GREEN:
-        style = "early pre-market, fills at 9:30 open"
-    else:
-        style = "pre-market, fills at 9:30 open"
+    style = "market order"
 
     return f"Buying in <b>{countdown}</b>  ({when_note}, {style})"
 
@@ -594,37 +590,31 @@ TASK — reply in 120 words max, plain text, bullet points:
 • What is the single biggest risk for this trade?
 • Expected move today: bearish / base / bull scenario in %"""
 
-    cli = next((name for name in ("claude", "codex") if shutil.which(name)), None)
-    if cli is None:
-        log("  Claude/Codex CLI not available — using deterministic analysis")
-        return _deterministic_fallback()
-
-    try:
-        result = subprocess.run(
-            [cli, "-p", prompt, "--output-format", "text"],
-            capture_output=True, text=True, timeout=60,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-        # Some CLI builds ignore or reject --output-format; retry without it.
-        result2 = subprocess.run(
-            [cli, "-p", prompt],
-            capture_output=True, text=True, timeout=60,
-        )
-        if result2.returncode == 0 and result2.stdout.strip():
-            return result2.stdout.strip()
-    except subprocess.TimeoutExpired:
-        log("  Claude/Codex CLI timed out — using deterministic analysis")
-    except Exception as exc:
-        log(f"  Claude/Codex CLI error: {exc} — using deterministic analysis")
-    return _deterministic_fallback()
+    return ""
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Wealthsimple automation
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _start_keepalive() -> "subprocess.Popen | None":
+    """Launch wealthsimple_auto.py keepalive as a background daemon."""
+    try:
+        proc = subprocess.Popen(
+            [PYTHON, str(AUTO_SCRIPT), "keepalive"],
+            cwd=ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        log(f"Keepalive started (PID {proc.pid}) — refreshing WS session every 15 min")
+        return proc
+    except Exception as exc:
+        log(f"Keepalive start failed: {exc}")
+        return None
+
+
 def fetch_live_balance(retries: int = 3) -> float | None:
+    _session_expired = False
     for attempt in range(1, retries + 1):
         log(f"Fetching live balance (attempt {attempt}/{retries})...")
         try:
@@ -639,13 +629,10 @@ def fetch_live_balance(retries: int = 3) -> float | None:
 
         combined = r.stdout + r.stderr
         if "session_expired" in combined.lower() or "session expired" in combined.lower():
-            notify(
-                "❌ <b>Wealthsimple session expired</b>\n\n"
-                "Fix:\n<code>python scripts/wealthsimple_auto.py setup</code>\n\n"
-                "Log in, then restart the bot."
-            )
-            log("SESSION EXPIRED — run: python scripts/wealthsimple_auto.py setup")
-            return None
+            _session_expired = True
+            log(f"  Session expired — auto-login attempted, retrying ({attempt}/{retries})...")
+            time.sleep(20)
+            continue
 
         for line in r.stdout.splitlines():
             if line.startswith("LIVE_BALANCE_CAD:"):
@@ -657,6 +644,14 @@ def fetch_live_balance(retries: int = 3) -> float | None:
                     pass
         log(f"  Could not parse balance (attempt {attempt})")
         time.sleep(15)
+
+    if _session_expired:
+        notify(
+            "❌ <b>Wealthsimple session expired — auto-login failed</b>\n\n"
+            "Run: <code>python scripts/wealthsimple_auto.py setup</code>\n"
+            "Log in manually, then restart the bot."
+        )
+        log("SESSION EXPIRED after all retries — run: python scripts/wealthsimple_auto.py setup")
     return None
 
 
@@ -751,12 +746,7 @@ def run_scan(balance: float, scan_symbols: list[str] | None = None,
         strategy_name = "Best Available" if picks else "No Strategy"
         log(f"  Best-effort: {len(picks)} candidate(s).")
 
-    if bias == FuturesBias.GREEN:
-        buy_plan = "🚀 Early buy at 5:15 AM pre-market  (fills at 9:30 open)"
-    elif bias == FuturesBias.RED:
-        buy_plan = "⏳ Wait for bounce — buy 11:00–12:00 PM ET"
-    else:
-        buy_plan = "🚀 Buy at 9:15 AM pre-market  (fills at 9:30 open)"
+    buy_plan = "Buy at 9:31 AM ET (market order)"
 
     shortlist_source = picks if picks else [GrinderPick(
         symbol=s.symbol,
@@ -945,16 +935,49 @@ def build_scan_message(
     if others and not is_best:
         msg += f"Other candidates:  {others}\n\n"
 
+    # Build step-by-step game plan
+    is_morning = "5 AM" in label or "Morning" in label
+    plan_title = "TODAY'S GAME PLAN" if is_morning else "TOMORROW'S GAME PLAN"
+
+    open_pos = None
+    try:
+        if POS_FILE.exists():
+            open_pos = json.loads(POS_FILE.read_text())
+    except Exception:
+        pass
+
+    plan_steps = []
+    if open_pos:
+        held_sym = open_pos.get("symbol", "position")
+        held_entry = float(open_pos.get("buyPrice", 0))
+        plan_steps.append(
+            f"  1️⃣  <b>9:31 AM ET</b> — Sell <code>{held_sym}</code> (overnight @ ${held_entry:.2f})"
+        )
+        plan_steps.append(
+            f"  2️⃣  <b>9:35 AM ET</b> — Buy <code>{top.symbol}</code>  ~${top.last_close:.2f}"
+            f"  (~{shares_est} sh,  ${deploy:.0f} CAD)"
+        )
+        plan_steps.append(
+            f"  3️⃣  <b>3:55 PM ET</b> — Sell <code>{top.symbol}</code>  (hard exit, no stop loss)"
+        )
+    else:
+        plan_steps.append(
+            f"  1️⃣  <b>9:35 AM ET</b> — Buy <code>{top.symbol}</code>  ~${top.last_close:.2f}"
+            f"  (~{shares_est} sh,  ${deploy:.0f} CAD)"
+        )
+        plan_steps.append(
+            f"  2️⃣  <b>3:55 PM ET</b> — Sell <code>{top.symbol}</code>  (hard exit, no stop loss)"
+        )
+
+    plan_body = "\n".join(plan_steps)
+
     msg += (
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>{day}'S GAME PLAN:</b>\n"
-        f"  📋 {strategy_name}\n"
-        f"  ⏰ {timing}\n"
-        f"  💰 Budget: <b>${balance:.2f}</b>  →  deploying <b>{_DEPLOY_PCT}%</b>"
-        f"  =  <b>${deploy:.2f} CAD</b>\n"
-        f"  🔢 Est. shares: ~{shares_est}  @  ${top.last_close:.2f}\n"
-        f"  🏁 Exit: <b>3:55 PM ET hard sell</b>  (no stop loss)\n"
-        f"  🎯 Target: <b>+1.5% to +3%</b> on momentum continuation\n\n"
+        f"📅 <b>{plan_title}  @pmarx</b>\n"
+        f"{plan_body}\n\n"
+        f"  📡 Futures: <b>{bias.value.upper()}</b>  |  Strategy: <b>{strategy_name}</b>\n"
+        f"  💰 Budget: <b>${balance:.2f}</b>  →  deploying <b>{_DEPLOY_PCT}%</b> = <b>${deploy:.2f} CAD</b>\n"
+        f"  🎯 Target: <b>+1.5% to +3%</b> momentum continuation\n\n"
         f"{at_color} All-time PnL: <b>${at_pnl:+.2f} CAD</b>"
         f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
     )
@@ -978,12 +1001,7 @@ def build_buy_message(
 ) -> str:
     deploy     = balance * _DEPLOY_PCT / 100
     shares_est = int(deploy // pick.last_close) if pick.last_close > 0 else 0
-    if bias == FuturesBias.GREEN:
-        entry_mode = "5:15 AM — Early pre-market order (fills at 9:30 open)"
-    elif is_bounce:
-        entry_mode = "11:00 AM — Bounce buy (red bias)"
-    else:
-        entry_mode = "9:15 AM — Pre-market order (fills at 9:30 open)"
+    entry_mode = "9:31 AM ET market order"
     bias_line  = _bias_line(bias, futures_detail)
 
     msg = (
@@ -1039,13 +1057,20 @@ def build_red_waiting_message(pick: GrinderPick | None, futures_detail: str) -> 
 
 
 def build_update_message(
-    symbol: str, entry: float, price: float, shares: float, cost: float
+    symbol: str, entry: float, price: float, shares: float, cost: float,
+    next_sell_dt: "datetime | None" = None,
 ) -> str:
     unrealized = shares * price - cost
     pnl_pct    = unrealized / cost * 100 if cost else 0.0
     color      = _pnl_color(unrealized)
     arrow      = _pnl_arrow(unrealized)
-    mins_left  = int(_time_until_sell() / 60)
+    if next_sell_dt is not None:
+        secs_left = max(0, (next_sell_dt - now_et()).total_seconds())
+        mins_left = int(secs_left / 60)
+        sell_label = f"{next_sell_dt:%I:%M %p} ET"
+    else:
+        mins_left  = int(_time_until_sell() / 60)
+        sell_label = "3:55 PM ET"
     h_left     = mins_left // 60
     m_left     = mins_left % 60
     stats      = _get_trade_stats()
@@ -1057,7 +1082,7 @@ def build_update_message(
         f"  {arrow} Price: <b>${price:.2f}</b>  (entry ${entry:.2f})\n"
         f"  {color} Unrealized P&L: <b>${unrealized:+.2f} CAD ({pnl_pct:+.2f}%)</b>\n"
         f"  💼 Position value: <b>${shares * price:.2f} CAD</b>\n\n"
-        f"  ⏰ Selling in <b>{time_str}</b>  (3:55 PM ET)\n"
+        f"  ⏰ Selling in <b>{time_str}</b>  ({sell_label})\n"
         f"  {at_color} All-time: <b>${stats['total_pnl']:+.2f} CAD</b>"
         f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
     )
@@ -1114,53 +1139,19 @@ def wait_for_buy_window(
     pick: GrinderPick | None,
     futures_detail: str,
 ) -> bool:
-    """
-    Blocks until the correct buy window.
-    Green         → 5:15 AM
-    Neutral       → 9:15 AM
-    Red           → sends 9:15 AM warning, then waits for 11:00 AM
-    Returns False if the window has already passed.
-    """
+    """Block until 9:31 AM ET, or catch up immediately later that morning."""
     now = now_et()
+    target = now.replace(hour=_BUY_HOUR, minute=_BUY_MINUTE, second=0, microsecond=0)
+    cutoff = now.replace(hour=_BUY_CATCHUP_HOUR, minute=_BUY_CATCHUP_MINUTE, second=0, microsecond=0)
 
-    if bias == FuturesBias.GREEN:
-        target  = now.replace(hour=5, minute=15, second=0, microsecond=0)
-        cutoff  = now.replace(hour=5, minute=25, second=0, microsecond=0)
-        if now > cutoff:
-            log("Green buy window (5:15–5:25) already passed.")
-            return False
-        if now < target:
-            _sleep_until(target, "5:15 AM green buy window")
-        return True
-
-    if bias == FuturesBias.NEUTRAL:
-        target  = now.replace(hour=9, minute=15, second=0, microsecond=0)
-        cutoff  = now.replace(hour=9, minute=25, second=0, microsecond=0)
-        if now > cutoff:
-            log("Green/Neutral buy window (9:15–9:25) already passed.")
-            return False
-        if now < target:
-            _sleep_until(target, "9:15 AM buy window")
-        return True
-
-    warn_time  = now.replace(hour=9, minute=15, second=0, microsecond=0)
-    buy_time   = now.replace(hour=11, minute=0,  second=0, microsecond=0)
-    cutoff_buy = now.replace(hour=12, minute=0,  second=0, microsecond=0)
-
-    if now > cutoff_buy:
-        log("Red bounce window (11:00–12:00) already passed — skipping today.")
+    if now > cutoff:
+        log(f"Buy window ({_BUY_HOUR:02d}:{_BUY_MINUTE:02d}-{_BUY_CATCHUP_HOUR:02d}:{_BUY_CATCHUP_MINUTE:02d}) already passed.")
         return False
-
-    # Send the 9:15 AM "waiting" message
-    if now < warn_time:
-        _sleep_until(warn_time, "9:15 AM red-bias warning")
-    if now <= warn_time + timedelta(minutes=10):
-        notify(build_red_waiting_message(pick, futures_detail))
-
-    if now < buy_time:
-        _sleep_until(buy_time, "11:00 AM bounce buy")
+    if now < target:
+        _sleep_until(target, "9:31 AM buy window")
+    else:
+        log(f"Buy target was {_BUY_HOUR:02d}:{_BUY_MINUTE:02d}; catching up immediately at {now:%H:%M} ET.")
     return True
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Buy
@@ -1234,19 +1225,19 @@ def execute_buy(pick: GrinderPick, balance: float, bias: FuturesBias,
 
 def wait_for_fill_confirm(symbol: str) -> None:
     now = now_et()
-    open_t = now.replace(hour=9, minute=31, second=0, microsecond=0)
-    secs = (open_t - now).total_seconds()
+    confirm_t = now.replace(hour=9, minute=45, second=0, microsecond=0)
+    secs = (confirm_t - now).total_seconds()
     if secs > 0:
-        log(f"Pre-market order queued — waiting {secs/60:.1f} min for 9:30 open...")
+        log(f"Pre-market order queued — waiting {secs/60:.1f} min for 9:45 fill check...")
         time.sleep(secs)
-    log("Market open — confirming fill...")
+    log("Confirming fill at 9:45 AM...")
     balance = fetch_live_balance(retries=2)
     bal_str = f"${balance:.2f} CAD" if balance else "N/A"
     notify(
-        f"✅ <b>Fill confirmed at market open</b>\n\n"
-        f"🎫 <code>{symbol}</code>  filled at 9:30 AM open\n"
+        f"✅ <b>Graphite order filled!</b>\n\n"
+        f"🎫 <code>{symbol}</code>  filled at market open\n"
         f"💰 Live balance: <b>{bal_str}</b>\n"
-        f"⏰ Selling at <b>3:55 PM ET</b>"
+        f"⏰ Monitoring until <b>3:55 PM ET</b>  |  Updates every 30 min"
     )
 
 
@@ -1266,10 +1257,88 @@ def wait_after_pick(pick: GrinderPick, bias: FuturesBias, futures_detail: str) -
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Sell execution helper (used for both 9:31 AM overnight sell and 3:55 PM sell)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _execute_sell_order(
+    symbol: str, entry: float, shares: float, cost: float, strat: str,
+    label: str = "3:55 PM ET",
+) -> None:
+    from kzer_bot.market_data import YFinanceMarketData
+    snap = YFinanceMarketData().snapshot(symbol)
+    exit_price = snap.last_price if snap else entry
+    unrealized  = shares * exit_price - cost
+    pnl_pct     = unrealized / cost * 100 if cost else 0.0
+
+    notify(
+        f"⏳ <b>Closing at {label}</b>\n\n"
+        f"🎫 <code>{symbol}</code>  |  💵 ${exit_price:.2f}\n"
+        f"{_pnl_arrow(unrealized)} Est. P&L: <b>${unrealized:+.2f} CAD ({pnl_pct:+.2f}%)</b>"
+    )
+
+    sell_result = None
+    order_data: dict = {}
+    order_submitted = False
+
+    for attempt in range(1, 4):
+        sell_result = subprocess.run(
+            [PYTHON, str(AUTO_SCRIPT), "sell", "--symbol", symbol, "--sell-all"],
+            capture_output=True, text=True, timeout=180,
+        )
+        for line in sell_result.stdout.splitlines():
+            print(f"  {line}", flush=True)
+        order_data = _parse_order_result(sell_result.stdout)
+        if order_data.get("submitted"):
+            order_submitted = True
+        if sell_result.returncode == 0 or order_submitted:
+            break
+        log(f"Sell attempt {attempt}/3 failed (exit {sell_result.returncode})")
+        if attempt < 3:
+            notify(f"⚠️ Sell attempt {attempt}/3 failed — retrying in 60s...")
+            time.sleep(60)
+
+    sell_ok = sell_result is not None and (sell_result.returncode == 0 or order_submitted)
+    if not sell_ok:
+        notify(f"❌ All 3 sell attempts FAILED for <code>{symbol}</code>. Manual close required!")
+        log("All sell attempts failed — manual intervention needed.")
+        return
+
+    actual_qty   = float(order_data.get("estimated_quantity") or shares)
+    actual_value = float(order_data.get("estimated_value") or (actual_qty * exit_price))
+    actual_price = actual_value / actual_qty if actual_qty else exit_price
+    trade_pnl    = actual_value - cost
+    at_pnl       = _record_trade(symbol, cost, actual_value, actual_qty)
+
+    _append_trade_history(symbol, "SELL", actual_price, actual_qty, cost, trade_pnl, strat)
+    POS_FILE.unlink(missing_ok=True)
+
+    notify(build_sell_message(symbol, entry, actual_price, actual_qty, cost, trade_pnl, at_pnl))
+    log(f"Closed. Trade P&L: ${trade_pnl:+.2f}  All-time: ${at_pnl:+.2f}")
+
+
+def _run_overnight_scan(label: str, balance: float, scan_type: str) -> None:
+    """Fire a scan during the overnight hold loop and send result to Telegram."""
+    try:
+        force_full = (scan_type == "5am")
+        sc_syms, full_ref = _choose_scan_symbols(force_full=force_full)
+        source = "full universe" if full_ref else f"shortlist ({len(sc_syms)})"
+        log(f"Running {label} using {source}...")
+        picks, scan_bias, buy_plan, strat_name, fut_det = run_scan(
+            balance, scan_symbols=sc_syms, full_refresh=full_ref,
+        )
+        ai  = get_ai_analysis(picks, scan_bias, fut_det, balance)
+        msg = build_scan_message(picks, scan_bias, fut_det, buy_plan, strat_name, balance, ai, label)
+        notify(msg)
+        log(f"  → {label} complete.")
+    except Exception as exc:
+        log(f"{label} error: {exc}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Hold + 30-min updates + sell
 # ──────────────────────────────────────────────────────────────────────────────
 
-def hold_and_sell() -> None:
+def hold_and_sell(balance: float = 0.0) -> None:
     if not POS_FILE.exists():
         log("No open position — nothing to hold.")
         return
@@ -1295,21 +1364,94 @@ def hold_and_sell() -> None:
 
     now = now_et()
 
-    # If bought after hours (past 3:55 PM), wait until next day's sell time
+    # ── Overnight path: bought after 3:55 PM → sell at 9:31 AM next trading day ──
     if now.hour > _SELL_HOUR or (now.hour == _SELL_HOUR and now.minute >= _SELL_MINUTE):
-        next_sell = now.replace(hour=_SELL_HOUR, minute=_SELL_MINUTE, second=0, microsecond=0) + timedelta(days=1)
+        next_sell = now.replace(
+            hour=_OVERNIGHT_SELL_HOUR, minute=_OVERNIGHT_SELL_MINUTE, second=0, microsecond=0,
+        ) + timedelta(days=1)
         while next_sell.weekday() >= 5:
             next_sell += timedelta(days=1)
+
         secs = (next_sell - now).total_seconds()
-        log(f"After-hours buy — holding until next sell at {next_sell:%a %b %d %H:%M} ET ({secs/3600:.1f}h).")
-        notify(
-            f"📊 <b>Position open — overnight hold</b>\n\n"
-            f"🎫 <code>{symbol}</code>  |  {shares:.4f} sh @ ${entry:.2f}\n"
-            f"💰 Cost: <b>${cost:.2f} CAD</b>  |  📋 {strat}\n"
-            f"🌙 Bought after hours — holding until <b>3:55 PM ET tomorrow</b>\n"
-            f"⏰ Updates every 30 min"
-        )
-        time.sleep(secs)
+        log(f"After-hours buy — selling at market open {next_sell:%a %b %d %H:%M} ET ({secs/3600:.1f}h). Will buy new pick at 9:35 AM.")
+
+        pre_open = now.hour < 9 or (now.hour == 9 and now.minute < 30)
+        if pre_open:
+            open_t = now.replace(hour=9, minute=30, second=0, microsecond=0)
+            mins_to_open = max(0, int((open_t - now).total_seconds() / 60))
+            notify(
+                f"⏳ <b>Order placed — pending fill at open</b>\n\n"
+                f"🎫 <code>{symbol}</code>  {shares:.4f} sh @ ~${entry:.2f}\n"
+                f"💰 Deploying: <b>${cost:.2f} CAD</b>  |  📋 {strat}\n"
+                f"📋 Pre-market order — fills at <b>9:30 AM ET open</b>  ({mins_to_open} min)\n"
+                f"🔄 Sell: <b>9:31 AM ET tomorrow</b>  →  New pick buy: <b>9:35 AM ET</b>\n"
+                f"🏁 Final exit: <b>3:55 PM ET</b>  |  Updates every 30 min"
+            )
+        else:
+            notify(
+                f"📊 <b>Position open — overnight hold</b>\n\n"
+                f"🎫 <code>{symbol}</code>  |  {shares:.4f} sh @ ${entry:.2f}\n"
+                f"💰 Cost: <b>${cost:.2f} CAD</b>  |  📋 {strat}\n"
+                f"🌙 Selling at <b>9:31 AM ET tomorrow</b>  →  Buying new pick at 9:35 AM\n"
+                f"🏁 Final exit: <b>3:55 PM ET</b>  |  Updates every 30 min"
+            )
+
+        fill_notified = not pre_open
+        _scanned: set[str] = set()
+        balance_approx = balance if balance > 0 else cost
+
+        while now_et() < next_sell - timedelta(seconds=30):
+            cur = now_et()
+
+            # Fill confirmation at 9:30 AM market open
+            if not fill_notified and (cur.hour > 9 or (cur.hour == 9 and cur.minute >= 30)):
+                fill_notified = True
+                wait_for_fill_confirm(symbol)
+                log("Fill confirmed at market open.")
+
+            # 5 PM preview scan (tonight)
+            if "5pm" not in _scanned and cur.hour >= 17 and cur.weekday() < 5:
+                _scanned.add("5pm")
+                _run_overnight_scan("5 PM Tonight's Preview", balance_approx, "5pm")
+
+            # 5 AM morning scan
+            if "5am" not in _scanned and 5 <= cur.hour < 9:
+                _scanned.add("5am")
+                _run_overnight_scan("5 AM Morning Scan", balance_approx, "5am")
+
+            # 30-min position update
+            if time.time() - last_update_t >= UPDATE_INTERVAL:
+                try:
+                    snap = md.snapshot(symbol)
+                    if snap:
+                        if fill_notified:
+                            notify(build_update_message(
+                                symbol, entry, snap.last_price, shares, cost,
+                                next_sell_dt=next_sell,
+                            ))
+                            log(f"30-min update: ${snap.last_price:.2f} ({(snap.last_price/entry-1)*100:+.2f}%)")
+                        else:
+                            cur2 = now_et()
+                            open_t2 = cur2.replace(hour=9, minute=30, second=0, microsecond=0)
+                            mins_left = max(0, int((open_t2 - cur2).total_seconds() / 60))
+                            notify(
+                                f"⏳ <b>Order Pending — <code>{symbol}</code></b>  |  {cur2:%H:%M} ET\n\n"
+                                f"📋 Pre-market order fills at <b>9:30 AM ET open</b>\n"
+                                f"🎫 {shares:.4f} sh @ ~${entry:.2f}  |  💰 ${cost:.2f} CAD\n"
+                                f"⏰ Market opens in <b>{mins_left} min</b>\n"
+                                f"🔄 Sell at 9:31 AM → buy new pick at 9:35 AM"
+                            )
+                            log(f"Pre-open update: order pending, {mins_left} min to open")
+                except Exception as exc:
+                    log(f"30-min update error: {exc}")
+                last_update_t = time.time()
+
+            time.sleep(60)
+
+        # ── Execute sell at 9:31 AM ────────────────────────────────────────
+        _sleep_until(next_sell, "9:31 AM market-open sell")
+        _execute_sell_order(symbol, entry, shares, cost, strat, label="9:31 AM ET")
+        return  # main loop will scan + buy new pick at 9:35 AM
 
     notify(
         f"📊 <b>Position open — monitoring until 3:55 PM</b>\n\n"
@@ -1323,67 +1465,18 @@ def hold_and_sell() -> None:
 
         # ── Force-sell at 3:55 PM ─────────────────────────────────────────
         if now.hour > _SELL_HOUR or (now.hour == _SELL_HOUR and now.minute >= _SELL_MINUTE):
-            snap       = md.snapshot(symbol)
-            exit_price = snap.last_price if snap else entry
-            unrealized = shares * exit_price - cost
-            pnl_pct    = unrealized / cost * 100 if cost else 0.0
-
-            notify(
-                f"⏳ <b>Closing at 3:55 PM ET</b>\n\n"
-                f"🎫 <code>{symbol}</code>  |  💵 ${exit_price:.2f}\n"
-                f"{_pnl_arrow(unrealized)} Est. P&L: <b>${unrealized:+.2f} CAD ({pnl_pct:+.2f}%)</b>"
-            )
-
-            sell_result    = None
-            order_data     = {}
-            order_submitted = False
-
-            for attempt in range(1, 4):
-                sell_result = subprocess.run(
-                    [PYTHON, str(AUTO_SCRIPT), "sell", "--symbol", symbol, "--sell-all"],
-                    capture_output=True, text=True, timeout=180,
-                )
-                for line in sell_result.stdout.splitlines():
-                    print(f"  {line}", flush=True)
-
-                order_data = _parse_order_result(sell_result.stdout)
-                if order_data.get("submitted"):
-                    order_submitted = True
-                if sell_result.returncode == 0 or order_submitted:
-                    break
-
-                log(f"Sell attempt {attempt}/3 failed (exit {sell_result.returncode})")
-                if attempt < 3:
-                    notify(f"⚠️ Sell attempt {attempt}/3 failed — retrying in 60s...")
-                    time.sleep(60)
-
-            sell_ok = (sell_result is not None) and (sell_result.returncode == 0 or order_submitted)
-            if not sell_ok:
-                notify(f"❌ All 3 sell attempts FAILED for <code>{symbol}</code>. Manual close required!")
-                log("All sell attempts failed — manual intervention needed.")
-                return
-
-            actual_qty   = float(order_data.get("estimated_quantity") or shares)
-            actual_value = float(order_data.get("estimated_value") or (actual_qty * exit_price))
-            actual_price = actual_value / actual_qty if actual_qty else exit_price
-            trade_pnl    = actual_value - cost
-            at_pnl       = _record_trade(symbol, cost, actual_value, actual_qty)
-
-            _append_trade_history(symbol, "SELL", actual_price, actual_qty,
-                                  cost, trade_pnl, strat)
-            POS_FILE.unlink(missing_ok=True)
-
-            notify(build_sell_message(symbol, entry, actual_price, actual_qty,
-                                      cost, trade_pnl, at_pnl))
-            log(f"Closed. Trade P&L: ${trade_pnl:+.2f}  All-time: ${at_pnl:+.2f}")
+            _execute_sell_order(symbol, entry, shares, cost, strat, label="3:55 PM ET")
             return
 
         # ── 30-min update ─────────────────────────────────────────────────
         if time.time() - last_update_t >= UPDATE_INTERVAL:
-            snap = md.snapshot(symbol)
-            if snap:
-                notify(build_update_message(symbol, entry, snap.last_price, shares, cost))
-                log(f"30-min update: ${snap.last_price:.2f} ({(snap.last_price/entry-1)*100:+.2f}%)")
+            try:
+                snap = md.snapshot(symbol)
+                if snap:
+                    notify(build_update_message(symbol, entry, snap.last_price, shares, cost))
+                    log(f"30-min update: ${snap.last_price:.2f} ({(snap.last_price/entry-1)*100:+.2f}%)")
+            except Exception as exc:
+                log(f"30-min update error: {exc}")
             last_update_t = time.time()
 
         time.sleep(60)
@@ -1420,9 +1513,15 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
         last_status_t[0] = time.time()
         return new_bias
 
-    # Startup scan on first entry
+    # Startup scan on first entry — skip silently after 9 AM if 5 AM scan is cached
     if "startup" not in scans_done:
-        bias = _do_scan("Startup Scan")
+        if now_et().hour >= 9 and _load_cached_scan_result() is not None:
+            cached = _load_cached_scan_result()
+            if cached:
+                bias = cached[1]
+                log("Near buy window with cached scan — skipping startup notification.")
+        else:
+            bias = _do_scan("Startup Scan")
         scans_done.add("startup")
 
     while True:
@@ -1455,20 +1554,14 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
 
         # Near buy window → exit sleep loop
         if now.weekday() < 5:
-            buy_target = 5 if bias == FuturesBias.GREEN else 9 if bias == FuturesBias.NEUTRAL else 11
-            target_t   = now.replace(hour=buy_target, minute=15 if buy_target in (5, 9) else 0,
-                                     second=0, microsecond=0)
-            if 0 <= (target_t - now).total_seconds() <= 300:
+            target_t = now.replace(hour=_BUY_HOUR, minute=_BUY_MINUTE, second=0, microsecond=0)
+            catchup_t = now.replace(hour=_BUY_CATCHUP_HOUR, minute=_BUY_CATCHUP_MINUTE, second=0, microsecond=0)
+            if 0 <= (target_t - now).total_seconds() <= 300 or target_t <= now <= catchup_t:
                 log("Near buy window — exiting overnight loop.")
                 return bias
 
         # Past buy window for today → sleep until 5 PM
-        if bias == FuturesBias.GREEN:
-            cutoff = now.replace(hour=5, minute=25, second=0, microsecond=0)
-        elif bias == FuturesBias.NEUTRAL:
-            cutoff = now.replace(hour=9, minute=25, second=0, microsecond=0)
-        else:
-            cutoff = now.replace(hour=12, minute=5, second=0, microsecond=0)
+        cutoff = now.replace(hour=_BUY_CATCHUP_HOUR, minute=_BUY_CATCHUP_MINUTE, second=0, microsecond=0)
         if now > cutoff and now.hour < 17:
             log("Buy window passed — sleeping until 5 PM scan.")
             time.sleep(1800)
@@ -1511,6 +1604,8 @@ def main() -> None:
     log("Le Grinder — STARTING")
     log(f"Log file: {LOG_FILE}")
     log("=" * 60)
+
+    _start_keepalive()
 
     if args.lite:
         from kzer_bot.grinder_strategy import _HARDCODED_WATCHLIST
@@ -1566,7 +1661,7 @@ def main() -> None:
             f"💰 Balance: <b>${balance:.2f} CAD</b>\n"
             f"📋 Watchlist: <b>{len(WATCHLIST)} tickers</b>  (Yahoo most active CA — volume sorted)\n"
             f"📐 Strategy: 8-criteria momentum screen  +  Claude AI analysis\n"
-            f"⏰ Entry: 5:15 AM (green), 9:15 AM (neutral), or 11:00 AM (red)\n"
+            f"⏰ Entry: 9:31 AM ET every weekday\n"
             f"🏁 Exit: 3:55 PM daily  |  No stop loss\n\n"
             f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} CAD</b>"
             f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
@@ -1577,7 +1672,7 @@ def main() -> None:
             f"💰 Balance: <b>${balance:.2f} CAD</b>\n"
             f"📋 Watchlist: <b>{len(WATCHLIST)} tickers</b>  (hardcoded — no rate limits)\n"
             f"📐 Strategy: 8-criteria momentum screen  +  Claude AI analysis\n"
-            f"⏰ Entry: 5:15 AM (green), 9:15 AM (neutral), or 11:00 AM (red)\n"
+            f"⏰ Entry: 9:31 AM ET every weekday\n"
             f"🏁 Exit: 3:55 PM daily  |  No stop loss\n\n"
             f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} CAD</b>"
             f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
@@ -1588,7 +1683,7 @@ def main() -> None:
             f"💰 Balance: <b>${balance:.2f} CAD</b>\n"
             f"📋 Watchlist: <b>{len(WATCHLIST)} Canadian tickers</b>  (TSX / TSXV / NEO)\n"
             f"📐 Strategy: 8-criteria momentum screen  +  Claude AI analysis\n"
-            f"⏰ Entry: 5:15 AM (green), 9:15 AM (neutral), or 11:00 AM (red)\n"
+            f"⏰ Entry: 9:31 AM ET every weekday\n"
             f"🏁 Exit: 3:55 PM daily  |  No stop loss\n\n"
             f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} CAD</b>"
             f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
@@ -1597,14 +1692,27 @@ def main() -> None:
     # ── Resume open position ───────────────────────────────────────────────
     if POS_FILE.exists():
         pos = json.loads(POS_FILE.read_text())
+        _now = now_et()
+        _pre_open = _now.hour < 9 or (_now.hour == 9 and _now.minute < 30)
         log(f"Open position found: {pos['symbol']} — resuming hold/sell loop.")
-        notify(
-            f"▶️ <b>Bot restarted — resuming position</b>\n\n"
-            f"🎫 <code>{pos['symbol']}</code>  "
-            f"{pos.get('shares', 0):.4f} sh @ ${pos.get('buyPrice', 0):.2f}\n"
-            f"⏰ Selling at 3:55 PM ET"
-        )
-        hold_and_sell()
+        if _pre_open:
+            _open_t = _now.replace(hour=9, minute=30, second=0, microsecond=0)
+            _mins = max(0, int((_open_t - _now).total_seconds() / 60))
+            notify(
+                f"⏳ <b>Bot restarted — order pending fill</b>\n\n"
+                f"🎫 <code>{pos['symbol']}</code>  "
+                f"{pos.get('shares', 0):.4f} sh @ ~${pos.get('buyPrice', 0):.2f}\n"
+                f"📋 Pre-market order fills at <b>9:30 AM ET open</b>  ({_mins} min)\n"
+                f"🏁 Auto-sell at <b>3:55 PM ET</b>"
+            )
+        else:
+            notify(
+                f"▶️ <b>Bot restarted — resuming position</b>\n\n"
+                f"🎫 <code>{pos['symbol']}</code>  "
+                f"{pos.get('shares', 0):.4f} sh @ ${pos.get('buyPrice', 0):.2f}\n"
+                f"⏰ Selling at 3:55 PM ET"
+            )
+        hold_and_sell(balance=balance)
         POS_FILE.unlink(missing_ok=True)
 
     # ── Single-ticker mode (skip 4000-stock scan, buy immediately) ────────
@@ -1653,7 +1761,7 @@ def main() -> None:
 
         ok = execute_buy(pick, balance, bias, fut_det, ai)
         if ok:
-            hold_and_sell()
+            hold_and_sell(balance=balance)
         return
 
     # ── Buy-today notification ────────────────────────────────────────────
@@ -1765,8 +1873,8 @@ def main() -> None:
         if now.hour < 9 or (now.hour == 9 and now.minute < 30):
             wait_for_fill_confirm(top.symbol)
 
-        # Hold + sell at 3:55 PM
-        hold_and_sell()
+        # Hold + sell (3:55 PM or 9:31 AM next day if after-hours)
+        hold_and_sell(balance=balance)
         POS_FILE.unlink(missing_ok=True)
         log("Day complete — re-entering overnight loop.")
 

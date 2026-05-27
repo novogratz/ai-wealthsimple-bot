@@ -16,6 +16,7 @@ ROOT = Path(__file__).parent.parent
 DATA = ROOT / "data"
 AUTH = DATA / "ws_auth.json"
 PROFILE_DIR = DATA / "browser_profile"  # persistent browser profile — keeps device trust
+KEEPALIVE_LOCK = DATA / "ws_busy.lock"  # held during buy/sell so keepalive backs off
 WS_HOME = "https://my.wealthsimple.com/app/home"
 CDP_URL = "http://localhost:9222"
 
@@ -23,6 +24,14 @@ CDP_URL = "http://localhost:9222"
 EDGE_EXE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 
 DATA.mkdir(exist_ok=True)
+
+
+def _acquire_busy_lock() -> None:
+    KEEPALIVE_LOCK.write_text("busy")
+
+
+def _release_busy_lock() -> None:
+    KEEPALIVE_LOCK.unlink(missing_ok=True)
 
 
 def snap(page, tag: str) -> Path:
@@ -225,6 +234,39 @@ def parse_review_details(page, side: str, submitted: bool) -> dict:
     }
 
 
+def page_has_order_submitted_signal(page) -> bool:
+    try:
+        text = page.locator("body").inner_text(timeout=5000).lower()
+    except Exception:
+        return False
+
+    success_phrases = [
+        "order submitted",
+        "order placed",
+        "order received",
+        "order queued",
+        "buy order submitted",
+        "sell order submitted",
+        "your order has been submitted",
+        "your order was submitted",
+    ]
+    if any(phrase in text for phrase in success_phrases):
+        return True
+
+    review_phrases = [
+        "review order",
+        "estimated cost",
+        "estimated proceeds",
+        "submit order",
+        "place order",
+        "queue order",
+    ]
+    if any(phrase in text for phrase in review_phrases):
+        return False
+
+    return False
+
+
 def get_live_balance(page) -> float | None:
     print("Fetching live balance...")
     page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
@@ -377,26 +419,30 @@ def try_auto_login(page) -> bool:
 def cmd_balance(_args) -> None:
     from playwright.sync_api import sync_playwright
 
-    with sync_playwright() as p:
-        ctx, page = open_browser(p)
-        page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
-        page.wait_for_timeout(2000)
-
-        if page.locator('input[type="password"], input[placeholder*="Password" i]').first.is_visible(timeout=1500):
-            if not try_auto_login(page):
-                print("SESSION_EXPIRED: Wealthsimple session expired — run: python scripts/wealthsimple_auto.py setup")
-                sys.exit(1)
+    _acquire_busy_lock()
+    try:
+        with sync_playwright() as p:
+            ctx, page = open_browser(p)
             page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
-            page.wait_for_timeout(3000)
+            page.wait_for_timeout(2000)
 
-        balance = get_live_balance(page)
-        if balance is not None:
-            print(f"LIVE_BALANCE_CAD:{balance:.2f}")
-            print(f"[OK] Live balance fetched: ${balance:.2f} CAD")
-        else:
-            print("[ERROR] Could not find balance on page.")
-            snap(page, "balance_fail")
-            sys.exit(1)
+            if page.locator('input[type="password"], input[placeholder*="Password" i]').first.is_visible(timeout=1500):
+                if not try_auto_login(page):
+                    print("SESSION_EXPIRED: Wealthsimple session expired — run: python scripts/wealthsimple_auto.py setup")
+                    sys.exit(1)
+                page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_timeout(3000)
+
+            balance = get_live_balance(page)
+            if balance is not None:
+                print(f"LIVE_BALANCE_CAD:{balance:.2f}")
+                print(f"[OK] Live balance fetched: ${balance:.2f} CAD")
+            else:
+                print("[ERROR] Could not find balance on page.")
+                snap(page, "balance_fail")
+                sys.exit(1)
+    finally:
+        _release_busy_lock()
 
 
 def open_browser(p):
@@ -632,18 +678,18 @@ def place_order(
         submitted_via_js = page.evaluate("""
             () => {
                 const texts = [
-                    'Submit order', 'Submit Order', 'Place order', 'Place Order',
-                    'Queue order', 'Review order', 'Review Order',
-                    'Confirm order', 'Confirm Order', 'Confirm',
-                    'Submit', 'Buy', 'Place', 'Execute',
+                    'Submit order', 'Submit Order',
+                    'Place order', 'Place Order',
+                    'Queue order', 'Queue Order',
+                    'Confirm order', 'Confirm Order',
+                    'Submit buy order', 'Submit Buy Order',
+                    'Submit sell order', 'Submit Sell Order',
                 ];
                 const buttons = [...document.querySelectorAll('button, [role="button"], [role="submit"]')];
                 for (const text of texts) {
                     const btn = buttons.find(b =>
                         b.textContent.trim() === text ||
-                        b.textContent.trim().startsWith(text) ||
-                        b.textContent.trim().toLowerCase() === text.toLowerCase() ||
-                        b.textContent.trim().toLowerCase().startsWith(text.toLowerCase())
+                        b.textContent.trim().toLowerCase() === text.toLowerCase()
                     );
                     if (btn) { btn.click(); return 'clicked:' + text; }
                 }
@@ -733,27 +779,31 @@ def cmd_buy(args) -> None:
     from playwright.sync_api import sync_playwright
 
     result: dict = {"side": "buy", "submitted": False, "symbol": args.symbol}
-    with sync_playwright() as p:
-        ctx, page = open_browser(p)
-        try:
-            page = navigate_to_stock(page, strip_exchange(args.symbol))
-            result = place_order(
-                page,
-                "buy",
-                args.shares,
-                args.price,
-                confirm=True,
-                max_dollars=args.max_dollars,
-            )
-            result["symbol"] = args.symbol
-            label = "Dollars Max (Market)" if args.max_dollars else f"{args.shares} shares (Market)"
-            if args.price:
-                label = f"{args.shares} shares @ ${args.price:.2f}"
-            print(f"\n[OK] Buy order: {args.symbol} {label}")
-        except Exception as e:
-            print(f"\n[ERROR] Buy failed: {e}")
-        finally:
-            print("ORDER_RESULT_JSON:" + json.dumps(result, sort_keys=True))
+    _acquire_busy_lock()
+    try:
+        with sync_playwright() as p:
+            ctx, page = open_browser(p)
+            try:
+                page = navigate_to_stock(page, strip_exchange(args.symbol))
+                result = place_order(
+                    page,
+                    "buy",
+                    args.shares,
+                    args.price,
+                    confirm=True,
+                    max_dollars=args.max_dollars,
+                )
+                result["symbol"] = args.symbol
+                label = "Dollars Max (Market)" if args.max_dollars else f"{args.shares} shares (Market)"
+                if args.price:
+                    label = f"{args.shares} shares @ ${args.price:.2f}"
+                print(f"\n[OK] Buy order: {args.symbol} {label}")
+            except Exception as e:
+                print(f"\n[ERROR] Buy failed: {e}")
+            finally:
+                print("ORDER_RESULT_JSON:" + json.dumps(result, sort_keys=True))
+    finally:
+        _release_busy_lock()
     if not result.get("submitted"):
         sys.exit(1)
 
@@ -762,20 +812,83 @@ def cmd_sell(args) -> None:
     from playwright.sync_api import sync_playwright
 
     result: dict = {"side": "sell", "submitted": False, "symbol": args.symbol}
-    with sync_playwright() as p:
-        ctx, page = open_browser(p)
-        try:
-            page = navigate_to_stock(page, strip_exchange(args.symbol))
-            result = place_order(page, "sell", args.shares, None, confirm=True, sell_all=args.sell_all)
-            result["symbol"] = args.symbol
-            label = "all shares" if args.sell_all else f"{args.shares} shares"
-            print(f"\n[OK] Sell order: {label} x {args.symbol} (Market)")
-        except Exception as e:
-            print(f"\n[ERROR] Sell failed: {e}")
-        finally:
-            print("ORDER_RESULT_JSON:" + json.dumps(result, sort_keys=True))
+    _acquire_busy_lock()
+    try:
+        with sync_playwright() as p:
+            ctx, page = open_browser(p)
+            try:
+                page = navigate_to_stock(page, strip_exchange(args.symbol))
+                result = place_order(page, "sell", args.shares, None, confirm=True, sell_all=args.sell_all)
+                result["symbol"] = args.symbol
+                label = "all shares" if args.sell_all else f"{args.shares} shares"
+                print(f"\n[OK] Sell order: {label} x {args.symbol} (Market)")
+            except Exception as e:
+                print(f"\n[ERROR] Sell failed: {e}")
+            finally:
+                print("ORDER_RESULT_JSON:" + json.dumps(result, sort_keys=True))
+    finally:
+        _release_busy_lock()
     if not result.get("submitted"):
         sys.exit(1)
+
+
+def cmd_keepalive(args) -> None:
+    """
+    Keep the Wealthsimple browser session alive.
+    Navigates to WS home every 15 min; auto-logins if the session has expired.
+    Backs off (skips cycle) while buy/sell is in progress (ws_busy.lock exists).
+    Pass --once to run a single cycle and exit (useful for testing).
+    """
+    import time
+    from datetime import datetime
+    from playwright.sync_api import sync_playwright
+
+    INTERVAL = 15 * 60  # 15 minutes
+    once = getattr(args, "once", False)
+    print(f"[keepalive] Starting - refresh every {INTERVAL // 60} min", flush=True)
+
+    while True:
+        if KEEPALIVE_LOCK.exists():
+            print("[keepalive] Browser busy (buy/sell in progress) — skipping cycle", flush=True)
+        else:
+            try:
+                with sync_playwright() as p:
+                    try:
+                        browser = p.chromium.connect_over_cdp(CDP_URL)
+                    except Exception as exc:
+                        print(f"[keepalive] Could not connect to browser: {exc}", flush=True)
+                        browser = None
+
+                    if browser is not None:
+                        ctx = browser.contexts[0] if browser.contexts else None
+                        if ctx is None:
+                            print("[keepalive] No browser context found — is Edge running?", flush=True)
+                        else:
+                            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                            ts = datetime.now().strftime("%H:%M:%S")
+                            print(f"[keepalive] {ts} - refreshing WS home...", flush=True)
+                            page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
+                            page.wait_for_timeout(3000)
+
+                            try:
+                                on_login = page.locator(
+                                    'input[type="password"], input[placeholder*="Password" i]'
+                                ).first.is_visible(timeout=2000)
+                            except Exception:
+                                on_login = False
+
+                            if on_login:
+                                print("[keepalive] Session expired — auto-login...", flush=True)
+                                ok = try_auto_login(page)
+                                print(f"[keepalive] Auto-login: {'OK' if ok else 'FAILED'}", flush=True)
+                            else:
+                                print("[keepalive] Session active OK", flush=True)
+            except Exception as exc:
+                print(f"[keepalive] Error: {exc}", flush=True)
+
+        if once:
+            return
+        time.sleep(INTERVAL)
 
 
 def main() -> None:
@@ -796,12 +909,15 @@ def main() -> None:
     sell_p.add_argument("--shares", type=int, default=None)
     sell_p.add_argument("--sell-all", action="store_true", help="Click Max/Sell all on the sell ticket")
 
+    ka_p = sub.add_parser("keepalive", help="Refresh WS session every 15 min; auto-login on expiry")
+    ka_p.add_argument("--once", action="store_true", help="Run one cycle and exit (for testing)")
+
     args = parser.parse_args()
     if args.cmd == "buy" and not args.max_dollars and args.shares is None:
         parser.error("buy requires --shares unless --max-dollars is used")
     if args.cmd == "sell" and not args.sell_all and args.shares is None:
         parser.error("sell requires --shares unless --sell-all is used")
-    {"setup": cmd_setup, "buy": cmd_buy, "sell": cmd_sell, "balance": cmd_balance}[args.cmd](args)
+    {"setup": cmd_setup, "buy": cmd_buy, "sell": cmd_sell, "balance": cmd_balance, "keepalive": cmd_keepalive}[args.cmd](args)
 
 
 if __name__ == "__main__":
