@@ -722,6 +722,16 @@ def place_order(
 
     if confirm:
         print("Placing order (confirm)...")
+        # Extended-hours limit orders show an intermediate "Review" step before the final submit
+        try:
+            review_intermediate = page.locator('button:has-text("Review")').first
+            if review_intermediate.is_visible(timeout=1500):
+                print("  Intermediate Review step — clicking through...")
+                review_intermediate.click()
+                page.wait_for_timeout(2000)
+                snap(page, f"{side}_review2")
+        except Exception:
+            pass
         # Use JS click to bypass chat-widget overlay that intercepts pointer events
         submitted_via_js = page.evaluate("""
             () => {
@@ -732,6 +742,7 @@ def place_order(
                     'Confirm order', 'Confirm Order',
                     'Submit buy order', 'Submit Buy Order',
                     'Submit sell order', 'Submit Sell Order',
+                    'Submit limit order', 'Submit Limit Order',
                 ];
                 const buttons = [...document.querySelectorAll('button, [role="button"], [role="submit"]')];
                 for (const text of texts) {
