@@ -2243,6 +2243,20 @@ def main() -> None:
             "startTime": now_et().isoformat(),
         }))
 
+        # ── After-hours buy: no position + AH window + past regular close ──
+        _now_main = now_et()
+        _past_close = _now_main.hour > _SELL_HOUR or (
+            _now_main.hour == _SELL_HOUR and _now_main.minute >= _SELL_MINUTE
+        )
+        if not POS_FILE.exists() and _is_afterhours_window() and _past_close:
+            log("No position in AH window — scanning for after-hours buy.")
+            _run_afterhours_strategy(balance, sell_existing=False)
+            # If AH buy placed and monitored, fall through to overnight wait
+            if not args.balance:
+                fresh = fetch_live_balance(retries=2)
+                if fresh:
+                    balance = fresh
+
         if not skip_wait:
             bias = wait_overnight(bias, scans_done, last_status_t, balance)
         skip_wait = False
