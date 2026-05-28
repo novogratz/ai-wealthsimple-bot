@@ -402,13 +402,13 @@ class GrinderMarketData:
                 try:
                     raw = yf.download(
                         batch,
-                        period       = "60d",
+                        period       = "1y",
                         interval     = "1d",
                         auto_adjust  = False,
                         progress     = False,
                         group_by     = "ticker",
                         threads      = False,
-                        timeout      = 20,
+                        timeout      = 30,
                     )
                     if not raw.empty:
                         break
@@ -475,7 +475,7 @@ class GrinderMarketData:
 
     def _fetch_one(self, symbol: str) -> Optional[GrinderSnapshot]:
         try:
-            daily = _history_with_retry(symbol, period="60d", interval="1d")
+            daily = _history_with_retry(symbol, period="1y", interval="1d")
             if daily.empty:
                 return None
             self._frames[symbol] = daily
@@ -582,18 +582,18 @@ class GrinderPick:
 
     @property
     def confidence(self) -> str:
-        if self.score >= 50:
+        if self.score >= 80:
             return "HIGH"
-        elif self.score >= 20:
+        elif self.score >= 45:
             return "MEDIUM"
         else:
             return "LOW"
 
     @property
     def confidence_emoji(self) -> str:
-        if self.score >= 50:
+        if self.score >= 80:
             return "HIGH (fire)"
-        elif self.score >= 20:
+        elif self.score >= 45:
             return "MEDIUM (ok)"
         else:
             return "LOW (warn)"
@@ -824,30 +824,77 @@ class BestEffortStrategy:
 
 @dataclass(frozen=True)
 class SmartSignals:
-    """Extra per-ticker signals computed from 60-day OHLCV history."""
-    pct_5d:    float   # 5-day price return %
-    pct_20d:   float   # 20-day price return %
-    high_20d:  float   # 20-day price high (breakout reference)
-    vol_trend: float   # 5d avg vol / 20d avg vol  (>1 = rising)
-    obv_score: float   # direction-weighted volume score, -1 to +1
+    """Per-ticker signals from 1-year OHLCV history — 9 indicators from 4 quant repos."""
+    pct_5d:       float   # 5-day price return %
+    pct_20d:      float   # 20-day price return %
+    high_20d:     float   # 20-day high (breakout reference)
+    vol_trend:    float   # 5d avg vol / 20d avg vol (>1 = rising)
+    obv_score:    float   # volume-weighted up/down, -1 to +1
+    # ── New: from Minervini + IBKR + CANSLIM research ─────────────────────
+    rsi14:        float   # RSI(14) — 0-100
+    macd_diff:    float   # MACD line − signal line (>0 = bullish)
+    macd_crossed: bool    # MACD crossed above signal in last 3 bars
+    sma50:        float   # 50-day SMA
+    sma150:       float   # 150-day SMA (Minervini Stage 2)
+    sma200:       float   # 200-day SMA (Minervini Stage 2)
+    high_52w:     float   # 52-week high (CANSLIM "N" — leadership proxy)
+    vol_1yr_ratio: float  # yesterday_vol / 1yr max vol (>1.0 = 1yr volume record)
+
+
+def _calc_rsi(closes: "np.ndarray", period: int = 14) -> float:
+    """RSI(period) — returns 50.0 if insufficient data."""
+    import numpy as np
+    if len(closes) < period + 1:
+        return 50.0
+    deltas = np.diff(closes[-(period + 10):])
+    gains  = np.where(deltas > 0, deltas,  0.0)
+    losses = np.where(deltas < 0, -deltas, 0.0)
+    avg_g  = gains[-period:].mean()
+    avg_l  = losses[-period:].mean()
+    if avg_l == 0:
+        return 100.0
+    rs = avg_g / avg_l
+    return float(100 - 100 / (1 + rs))
+
+
+def _calc_macd(closes: "np.ndarray") -> tuple[float, bool]:
+    """MACD(12,26,9) → (macd_diff, crossed_bullish_last_3_bars)."""
+    import pandas as pd
+    if len(closes) < 35:
+        return 0.0, False
+    s = pd.Series(closes)
+    ema12 = s.ewm(span=12, adjust=False).mean()
+    ema26 = s.ewm(span=26, adjust=False).mean()
+    macd  = ema12 - ema26
+    sig   = macd.ewm(span=9, adjust=False).mean()
+    diff  = macd - sig
+    diff_arr = diff.values
+    macd_diff   = float(diff_arr[-1])
+    # Bullish crossover = diff went from negative to positive in last 3 bars
+    crossed = any(
+        diff_arr[-(i+2)] <= 0 and diff_arr[-(i+1)] > 0
+        for i in range(min(3, len(diff_arr) - 1))
+    )
+    return macd_diff, crossed
 
 
 def _build_smart_signals(df: pd.DataFrame) -> SmartSignals:
-    df = df.dropna(subset=["Close", "High", "Volume"])
+    import numpy as np
+    df  = df.dropna(subset=["Close", "High", "Volume"])
     n   = len(df)
     cls = df["Close"].values.astype(float)
     hig = df["High"].values.astype(float)
     vol = df["Volume"].values.astype(float)
 
-    pct_5d   = float((cls[-1] - cls[-6]) / cls[-6] * 100) if n >= 7  else 0.0
+    # ── Core momentum (existing) ───────────────────────────────────────────
+    pct_5d   = float((cls[-1] - cls[-6])  / cls[-6]  * 100) if n >= 7  else 0.0
     pct_20d  = float((cls[-1] - cls[-21]) / cls[-21] * 100) if n >= 22 else 0.0
-    high_20d = float(hig[-20:].max()) if n >= 20 else float(cls[-1])
+    high_20d = float(hig[-20:].max())  if n >= 20 else float(cls[-1])
 
     vol_5d    = float(vol[-5:].mean())  if n >= 5  else float(vol.mean())
     vol_20d   = float(vol[-20:].mean()) if n >= 20 else float(vol.mean())
     vol_trend = vol_5d / vol_20d if vol_20d > 0 else 1.0
 
-    # OBV direction: volume-weighted up/down ratio over last 10 sessions
     days = min(10, n - 1)
     vw_sum = vw_tot = 0.0
     for i in range(-days, 0):
@@ -856,8 +903,26 @@ def _build_smart_signals(df: pd.DataFrame) -> SmartSignals:
         vw_tot += vol[i]
     obv_score = vw_sum / vw_tot if vw_tot > 0 else 0.0
 
-    return SmartSignals(pct_5d=pct_5d, pct_20d=pct_20d,
-                        high_20d=high_20d, vol_trend=vol_trend, obv_score=obv_score)
+    # ── New indicators from 4-repo research ───────────────────────────────
+    rsi14       = _calc_rsi(cls)
+    macd_diff, macd_crossed = _calc_macd(cls)
+
+    sma50  = float(cls[-50:].mean())  if n >= 50  else float(cls.mean())
+    sma150 = float(cls[-150:].mean()) if n >= 150 else float(cls.mean())
+    sma200 = float(cls[-200:].mean()) if n >= 200 else float(cls.mean())
+
+    high_52w = float(hig[-252:].max()) if n >= 60 else float(hig.max())
+
+    vol_252   = float(vol[-252:].max()) if n >= 60 else float(vol.max())
+    vol_1yr_ratio = float(vol[-1]) / vol_252 if vol_252 > 0 else 0.0
+
+    return SmartSignals(
+        pct_5d=pct_5d, pct_20d=pct_20d, high_20d=high_20d,
+        vol_trend=vol_trend, obv_score=obv_score,
+        rsi14=rsi14, macd_diff=macd_diff, macd_crossed=macd_crossed,
+        sma50=sma50, sma150=sma150, sma200=sma200,
+        high_52w=high_52w, vol_1yr_ratio=vol_1yr_ratio,
+    )
 
 
 def _fetch_yahoo_trending() -> set:
@@ -894,10 +959,24 @@ def _fetch_yahoo_trending() -> set:
 
 @dataclass
 class SmartMarketContext:
-    """TSX / sector context fetched once per scan — shared by all tickers."""
-    tsx_5d_pct:     float
-    sector_returns: dict   # ETF symbol → 5d return %
-    trending:       set    # Yahoo Finance trending TSX symbols
+    """SPY + sector context fetched once per scan — includes regime gate."""
+    tsx_5d_pct:       float
+    sector_returns:   dict   # ETF symbol → 5d return %
+    trending:         set    # Yahoo Finance trending US symbols
+    spy_above_sma50:  bool   # SPY healthy short-term (Minervini regime gate)
+    spy_above_sma200: bool   # SPY in long-term uptrend
+    spy_sma50:        float
+    spy_sma200:       float
+    spy_price:        float
+
+    @property
+    def regime_multiplier(self) -> float:
+        """Score multiplier based on SPY market regime (Minervini/RyanJHamby concept)."""
+        if self.spy_above_sma50 and self.spy_above_sma200:
+            return 1.0    # full bull — no penalty
+        if self.spy_above_sma200:
+            return 0.85   # SPY pulled back below 50d but still above 200d
+        return 0.70       # SPY below 200d = bear market — very selective
 
     @classmethod
     def load_or_fetch(cls, max_age: int = 7_200) -> "SmartMarketContext":
@@ -909,6 +988,11 @@ class SmartMarketContext:
                         tsx_5d_pct=float(raw["tsx_5d_pct"]),
                         sector_returns={k: float(v) for k, v in raw["sector_returns"].items()},
                         trending=set(raw.get("trending", [])),
+                        spy_above_sma50=bool(raw.get("spy_above_sma50", True)),
+                        spy_above_sma200=bool(raw.get("spy_above_sma200", True)),
+                        spy_sma50=float(raw.get("spy_sma50", 0)),
+                        spy_sma200=float(raw.get("spy_sma200", 0)),
+                        spy_price=float(raw.get("spy_price", 0)),
                     )
             except Exception:
                 pass
@@ -919,13 +1003,16 @@ class SmartMarketContext:
         tsx_pct = 0.0
         sectors: dict = {}
         trending: set = set()
+        spy_above_sma50 = True
+        spy_above_sma200 = True
+        spy_sma50 = spy_sma200 = spy_price = 0.0
 
         syms = ["^GSPC"] + _SECTOR_ETFS
         try:
             raw = yf.download(
-                syms, period="30d", interval="1d",
+                syms, period="1y", interval="1d",
                 auto_adjust=False, progress=False,
-                group_by="ticker", threads=False, timeout=15,
+                group_by="ticker", threads=False, timeout=20,
             )
             for sym in syms:
                 try:
@@ -936,6 +1023,11 @@ class SmartMarketContext:
                     pct = float((c[-1] - c[-6]) / c[-6] * 100)
                     if sym == "^GSPC":
                         tsx_pct = pct
+                        spy_price  = float(c[-1])
+                        spy_sma50  = float(c[-50:].mean())  if len(c) >= 50  else spy_price
+                        spy_sma200 = float(c[-200:].mean()) if len(c) >= 200 else spy_price
+                        spy_above_sma50  = spy_price > spy_sma50
+                        spy_above_sma200 = spy_price > spy_sma200
                     else:
                         sectors[sym] = pct
                 except Exception:
@@ -948,12 +1040,21 @@ class SmartMarketContext:
         except Exception:
             pass
 
-        ctx = cls(tsx_5d_pct=tsx_pct, sector_returns=sectors, trending=trending)
+        ctx = cls(
+            tsx_5d_pct=tsx_pct, sector_returns=sectors, trending=trending,
+            spy_above_sma50=spy_above_sma50, spy_above_sma200=spy_above_sma200,
+            spy_sma50=spy_sma50, spy_sma200=spy_sma200, spy_price=spy_price,
+        )
         try:
             SMART_CONTEXT_CACHE.write_text(json.dumps({
                 "tsx_5d_pct": tsx_pct,
                 "sector_returns": sectors,
                 "trending": list(trending),
+                "spy_above_sma50":  spy_above_sma50,
+                "spy_above_sma200": spy_above_sma200,
+                "spy_sma50":   spy_sma50,
+                "spy_sma200":  spy_sma200,
+                "spy_price":   spy_price,
             }, indent=2), encoding="utf-8")
         except Exception:
             pass
@@ -962,17 +1063,22 @@ class SmartMarketContext:
 
 class SmartGrinderStrategy:
     """
-    Primary screener — composite 5-signal score replaces hard-filter approach.
+    Primary screener — 9-signal composite score (0-~110 pts).
 
-    Signals:
-      A. Momentum cascade  — 1d + 5d + 20d alignment (confirms continuation)
-      B. Breakout          — proximity to 20-day high (institutional conviction)
-      C. Volume build      — 5d avg vol vs 20d avg (rising = smart money loading)
-      D. OBV direction     — volume-weighted up/down over 10 sessions
-      E. Relative strength — stock 5d return vs TSX composite
+    Signals (from 4 quant repos — IBKR, Minervini, CANSLIM, LangChain):
+      A. Momentum cascade  — 1d/5d/20d alignment                   (0-25 pts)
+      B. MACD(12,26,9)     — bullish crossover / above signal       (0-12 pts)
+      C. RSI(14) zone      — 45-70 = momentum, <35 = bounce        (0-10 pts)
+      D. Stage 2 MA align  — Price>SMA50>SMA150>SMA200 [Minervini] (0-12 pts)
+      E. Volume conviction — rel vol + trend + 1yr breakthrough     (0-18 pts)
+      F. 52-week proximity — within 20% of 52-week high [CANSLIM]  (0-10 pts)
+      G. Rel strength SPY  — outperforms SPY 5d return             (0-8 pts)
+      H. OBV smart money   — volume-weighted up/down               (0-5 pts)
+      I. Bonuses           — close quality + ATR + trending         (0-10 pts)
 
-    Base filters: price $1.50–$50 | avg vol ≥100k | yesterday ≥+0.5% | above EMA20 | mktcap ≥$25M
-    Score: 0–100 composite  (≥50 = HIGH, ≥25 = MEDIUM, <25 = LOW)
+    Market regime gate (Minervini): SPY below SMA200 → scores × 0.70
+    Base filters: price $1–$1000 | avg vol ≥100k | yesterday ≥+0.5% | above EMA20
+    Confidence: HIGH ≥80 | MEDIUM ≥45 | LOW <45
     """
 
     MIN_PRICE      = 1.00
@@ -1033,36 +1139,65 @@ class SmartGrinderStrategy:
 
     def _score(self, snap: GrinderSnapshot, sig: SmartSignals) -> float:
         s = 0.0
+        price = snap.last_close
 
-        # A — Momentum cascade (0-40)
-        s += min(20.0, snap.yesterday_pct_change * 2.5)   # 1-day momentum
-        if sig.pct_5d  > 0: s += 10.0                     # 5-day aligned
-        if sig.pct_20d > 0: s += 10.0                     # 20-day aligned
+        # A — Momentum cascade (0-25) ─────────────────────────────────────
+        s += min(12.0, snap.yesterday_pct_change * 1.2)    # 1-day (max 12 @ +10%)
+        if sig.pct_5d  > 0: s += 7.0                       # 5-day confirmed
+        if sig.pct_20d > 0: s += 6.0                       # 20-day confirmed
 
-        # B — Breakout proximity (0-15)
-        if sig.high_20d > 0:
-            prox = snap.last_close / sig.high_20d
-            if   prox >= 0.99: s += 15.0   # at / breaking 20d high
-            elif prox >= 0.97: s += 10.0
-            elif prox >= 0.95: s +=  5.0
+        # B — MACD(12,26,9) (0-12) ────────────────────────────────────────
+        if sig.macd_crossed:
+            s += 12.0                                       # fresh bullish crossover
+        elif sig.macd_diff > 0:
+            s += 6.0                                        # above signal, no cross yet
 
-        # C — Volume conviction (0-20)
-        s += min(10.0, snap.rel_volume * 3.33)             # relative volume
-        s += min(10.0, max(0.0, (sig.vol_trend - 1.0) * 10.0))  # rising vol trend
+        # C — RSI(14) zone (0-10) ─────────────────────────────────────────
+        rsi = sig.rsi14
+        if   45 <= rsi <= 70: s += 10.0                    # momentum zone (not overbought)
+        elif 35 <= rsi <  45: s +=  5.0                    # building momentum
+        elif 30 <= rsi <  35: s +=  3.0                    # oversold bounce candidate
+        # >70 = overbought caution → 0 pts; <30 deep oversold → 0 pts
 
-        # D — OBV smart-money (0-10)
-        s += max(0.0, sig.obv_score * 10.0)
+        # D — Minervini Stage 2 MA alignment (0-12) ───────────────────────
+        if sig.sma50 > 0 and sig.sma150 > 0 and sig.sma200 > 0:
+            if price > sig.sma50 > sig.sma150 > sig.sma200:
+                s += 12.0                                   # full Stage 2 (best setup)
+            elif price > sig.sma50 > sig.sma200:
+                s +=  7.0                                   # partial alignment
+            elif price > sig.sma50:
+                s +=  3.0                                   # short-term trend intact
 
-        # E — Relative strength vs TSX (0-10)
+        # E — Volume conviction (0-18) ────────────────────────────────────
+        s += min(8.0, snap.rel_volume * 2.0)                # rel vol (4x = 8 pts)
+        s += min(5.0, max(0.0, (sig.vol_trend - 1.0) * 5.0))  # rising vol trend
+        if sig.vol_1yr_ratio >= 1.0:
+            s += 5.0                                        # 1-year volume record!
+
+        # F — 52-week high proximity / CANSLIM "N" (0-10) ────────────────
+        if sig.high_52w > 0 and price > 0:
+            pct_from_high = (sig.high_52w - price) / sig.high_52w
+            if   pct_from_high <= 0.02: s += 10.0          # at/breaking 52w high
+            elif pct_from_high <= 0.10: s +=  7.0          # within 10% of high
+            elif pct_from_high <= 0.20: s +=  4.0          # within 20% of high
+            elif pct_from_high <= 0.30: s +=  1.0          # still in striking range
+
+        # G — Relative strength vs SPY (0-8) ─────────────────────────────
         rs = sig.pct_5d - self.ctx.tsx_5d_pct
-        if   rs > 5: s += 10.0
-        elif rs > 2: s +=  7.0
-        elif rs > 0: s +=  4.0
+        if   rs > 5: s += 8.0
+        elif rs > 2: s += 5.0
+        elif rs > 0: s += 3.0
 
-        # Bonuses: close quality + ATR + trending (0-10)
-        s += snap.close_strength * 2.5
+        # H — OBV smart money (0-5) ───────────────────────────────────────
+        s += max(0.0, sig.obv_score * 5.0)
+
+        # I — Bonuses: close quality + ATR + trending (0-10) ─────────────
+        s += snap.close_strength * 3.5                      # max 3.5
         s += min(2.5, snap.atr_pct * 0.5)
         if snap.symbol in self.ctx.trending:
-            s += 5.0
+            s += 4.0
+
+        # Market regime gate (Minervini): never fight the tape ────────────
+        s *= self.ctx.regime_multiplier
 
         return s
