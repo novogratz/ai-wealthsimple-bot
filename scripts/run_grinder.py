@@ -1294,7 +1294,12 @@ def execute_buy(pick: GrinderPick, balance: float, bias: FuturesBias,
             notify(f"❌ <b>Buy FAILED</b> for <code>{pick.symbol}</code> — check logs.")
         return False
 
-    order       = _parse_order_result(result.stdout)
+    order = _parse_order_result(result.stdout)
+    if not order.get("submitted"):
+        notify(f"❌ <b>Buy FAILED</b> for <code>{pick.symbol}</code> — order not submitted.")
+        log(f"Buy failed for {pick.symbol}: order not submitted.")
+        return False
+
     actual_cost = float(order.get("estimated_value", deploy) or deploy)
     actual_qty  = float(order.get("estimated_quantity") or
                         (actual_cost / pick.last_close if pick.last_close else shares_est))
@@ -1458,8 +1463,8 @@ def _afterhours_buy(pick: dict, balance: float) -> bool:
         print(f"  {line}", flush=True)
 
     order_data = _parse_order_result(buy_result.stdout)
-    if not order_data.get("submitted") and buy_result.returncode != 0:
-        log(f"AH buy failed for {sym}")
+    if not order_data.get("submitted"):
+        log(f"AH buy failed for {sym}: order not submitted.")
         notify(f"❌ After-hours buy failed for <code>{sym}</code>.")
         return False
 
@@ -1757,8 +1762,8 @@ def _premarket_buy(pick: dict, balance: float) -> bool:
         print(f"  {line}", flush=True)
 
     order_data = _parse_order_result(buy_result.stdout)
-    if not order_data.get("submitted") and buy_result.returncode != 0:
-        log(f"PM buy failed for {sym}")
+    if not order_data.get("submitted"):
+        log(f"PM buy failed for {sym}: order not submitted.")
         notify(f"❌ Pre-market buy failed for <code>{sym}</code>.")
         return False
 
