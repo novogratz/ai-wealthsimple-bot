@@ -1403,6 +1403,12 @@ def _scan_afterhours(watchlist: list[str], min_pct: float = _AH_MIN_PCT) -> list
             ah_pct = (last / close - 1) * 100
             if ah_pct < min_pct:
                 continue
+            
+            # HARD FILTER: No fractional shares in PM/AH on Wealthsimple.
+            # Must be < $10 to ensure we can actually buy enough whole shares.
+            if last >= 10.0:
+                continue
+            
             reg_vol = getattr(fi, "regular_market_volume", 0) or 0
             avg_vol = getattr(fi, "three_month_average_volume", 0) or 0
             vol_ratio = (reg_vol / avg_vol) if avg_vol > 0 else 1.0
@@ -1695,14 +1701,16 @@ def _scan_premarket(watchlist: list[str], min_pct: float = _PM_MIN_PCT) -> list[
             if pm_pct < min_pct:
                 continue
             
-            # Prioritize stocks < $10 for pre-market to maximize share count (no fractional in PM)
-            price_bonus = 1.2 if last < 10.0 else 1.0
+            # HARD FILTER: No fractional shares in PM/AH on Wealthsimple.
+            # Must be < $10 to ensure we can actually buy enough whole shares with available balance.
+            if last >= 10.0:
+                continue
             
             reg_vol = getattr(fi, "regular_market_volume", 0) or 0
             avg_vol = getattr(fi, "three_month_average_volume", 0) or 0
             vol_ratio = (reg_vol / avg_vol) if avg_vol > 0 else 1.0
             vol_bonus = min(max(vol_ratio, 0.5), 4.0)
-            score = (max(pm_pct, 0) ** 1.5) * vol_bonus * price_bonus
+            score = (max(pm_pct, 0) ** 1.5) * vol_bonus
             picks.append({
                 "symbol":    sym,
                 "close":     round(close, 4),
