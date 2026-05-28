@@ -1066,15 +1066,15 @@ class SmartGrinderStrategy:
     Primary screener — 9-signal composite score (0-~110 pts).
 
     Signals (from 4 quant repos — IBKR, Minervini, CANSLIM, LangChain):
-      A. Momentum cascade  — 1d/5d/20d alignment                   (0-25 pts)
-      B. MACD(12,26,9)     — bullish crossover / above signal       (0-12 pts)
-      C. RSI(14) zone      — 45-70 = momentum, <35 = bounce        (0-10 pts)
-      D. Stage 2 MA align  — Price>SMA50>SMA150>SMA200 [Minervini] (0-12 pts)
-      E. Volume conviction — rel vol + trend + 1yr breakthrough     (0-18 pts)
-      F. 52-week proximity — within 20% of 52-week high [CANSLIM]  (0-10 pts)
-      G. Rel strength SPY  — outperforms SPY 5d return             (0-8 pts)
-      H. OBV smart money   — volume-weighted up/down               (0-5 pts)
-      I. Bonuses           — close quality + ATR + trending         (0-10 pts)
+      A. Momentum alignment — 1d/5d/20d alignment alignment        (0-25 pts)
+      B. MACD(12,26,9)      — bullish crossover / above signal      (0-12 pts)
+      C. RSI(14) zone       — 45-70 = momentum, <35 = bounce       (0-10 pts)
+      D. Stage 2 MA align   — Price>SMA50>SMA150>SMA200 [Minervini](0-12 pts)
+      E. Volume conviction  — rel vol + trend + 1yr breakthrough    (0-18 pts)
+      F. 52-week proximity  — within 20% of 52-week high [CANSLIM] (0-10 pts)
+      G. Rel strength SPY   — outperforms SPY 5d return            (0-8 pts)
+      H. OBV smart money    — volume-weighted up/down              (0-5 pts)
+      I. Bonuses            — close quality + ATR + trending        (0-10 pts)
 
     Market regime gate (Minervini): SPY below SMA200 → scores × 0.70
     Base filters: price $1–$1000 | avg vol ≥100k | yesterday ≥+0.5% | above EMA20

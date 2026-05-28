@@ -77,7 +77,9 @@ _FULL_REFRESH_TTL  = 24 * 3600
 _CACHED_SCAN_TTL   = 18 * 3600
 _MIN_COVERAGE_FOR_CACHE = 0.35
 _DEPLOY_PCT           = 100       # 100% of balance deployed per trade
-_PROFIT_TARGET_PCT    = 5.0       # sell immediately when unrealized >= +5%
+_PROFIT_TARGET_PCT    = 10.0      # sell immediately when unrealized >= +10%
+_TRAILING_STOP_TRIGGER_PCT  = 2.0  # activate trailing stop at +2.0%
+_TRAILING_STOP_DISTANCE_PCT = 1.0  # trail by 1.0% from peak
 _LATE_LOCK_PCT        = 2.0       # legacy constant — kept for messages only (always sell at 3:55 PM now)
 _MIN_SMART_HOLD_SCORE = 20        # hold overnight if re-scan smart score still >= this
 _UNIVERSE_MAX_AGE = 7 * 86400  # refresh universe.json if older than 7 days
@@ -1114,16 +1116,76 @@ def build_update_message(
     stats      = _get_trade_stats()
     at_color   = _pnl_color(stats["total_pnl"])
     time_str   = f"{h_left}h {m_left:02d}min" if h_left else f"{m_left} min"
+    
+    # Trailing stop info
+    target_info = f"  🎯 Target: <b>+{_PROFIT_TARGET_PCT:.0f}%</b>"
+    if _TRAILING_STOP_TRIGGER_PCT > 0:
+        target_info += f"  |  🛡️ Trail: <b>+{_TRAILING_STOP_TRIGGER_PCT:.1f}%</b>"
 
     return (
         f"{color} <b>Position Update — <code>{symbol}</code></b>  |  {now_et():%H:%M} ET\n\n"
         f"  {arrow} Price: <b>${price:.2f}</b>  (entry ${entry:.2f})\n"
         f"  {color} Unrealized P&L: <b>${unrealized:+.2f} USD ({pnl_pct:+.2f}%)</b>\n"
         f"  💼 Position value: <b>${shares * price:.2f} USD</b>\n\n"
+        f"{target_info}\n"
         f"  ⏰ Selling in <b>{time_str}</b>  ({sell_label})\n"
         f"  {at_color} All-time: <b>${stats['total_pnl']:+.2f} USD</b>"
         f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
     )
+
+
+def build_daily_report() -> str:
+    """Build a professional daily performance report."""
+    stats = _get_trade_stats()
+    ledger = []
+    if PNL_LEDGER.exists():
+        try:
+            ledger = json.loads(PNL_LEDGER.read_text())
+        except Exception:
+            pass
+    
+    # Filter today's trades
+    today_str = now_et().strftime("%Y-%m-%d")
+    today_trades = [t for t in ledger if str(t.get("time", "")).startswith(today_str)]
+    
+    daily_pnl = sum(t.get("realizedPnl", 0) for t in today_trades)
+    daily_pnl_pct = 0.0
+    if today_trades:
+        # Approximate daily % based on starting balance
+        try:
+            sb = float(json.loads(SESSION_FILE.read_text()).get("startingBalance", 100.0))
+            daily_pnl_pct = (daily_pnl / sb) * 100
+        except Exception:
+            pass
+
+    color = _pnl_color(daily_pnl)
+    at_color = _pnl_color(stats["total_pnl"])
+    
+    trade_lines = ""
+    for t in today_trades:
+        t_color = _pnl_color(t.get("realizedPnl", 0))
+        trade_lines += (
+            f"  {t_color} <code>{t['symbol']}</code>: "
+            f"<b>{t.get('realizedPnl', 0):+.2f} USD</b> ({t.get('pnlPct', 0):+.2f}%)\n"
+        )
+    if not trade_lines:
+        trade_lines = "  <i>No realized trades today.</i>\n"
+
+    report = (
+        f"📊 <b>DAILY QUANT REPORT — {now_et():%b %d, %Y}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"<b>PROFIT & LOSS:</b>\n"
+        f"  {color} Daily P&L: <b>${daily_pnl:+.2f} USD ({daily_pnl_pct:+.2f}%)</b>\n"
+        f"  {at_color} All-time: <b>${stats['total_pnl']:+.2f} USD</b>\n\n"
+        f"<b>ACTIVITY:</b>\n"
+        f"{trade_lines}\n"
+        f"<b>PERFORMANCE METRICS:</b>\n"
+        f"  🏆 Win Rate: <b>{(stats['wins'] / stats['count'] * 100) if stats['count'] else 0.0:.1f}%</b>\n"
+        f"  📊 Total Trades: <b>{stats['count']}</b>\n"
+        f"  💰 Current Balance: <b>${fetch_live_balance() or 0:.2f} USD</b>\n\n"
+        f"<i>Generated autonomously by Le Grinder v4.0</i>"
+    )
+    return report
 
 
 def build_sell_message(
@@ -1568,12 +1630,12 @@ def _run_afterhours_strategy(balance: float, sell_existing: bool = False) -> Non
         log("Existing position still open (will sell at 9:31 AM) — "
             "proceeding to AH buy scan with available cash.")
 
-    from kzer_bot.grinder_strategy import _load_watchlist
-    watchlist = _load_watchlist()
-    picks = _scan_afterhours(watchlist)
+    # Use shortlist from yesterday for better accuracy
+    scan_symbols, _ = _choose_scan_symbols()
+    picks = _scan_afterhours(scan_symbols)
     if not picks:
         log(f"No AH picks at {_AH_MIN_PCT:.1f}% — trying best-effort (any positive AH mover)...")
-        picks = _scan_afterhours(watchlist, min_pct=0.0)
+        picks = _scan_afterhours(scan_symbols, min_pct=0.0)
 
     if not picks:
         log("No positive AH movers found — holding cash until market open.")
@@ -1711,6 +1773,90 @@ def _premarket_buy(pick: dict, balance: float) -> bool:
     return True
 
 
+def _premarket_sell_limit(symbol: str, entry: float, shares: float,
+                          cost: float, limit_price: float, label: str) -> bool:
+    """Execute a limit sell during pre-market."""
+    if shares != int(shares):
+        log(f"Cannot limit-sell fractional shares ({shares:.4f}) in pre-market — "
+            f"will sell at 9:31 AM market open instead.")
+        return False
+
+    notify(
+        f"🎯 <b>PM limit SELL — <code>{symbol}</code></b>\n\n"
+        f"📉 Limit: <b>${limit_price:.2f}</b>  |  Entry: ${entry:.2f}\n"
+        f"💰 Reason: {label}"
+    )
+    sell_cmd = [
+        PYTHON, str(AUTO_SCRIPT), "sell",
+        "--symbol", symbol,
+        "--sell-all",
+        "--price", f"{limit_price:.2f}",
+        "--shares", f"{shares:.6f}".rstrip("0").rstrip("."),
+    ]
+    sell_result = subprocess.run(sell_cmd, capture_output=True, text=True, timeout=180)
+    order_data = _parse_order_result(sell_result.stdout)
+    submitted  = order_data.get("submitted") or sell_result.returncode == 0
+    if not submitted:
+        log(f"PM limit sell failed for {symbol}")
+        notify(f"⚠️ PM limit sell order failed for <code>{symbol}</code> — will retry at 9:31 AM.")
+        return False
+
+    actual_qty   = float(order_data.get("estimated_quantity") or shares)
+    actual_value = actual_qty * limit_price
+    actual_price = actual_value / actual_qty if actual_qty else limit_price
+    trade_pnl    = actual_value - cost
+    at_pnl       = _record_trade(symbol, cost, actual_value, actual_qty)
+
+    _append_trade_history(symbol, "SELL", actual_price, actual_qty, cost, trade_pnl, "Pre-Market Limit")
+    POS_FILE.unlink(missing_ok=True)
+    notify(build_sell_message(symbol, entry, actual_price, actual_qty, cost, trade_pnl, at_pnl))
+    log(f"PM sell confirmed: ${trade_pnl:+.2f} trade P&L  |  All-time: ${at_pnl:+.2f}")
+    return True
+
+
+def _premarket_hold_loop(symbol: str, entry: float, shares: float,
+                         cost: float, strat: str) -> None:
+    """Monitor a pre-market position until 9:29 AM or +2% hit."""
+    import yfinance as yf
+    log(f"PM hold loop: {symbol}  {shares:.4f} sh @ ${entry:.2f}")
+    notify(
+        f"📊 <b>Pre-market position</b> — <code>{symbol}</code>\n\n"
+        f"💰 {shares:.4f} sh @ ${entry:.2f}  |  cost ${cost:.2f}\n"
+        f"🎯 PM profit target: +{_PM_PROFIT_PCT:.0f}%  |  Auto-sell at 9:29 AM or 9:31 AM"
+    )
+
+    last_pm_notify_t = 0.0
+    _PM_NOTIFY_INTERVAL = 600
+    while True:
+        n = now_et()
+        if n.hour >= 9 and n.minute >= 29:
+            log(f"PM window closing — {symbol} held until 9:31 AM decision")
+            return
+
+        try:
+            fi    = yf.Ticker(symbol).fast_info
+            price = fi.last_price
+            if price and entry > 0:
+                pnl_pct = (price - entry) / entry * 100
+                if pnl_pct >= _PM_PROFIT_PCT:
+                    sell_limit = round(price * 0.995, 2)
+                    log(f"PM PROFIT TARGET: {pnl_pct:+.1f}% — limit sell at ${sell_limit:.2f}")
+                    notify(
+                        f"🎯 <b>PM PROFIT TARGET HIT — <code>{symbol}</code></b>\n\n"
+                        f"📈 {pnl_pct:+.1f}%  |  PM price: ${price:.2f}\n"
+                        f"💰 Limit sell at ${sell_limit:.2f}"
+                    )
+                    _premarket_sell_limit(symbol, entry, shares, cost, sell_limit, "PM profit target")
+                    return
+                if time.time() - last_pm_notify_t >= _PM_NOTIFY_INTERVAL:
+                    log(f"PM update: {symbol}  ${price:.2f}  ({pnl_pct:+.2f}%)")
+                    last_pm_notify_t = time.time()
+        except Exception as exc:
+            log(f"PM price check error: {exc}")
+
+        time.sleep(60)
+
+
 def _save_legacy_position(symbol: str, entry: float, shares: float,
                            cost: float, strat: str) -> None:
     """Save current position as legacy before overwriting position file."""
@@ -1761,19 +1907,18 @@ def _run_premarket_strategy(balance: float) -> None:
         log("Not in pre-market window — skipping.")
         return
 
-    # Scan pre-market movers
-    from kzer_bot.grinder_strategy import _load_watchlist
-    watchlist = _load_watchlist()
-    picks = _scan_premarket(watchlist)
+    # Scan pre-market movers — use shortlist from yesterday for better accuracy
+    scan_symbols, _ = _choose_scan_symbols()
+    picks = _scan_premarket(scan_symbols)
     if not picks:
         log(f"No PM picks at {_PM_MIN_PCT:.1f}% — trying best-effort (any positive PM mover)...")
-        picks = _scan_premarket(watchlist, min_pct=0.0)
+        picks = _scan_premarket(scan_symbols, min_pct=0.0)
 
     if not picks:
         log("No positive PM movers found — holding cash.")
         notify(
             f"🌅 <b>Pre-market scan complete</b>\n\n"
-            f"No positive PM movers found — holding cash.\n"
+            f"No positive PM movers found in shortlist — holding cash.\n"
             f"📅 Next entry: <b>9:35 AM ET</b>"
         )
         return
@@ -1806,6 +1951,13 @@ def _run_premarket_strategy(balance: float) -> None:
             log(f"Could not save legacy position: {exc}")
 
     bought = _premarket_buy(top[0], balance)
+    if bought:
+        # monitor the PM position
+        pos    = json.loads(POS_FILE.read_text())
+        entry  = float(pos.get("buyPrice", top[0]["pm_price"]))
+        shares = float(pos.get("shares", 1))
+        cost   = float(pos.get("estimatedCost", balance))
+        _premarket_hold_loop(top[0]["symbol"], entry, shares, cost, "Pre-Market Limit")
     if not bought:
         log("PM buy failed — restoring position.")
         # Remove phantom legacy if buy failed
@@ -1994,6 +2146,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
 
     last_update_t = 0.0
     UPDATE_INTERVAL = 1800  # 30 min
+    max_price = 0.0
 
     log(f"Holding {symbol}  {shares:.4f} sh @ ${entry:.2f}  (cost ${cost:.2f})")
 
@@ -2160,6 +2313,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
             eod_pct = (price_eod - entry) / entry * 100 if entry > 0 else 0
             log(f"3:55 PM: {eod_pct:+.1f}% — selling always, AH rotation follows")
             _execute_sell_order(symbol, entry, shares, cost, strat, "3:55 PM")
+            notify(build_daily_report())
             return
 
         # ── forceSell flag check — immediate exit ─────────────────────────
@@ -2178,14 +2332,22 @@ def hold_and_sell(balance: float = 0.0) -> None:
             except Exception:
                 pass
 
-        # ── Profit target: check every 60s; Telegram update every 30 min ───
+        # ── Profit target & Trailing stop: check every 60s ─────────────────
         try:
             snap = md.snapshot(symbol)
             if snap:
                 price   = snap.last_price
                 pnl_pct = (price - entry) / entry * 100 if entry > 0 else 0
 
-                # Profit target fires any time — no after_1030 restriction
+                # Track peak price for trailing stop
+                if max_price == 0.0:
+                    max_price = price
+                if price > max_price:
+                    max_price = price
+                
+                max_pnl_pct = (max_price - entry) / entry * 100 if entry > 0 else 0
+
+                # 1. Hard Profit Target
                 if pnl_pct >= _PROFIT_TARGET_PCT:
                     log(f"PROFIT TARGET: {pnl_pct:+.1f}% ≥ +{_PROFIT_TARGET_PCT:.0f}% — selling now")
                     notify(
@@ -2195,6 +2357,20 @@ def hold_and_sell(balance: float = 0.0) -> None:
                     )
                     _execute_sell_order(symbol, entry, shares, cost, strat, "Profit Target")
                     return
+
+                # 2. Trailing Stop (Triggered at +2%, trail by 1%)
+                if max_pnl_pct >= _TRAILING_STOP_TRIGGER_PCT:
+                    stop_price = max_price * (1 - _TRAILING_STOP_DISTANCE_PCT / 100)
+                    if price <= stop_price:
+                        log(f"TRAILING STOP: {pnl_pct:+.1f}% (peak {max_pnl_pct:+.1f}%) — selling now")
+                        notify(
+                            f"🛡️ <b>TRAILING STOP HIT — selling <code>{symbol}</code></b>\n\n"
+                            f"📈 Current: <b>{pnl_pct:+.1f}%</b>  |  Peak: <b>{max_pnl_pct:+.1f}%</b>\n"
+                            f"💰 Price: ${price:.2f}  |  Stop: ${stop_price:.2f}\n"
+                            f"🔒 Protecting gains — executing sell now"
+                        )
+                        _execute_sell_order(symbol, entry, shares, cost, strat, "Trailing Stop")
+                        return
 
                 if time.time() - last_update_t >= UPDATE_INTERVAL:
                     notify(build_update_message(symbol, entry, price, shares, cost))
@@ -2284,6 +2460,7 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
             scans_done.discard("5am")
             scans_done.discard("5pm")
             scans_done.discard("pm")
+            scans_done.discard("daily_report")
 
         # Near buy window → exit sleep loop
         if now.weekday() < 5:
@@ -2544,6 +2721,13 @@ def main() -> None:
         _past_close = _now_main.hour > _SELL_HOUR or (
             _now_main.hour == _SELL_HOUR and _now_main.minute >= _SELL_MINUTE
         )
+        
+        # Daily report at market close if not already sent by hold_and_sell
+        if _past_close and "daily_report" not in scans_done:
+            log("Market closed — sending daily performance report.")
+            notify(build_daily_report())
+            scans_done.add("daily_report")
+
         if not POS_FILE.exists() and _is_afterhours_window() and _past_close:
             log("No position in AH window — scanning for after-hours buy.")
             _run_afterhours_strategy(balance, sell_existing=False)

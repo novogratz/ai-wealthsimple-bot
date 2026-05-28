@@ -91,33 +91,27 @@ ai-wealthsimple-bot/
     └── yfinance_cache/        ← yfinance tz cache
 ```
 
-## Score formula (v3.4)
+## Score formula (v4.0)
 
-### Smart Strategy (tier 0) — composite 0–100
+### 9-Signal Quant Engine (Primary) — 0–110 pts
+Synthesized from IBKR, Minervini, CANSLIM, and LangChain concepts:
 ```
-Signal A: Momentum cascade  (0–40 pts) — 1d/5d/20d return alignment
-Signal B: Breakout proximity (0–15 pts) — closeness to 20-day high
-Signal C: Volume conviction  (0–20 pts) — rel_vol + 5d/20d vol trend
-Signal D: OBV smart-money   (0–10 pts) — direction-weighted vol 10 sessions
-Signal E: Relative strength  (0–10 pts) — 5d return vs ^GSPTSE
-Bonuses: close strength + ATR + Yahoo trending (0–5 pts)
+Signal A: Momentum alignment (0–25 pts) — 1d/5d/20d alignment
+Signal B: MACD Bullish      (0–12 pts) — Crossover + Signal alignment
+Signal C: RSI Momentum      (0–10 pts) — Goldilocks zone (45-70)
+Signal D: Stage 2 Alignment (0–12 pts) — Price>SMA50>SMA150>SMA200
+Signal E: Volume Conviction (0–18 pts) — RVOL + Trend + Breakthrough
+Signal F: High Proximity    (0–10 pts) — Within 20% of 52-week high
+Signal G: Relative Strength (0–8 pts)  — Performance vs S&P 500
+Signal H: OBV Smart Money   (0–5 pts)  — Direction-weighted volume
+Signal I: Bonuses           (0–10 pts) — Close Quality + ATR + Trending
 ```
 
-### Legacy score (tiers 1–3)
-```python
-score = yesterday_pct_change * (rel_volume ** 1.5) * atr_pct * (1 + close_strength)
-
-# where:
-yesterday_pct_change = (last_close - prev_close) / prev_close * 100
-rel_volume           = yesterday_volume / avg_volume_20
-atr_pct              = atr14 / last_close * 100
-close_strength       = (last_close - yesterday_low) / (yesterday_high - yesterday_low)
-
-# Confidence thresholds (both scorers):
-# score >= 50 (smart) or raw score → HIGH  (strong setup)
-# score >= 20                       → MEDIUM
-# score  < 20                       → LOW   (use fallback)
-```
+**Risk Management & Exits:**
+- **Daily Target:** +10.0% (Hard target for intraday rotation)
+- **Trailing Stop:** Trigger +2.0%, Trail 1.0% (Activated after trigger)
+- **Market Close:** 3:55 PM (Hard sell of all daytime positions)
+- **Extended Hours:** PM (+2.0% target), AH (+3.0% target)
 
 ## Wealthsimple automation protocol
 

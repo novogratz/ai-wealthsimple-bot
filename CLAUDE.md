@@ -65,36 +65,27 @@ WS_PASSWORD=yourpassword
 
 `WS_EMAIL` / `WS_PASSWORD` power the auto-login recovery: if the session expires mid-run, `wealthsimple_auto.py` detects the login page and re-authenticates automatically.
 
-## Strategy summary (v3.4)
+## Strategy summary (v4.0)
 
-### 4-tier picks (never skips a day)
+### 9-signal Quant Engine (0-110 pts)
+Primary screener synthesizing institutional strategies (IBKR, Minervini, CANSLIM, LangChain):
+- **Momentum:** 1d/5d/20d alignment
+- **Trend:** Stage 2 Alignment (Minervini)
+- **Volume:** RVOL + trend + OBV (Smart Money)
+- **Alpha:** Rel strength vs SPY/TSX
+- **Technical:** MACD crossover + RSI zone
+- **Context:** Yahoo trending + ATR + Close Strength
 
-**Tier 0 — Smart Strategy (primary):**  
-Composite 0–100 score. price $0.10–$100 | avg vol ≥ 30k | yesterday ≥ +0.5% | above EMA20  
-5 signals: momentum cascade (1d/5d/20d) + breakout proximity + volume build + OBV smart-money + relative strength vs TSX
+### Mandate: 10% Daily Alpha
+- **Zero Idle Cash:** Always deployed (PM -> Intraday -> AH -> Overnight)
+- **Hard Target:** +10% unrealized profit → sell immediately & rotate
+- **Trailing Stop:** Triggered at +2%, 1% trail distance to lock gains
+- **3:55 PM Lock:** Hard close of all daytime positions to capture daily alpha
 
-**Tier 1 — Main (8 criteria):**  
-price $2–$40 | avg vol ≥ 300k | yesterday +1.5–+12% | rel vol ≥ 1.5× | ATR14 ≥ 1.5% | above EMA20 | above EMA5 | close strength ≥ 0.40
-
-**Tier 2 — Fallback (relaxed):**  
-Fires when main finds nothing. price $1–$40 | avg vol ≥ 100k | pct +1–15% | rel vol ≥ 1.0× | above EMA20
-
-**Tier 3 — Best Available (guaranteed):**  
-No filters — highest-scoring ticker with positive momentum from full universe.
-
-**Smart score:** composite 0–100 (momentum cascade 40 pts + breakout 15 + volume build 20 + OBV 10 + rel strength 10 + bonuses 5)  
-**Legacy score:** `yesterday_pct × rel_volume^1.5 × atr_pct × (1 + close_strength)`
-
-**Futures bias (ES=F):**
-- ≥ +0.3% → GREEN → buy at 9:35 AM
-- ≤ -0.3% → RED   → wait, buy 11:00–12:00 PM
-- else     → NEUTRAL → buy at 9:35 AM
-
-**Exit rules (autonomous — no stop losses):**
-- +5% unrealized (after 10:30 AM) → sell immediately, rotate to next pick
-- 3:55 PM: if unrealized ≥ +2% → sell and lock in; else hold overnight
-- 9:31 AM next day: hold decision (EMA20 + smart score ≥ 20) or rotate
-- `forceSell: true` in position file → always sells at 9:31 AM
+### Extended Hours Trading
+- **Pre-Market (7-9:30 AM):** Limit buy top movers from shortlist (+2% target)
+- **After-Hours (4-8 PM):** Limit buy top movers from shortlist (+3% target)
+- **Autonomous Monitoring:** 60s price checks via yfinance `fast_info` during all extended windows
 
 **Intraday rotation:** after any sell, if before 3:30 PM → re-scan shortlist and buy next mover (free, no fees)
 
