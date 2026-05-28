@@ -1391,7 +1391,9 @@ def _scan_afterhours(watchlist: list[str], min_pct: float = _AH_MIN_PCT) -> list
     """
     import yfinance as yf
     picks = []
-    subset = watchlist[:_AH_WATCHLIST_SIZE]
+    # If min_pct <= 0, we are in fallback mode — expand search to 250 tickers to ensure we find one
+    limit = 250 if min_pct <= 0 else _AH_WATCHLIST_SIZE
+    subset = watchlist[:limit]
     log(f"After-hours scan: checking {len(subset)} tickers (min {min_pct:.1f}%)...")
     for sym in subset:
         try:
@@ -1688,7 +1690,9 @@ def _scan_premarket(watchlist: list[str], min_pct: float = _PM_MIN_PCT) -> list[
     """
     import yfinance as yf
     picks = []
-    subset = watchlist[:_PM_WATCHLIST_SIZE]
+    # If min_pct <= 0, we are in fallback mode — expand search to 250 tickers to ensure we find one
+    limit = 250 if min_pct <= 0 else _PM_WATCHLIST_SIZE
+    subset = watchlist[:limit]
     log(f"Pre-market scan: checking {len(subset)} tickers (min {min_pct:.1f}%)...")
     for sym in subset:
         try:
