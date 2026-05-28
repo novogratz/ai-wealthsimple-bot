@@ -2451,6 +2451,15 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
             log("PM buy successful on startup — exiting to hold loop.")
             return bias
 
+    # Immediate after-hours check on startup (Rule: no idle cash in AH window)
+    if "ah" not in scans_done and _is_afterhours_window() and not POS_FILE.exists():
+        log("Startup: In after-hours window with cash — executing AH strategy.")
+        scans_done.add("ah")
+        _run_afterhours_strategy(balance, sell_existing=False)
+        if POS_FILE.exists():
+            log("AH buy successful on startup — exiting to hold loop.")
+            return bias
+
     while True:
         now = now_et()
 
@@ -2462,6 +2471,7 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
             time.sleep(1800)
             scans_done.discard("5am")
             scans_done.discard("5pm")
+            scans_done.discard("ah")
             continue
 
         # 5 AM main scan + game plan
@@ -2474,7 +2484,16 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
             _do_scan("5 PM Tomorrow's Preview")
             scans_done.add("5pm")
 
-        # 7 AM pre-market buy — Rule 1: if no position, deploy cash early
+        # 4-8 PM after-hours buy — Rule: no idle cash in AH window
+        if "ah" not in scans_done and _is_afterhours_window() and not POS_FILE.exists():
+            log("AH window open with cash — executing after-hours strategy.")
+            scans_done.add("ah")
+            _run_afterhours_strategy(balance, sell_existing=False)
+            if POS_FILE.exists():
+                log("AH buy confirmed — exiting to hold loop.")
+                return bias
+
+        # 7 AM pre-market buy — Rule: no idle cash in PM window
         if "pm" not in scans_done and _is_premarket_window() and not POS_FILE.exists():
             scans_done.add("pm")
             _run_premarket_strategy(balance)
@@ -2487,6 +2506,7 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
             scans_done.discard("5am")
             scans_done.discard("5pm")
             scans_done.discard("pm")
+            scans_done.discard("ah")
             scans_done.discard("daily_report")
             failed_buys_today.clear()
 
@@ -2498,10 +2518,10 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
                 log("Near buy window — exiting overnight loop.")
                 return bias
 
-        # Past buy window for today → sleep until 5 PM
+        # Past buy window, not in AH window → sleep until 5 PM check
         cutoff = now.replace(hour=_BUY_CATCHUP_HOUR, minute=_BUY_CATCHUP_MINUTE, second=0, microsecond=0)
-        if now > cutoff and now.hour < 17:
-            log("Buy window passed — sleeping until 5 PM scan.")
+        if now > cutoff and now.hour < 17 and not _is_afterhours_window():
+            log("Buy window passed — sleeping 30 min (not in AH window).")
             time.sleep(1800)
             continue
 
