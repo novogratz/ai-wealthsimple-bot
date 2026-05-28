@@ -34,10 +34,19 @@ def _release_busy_lock() -> None:
     KEEPALIVE_LOCK.unlink(missing_ok=True)
 
 
+def safe_print(msg: str) -> None:
+    try:
+        print(msg, flush=True)
+    except UnicodeEncodeError:
+        # Fallback for Windows consoles that don't support some Unicode chars (like \u2212)
+        safe = msg.encode("ascii", errors="replace").decode("ascii")
+        print(safe, flush=True)
+
+
 def snap(page, tag: str) -> Path:
     path = DATA / f"screen_{tag}.png"
     page.screenshot(path=str(path))
-    print(f"  [snap] {path.name}")
+    safe_print(f"  [snap] {path.name}")
     return path
 
 
@@ -178,7 +187,7 @@ def cancel_pending_on_stock_page(page) -> int:
                 banner = page.locator(f':text("{text}")').first
                 if not banner.is_visible(timeout=400):
                     continue
-                print(f"  Pending order banner found: '{text}' — attempting cancel...")
+                safe_print(f"  Pending order banner found: '{text}' — attempting cancel...")
                 banner.click()
                 page.wait_for_timeout(1500)
                 snap(page, "pending_order_opened")
@@ -469,7 +478,7 @@ def try_auto_login(page) -> bool:
         return True
 
     except Exception as e:
-        print(f"  Auto-login error: {e}")
+        safe_print(f"  Auto-login error: {e}")
         return False
 
 
@@ -544,7 +553,7 @@ def navigate_to_stock(page, ws_symbol: str):
 
     # If WS redirected away (e.g. to home or search), fall back to search UI
     if ws_symbol.upper() not in page.url.upper():
-        print(f"  Direct URL redirected to {page.url} — trying search...")
+        safe_print(f"  Direct URL redirected to {page.url} — trying search...")
         page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
         page.wait_for_timeout(2000)
 
@@ -739,8 +748,9 @@ def place_order(
 
     choose_unregistered_account(page, side)
 
-    if max_dollars and side == "buy":
-        print("Using Dollars -> Max...")
+    # For buys, prioritize using the "Max" button to let WS calculate whole shares
+    if side == "buy":
+        print("Using Dollars -> Max for optimal whole-share calculation...")
         use_max_dollars(page)
         snap(page, f"{side}_max")
     elif sell_all and side == "sell":
@@ -826,10 +836,10 @@ def place_order(
             }
         """)
         if submitted_via_js and submitted_via_js.startswith("clicked:"):
-            print(f"  Submit clicked via: {submitted_via_js}")
+            safe_print(f"  Submit clicked via: {submitted_via_js}")
         else:
             debug_text = (submitted_via_js or "").replace("not_found::", "")[:1000] if submitted_via_js else "no text"
-            print(f"  Page text at submit: {debug_text[:500]}")
+            safe_print(f"  Page text at submit: {debug_text[:500]}")
             snap(page, f"{side}_confirm_fail")
             raise RuntimeError(f"Submit button not found - see data/screen_{side}_confirm_fail.png")
         # Mark submitted BEFORE any post-submit page ops — the confirmation page
@@ -923,9 +933,9 @@ def cmd_buy(args) -> None:
                 label = "Dollars Max (Market)" if args.max_dollars else f"{args.shares} shares (Market)"
                 if args.price:
                     label = f"{args.shares} shares @ ${args.price:.2f}"
-                print(f"\n[OK] Buy order: {args.symbol} {label}")
+                safe_print(f"\n[OK] Buy order: {args.symbol} {label}")
             except Exception as e:
-                print(f"\n[ERROR] Buy failed: {e}")
+                safe_print(f"\n[ERROR] Buy failed: {e}")
             finally:
                 print("ORDER_RESULT_JSON:" + json.dumps(result, sort_keys=True))
     finally:
@@ -952,9 +962,9 @@ def cmd_sell(args) -> None:
                 result["symbol"] = args.symbol
                 label = "all shares" if args.sell_all else f"{args.shares} shares"
                 order_type = f"Limit @ ${args.price:.2f}" if args.price else "Market"
-                print(f"\n[OK] Sell order: {label} x {args.symbol} ({order_type})")
+                safe_print(f"\n[OK] Sell order: {label} x {args.symbol} ({order_type})")
             except Exception as e:
-                print(f"\n[ERROR] Sell failed: {e}")
+                safe_print(f"\n[ERROR] Sell failed: {e}")
             finally:
                 print("ORDER_RESULT_JSON:" + json.dumps(result, sort_keys=True))
     finally:
@@ -987,7 +997,7 @@ def cmd_keepalive(args) -> None:
                     try:
                         browser = p.chromium.connect_over_cdp(CDP_URL)
                     except Exception as exc:
-                        print(f"[keepalive] Could not connect to browser: {exc}", flush=True)
+                        safe_print(f"[keepalive] Could not connect to browser: {exc}")
                         browser = None
 
                     if browser is not None:
@@ -1015,7 +1025,7 @@ def cmd_keepalive(args) -> None:
                             else:
                                 print("[keepalive] Session active OK", flush=True)
             except Exception as exc:
-                print(f"[keepalive] Error: {exc}", flush=True)
+                safe_print(f"[keepalive] Error: {exc}")
 
         if once:
             return
