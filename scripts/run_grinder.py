@@ -67,8 +67,8 @@ _SELL_HOUR             = 15
 _SELL_MINUTE           = 55
 _BUY_HOUR              = 9
 _BUY_MINUTE            = 35    # 4 min after overnight sell to allow fill settlement
-_BUY_CATCHUP_HOUR      = 10
-_BUY_CATCHUP_MINUTE    = 0
+_BUY_CATCHUP_HOUR      = 15    # last valid buy entry — never be in cash during market
+_BUY_CATCHUP_MINUTE    = 30
 _OVERNIGHT_SELL_HOUR   = 9     # sell overnight positions at market open
 _OVERNIGHT_SELL_MINUTE = 31
 _BUY_DELAY_MINUTES = 0
@@ -120,8 +120,12 @@ def log(msg: str) -> None:
     try:
         print(line, flush=True)
     except UnicodeEncodeError:
-        safe = line.encode("utf-8", errors="replace").decode("utf-8")
-        print(safe, flush=True)
+        enc = getattr(sys.stdout, "encoding", None) or "ascii"
+        safe = line.encode(enc, errors="replace").decode(enc)
+        try:
+            print(safe, flush=True)
+        except Exception:
+            pass
     try:
         if LOG_FILE.exists() and LOG_FILE.stat().st_size > _LOG_MAX_BYTES:
             LOG_FILE.rename(LOG_FILE.with_suffix(".log.old"))
@@ -740,7 +744,7 @@ def run_scan(balance: float, scan_symbols: list[str] | None = None,
             f"{k.replace('.TO', '')}: {v:+.1f}%"
             for k, v in ctx.sector_returns.items()
         )
-        log(f"  SPX 5d: {ctx.tsx_5d_pct:+.2f}%  |  {sector_parts}")
+        log(f"  SPX 5d: {ctx.spy_5d_pct:+.2f}%  |  {sector_parts}")
         if ctx.trending:
             log(f"  Yahoo trending: {len(ctx.trending)} TSX stocks")
     except Exception as exc:
@@ -1191,6 +1195,7 @@ def build_daily_report() -> str:
 def build_sell_message(
     symbol: str, entry: float, exit_price: float, shares: float,
     cost: float, trade_pnl: float, at_pnl: float,
+    sell_label: str = "",
 ) -> str:
     pnl_pct    = trade_pnl / cost * 100 if cost else 0.0
     proceeds   = shares * exit_price
@@ -1198,10 +1203,11 @@ def build_sell_message(
     at_color   = _pnl_color(at_pnl)
     stats      = _get_trade_stats()
     win_rate   = (stats["wins"] / stats["count"] * 100) if stats["count"] else 0.0
+    label_line = f"  ⏰ {sell_label}\n" if sell_label else ""
 
     return (
         f"🏁 <b>ALL SOLD — <code>{symbol}</code></b>\n\n"
-        f"  ⏰ 3:55 PM ET — Hard close executed\n"
+        f"{label_line}"
         f"  Entry: ${entry:.2f}  →  Exit: <b>${exit_price:.2f} USD</b>\n"
         f"  🔢 Shares sold: {shares:.4f}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1468,9 +1474,10 @@ def _afterhours_buy(pick: dict, balance: float) -> bool:
         notify(f"❌ After-hours buy failed for <code>{sym}</code>.")
         return False
 
-    actual_shares = float(order_data.get("estimated_quantity") or shares_est)
-    actual_value  = float(order_data.get("estimated_value") or (actual_shares * limit_price))
-    actual_price  = actual_value / actual_shares if actual_shares else limit_price
+    # We specified exact --shares N, so shares_est is authoritative
+    actual_shares = float(shares_est)
+    actual_value  = actual_shares * limit_price
+    actual_price  = limit_price
 
     pos = {
         "symbol":        sym,
@@ -1543,7 +1550,7 @@ def _afterhours_sell_limit(symbol: str, entry: float, shares: float, cost: float
 
     _append_trade_history(symbol, "SELL", actual_price, actual_qty, cost, trade_pnl, "After-Hours Limit")
     POS_FILE.unlink(missing_ok=True)
-    notify(build_sell_message(symbol, entry, actual_price, actual_qty, cost, trade_pnl, at_pnl))
+    notify(build_sell_message(symbol, entry, actual_price, actual_qty, cost, trade_pnl, at_pnl, sell_label="After-Hours Limit Sell"))
     log(f"AH sell confirmed: ${trade_pnl:+.2f} trade P&L  |  All-time: ${at_pnl:+.2f}")
     return True
 
@@ -1585,14 +1592,12 @@ def _afterhours_hold_loop(symbol: str, entry: float, shares: float,
             if price and entry > 0:
                 pnl_pct = (price - entry) / entry * 100
                 if pnl_pct >= _AH_PROFIT_PCT:
-                    sell_limit = round(price * 0.995, 2)
-                    log(f"AH PROFIT TARGET: {pnl_pct:+.1f}% — limit sell at ${sell_limit:.2f}")
+                    log(f"AH PROFIT TARGET: {pnl_pct:+.1f}% — no limit sells in extended hours, waiting for 9:31 AM market open")
                     notify(
                         f"🎯 <b>AH PROFIT TARGET HIT — <code>{symbol}</code></b>\n\n"
                         f"📈 {pnl_pct:+.1f}%  |  AH price: ${price:.2f}\n"
-                        f"💰 Limit sell at ${sell_limit:.2f} (fills immediately)"
+                        f"⏳ No limit sells in extended hours — holding until 9:31 AM market open sell"
                     )
-                    _afterhours_sell_limit(symbol, entry, shares, cost, sell_limit, "AH profit target")
                     return
                 if time.time() - last_ah_notify_t >= _AH_NOTIFY_INTERVAL:
                     log(f"AH update: {symbol}  ${price:.2f}  ({pnl_pct:+.2f}%)")
@@ -1606,7 +1611,7 @@ def _afterhours_hold_loop(symbol: str, entry: float, shares: float,
 def _run_afterhours_strategy(balance: float, sell_existing: bool = False) -> None:
     """
     Full after-hours routine:
-    1. If sell_existing → limit-sell the current position first.
+    1. If sell_existing → skip (no limit sells in extended hours, wait for 9:31 AM market open)
     2. Scan for best AH mover, place limit buy.
     3. Monitor with _afterhours_hold_loop().
     """
@@ -1614,29 +1619,21 @@ def _run_afterhours_strategy(balance: float, sell_existing: bool = False) -> Non
         log("Not in AH window — skipping after-hours strategy.")
         return
 
-    # ── Step 1: limit-sell the existing position ──────────────────────────
+    # ── Step 1: skip if position exists — no limit sells in extended hours ──
     if sell_existing and POS_FILE.exists():
         try:
             pos    = json.loads(POS_FILE.read_text())
             sym    = pos["symbol"]
-            entry  = float(pos.get("buyPrice", 0))
-            shares = float(pos.get("shares", 0))
-            cost   = float(pos.get("estimatedCost", shares * entry))
-
-            import yfinance as yf
-            fi  = yf.Ticker(sym).fast_info
-            ah  = fi.last_price or entry
-            # Set limit 0.5% BELOW current AH price so the order fills immediately
-            limit_price = round(ah * 0.995, 2)
-
-            log(f"AH limit sell of existing position: {sym} @ ${limit_price:.2f} (AH=${ah:.2f} -0.5%)")
-            sold = _afterhours_sell_limit(sym, entry, shares, cost,
-                                           limit_price, "AH strategy entry")
-            if not sold:
-                log("AH sell not possible (fractional shares in AH). Queueing for 9:31 AM — "
-                    "proceeding to AH buy scan with available cash.")
+            log(f"Existing position {sym} — no limit sells in extended hours. Will sell at 9:31 AM market open.")
+            notify(
+                f"⏳ <b>AH window — holding <code>{sym}</code></b>\n\n"
+                f"📋 No limit sells in extended hours\n"
+                f"🔄 Will sell at <b>9:31 AM ET</b> market open\n"
+                f"🌙 Skipping AH rotation today"
+            )
+            return
         except Exception as exc:
-            log(f"AH sell step error (queueing for 9:31 AM): {exc}")
+            log(f"AH sell step error: {exc}")
 
     # ── Step 2: scan for best AH mover ────────────────────────────────────
     if POS_FILE.exists():
@@ -1767,9 +1764,10 @@ def _premarket_buy(pick: dict, balance: float) -> bool:
         notify(f"❌ Pre-market buy failed for <code>{sym}</code>.")
         return False
 
-    actual_shares = float(order_data.get("estimated_quantity") or shares_est)
-    actual_value  = float(order_data.get("estimated_value") or (actual_shares * limit_price))
-    actual_price  = actual_value / actual_shares if actual_shares else limit_price
+    # We specified exact --shares N, so shares_est is authoritative
+    actual_shares = float(shares_est)
+    actual_value  = actual_shares * limit_price
+    actual_price  = limit_price
 
     pos = {
         "symbol":        sym,
@@ -1830,7 +1828,7 @@ def _premarket_sell_limit(symbol: str, entry: float, shares: float,
 
     _append_trade_history(symbol, "SELL", actual_price, actual_qty, cost, trade_pnl, "Pre-Market Limit")
     POS_FILE.unlink(missing_ok=True)
-    notify(build_sell_message(symbol, entry, actual_price, actual_qty, cost, trade_pnl, at_pnl))
+    notify(build_sell_message(symbol, entry, actual_price, actual_qty, cost, trade_pnl, at_pnl, sell_label="Pre-Market Limit Sell"))
     log(f"PM sell confirmed: ${trade_pnl:+.2f} trade P&L  |  All-time: ${at_pnl:+.2f}")
     return True
 
@@ -1860,14 +1858,12 @@ def _premarket_hold_loop(symbol: str, entry: float, shares: float,
             if price and entry > 0:
                 pnl_pct = (price - entry) / entry * 100
                 if pnl_pct >= _PM_PROFIT_PCT:
-                    sell_limit = round(price * 0.995, 2)
-                    log(f"PM PROFIT TARGET: {pnl_pct:+.1f}% — limit sell at ${sell_limit:.2f}")
+                    log(f"PM PROFIT TARGET: {pnl_pct:+.1f}% — no limit sells in extended hours, waiting for 9:31 AM market open")
                     notify(
                         f"🎯 <b>PM PROFIT TARGET HIT — <code>{symbol}</code></b>\n\n"
                         f"📈 {pnl_pct:+.1f}%  |  PM price: ${price:.2f}\n"
-                        f"💰 Limit sell at ${sell_limit:.2f}"
+                        f"⏳ No limit sells in extended hours — holding until 9:31 AM market open sell"
                     )
-                    _premarket_sell_limit(symbol, entry, shares, cost, sell_limit, "PM profit target")
                     return
                 if time.time() - last_pm_notify_t >= _PM_NOTIFY_INTERVAL:
                     log(f"PM update: {symbol}  ${price:.2f}  ({pnl_pct:+.2f}%)")
@@ -1958,6 +1954,7 @@ def _run_premarket_strategy(balance: float) -> None:
     )
 
     # Save existing position as legacy (only if we have a confirmed buy target)
+    pm_balance = balance
     if POS_FILE.exists():
         try:
             pos    = json.loads(POS_FILE.read_text())
@@ -1968,10 +1965,13 @@ def _run_premarket_strategy(balance: float) -> None:
             strat  = pos.get("strategyName", "overnight")
             _save_legacy_position(sym, entry, shares, cost, strat)
             log(f"Saved {sym} as legacy — will sell at 9:31 AM")
+            # Subtract locked position value so PM buy uses only free cash
+            pm_balance = max(10.0, balance - cost)
+            log(f"PM buy budget: ${pm_balance:.2f} (total ${balance:.2f} minus locked ${cost:.2f})")
         except Exception as exc:
             log(f"Could not save legacy position: {exc}")
 
-    bought = _premarket_buy(top[0], balance)
+    bought = _premarket_buy(top[0], pm_balance)
     if bought:
         # monitor the PM position
         pos    = json.loads(POS_FILE.read_text())
@@ -2002,16 +2002,11 @@ def _execute_sell_order(
     symbol: str, entry: float, shares: float, cost: float, strat: str,
     label: str = "3:55 PM ET",
 ) -> None:
-    from kzer_bot.market_data import YFinanceMarketData
-    snap = YFinanceMarketData().snapshot(symbol)
-    exit_price = snap.last_price if snap else entry
-    unrealized  = shares * exit_price - cost
-    pnl_pct     = unrealized / cost * 100 if cost else 0.0
-
     notify(
-        f"⏳ <b>Closing at {label}</b>\n\n"
-        f"🎫 <code>{symbol}</code>  |  💵 ${exit_price:.2f}\n"
-        f"{_pnl_arrow(unrealized)} Est. P&L: <b>${unrealized:+.2f} USD ({pnl_pct:+.2f}%)</b>"
+        f"⏳ <b>Selling at {label}</b>\n\n"
+        f"🎫 <code>{symbol}</code>  |  Entry: ${entry:.2f}\n"
+        f"🔢 Shares: {shares:.4f}  |  Cost: ${cost:.2f}\n"
+        f"📋 Market order — selling now"
     )
 
     sell_result = None
@@ -2042,15 +2037,15 @@ def _execute_sell_order(
         return
 
     actual_qty   = float(order_data.get("estimated_quantity") or shares)
-    actual_value = float(order_data.get("estimated_value") or (actual_qty * exit_price))
-    actual_price = actual_value / actual_qty if actual_qty else exit_price
+    actual_value = float(order_data.get("estimated_value") or (actual_qty * entry))
+    actual_price = actual_value / actual_qty if actual_qty else entry
     trade_pnl    = actual_value - cost
     at_pnl       = _record_trade(symbol, cost, actual_value, actual_qty)
 
     _append_trade_history(symbol, "SELL", actual_price, actual_qty, cost, trade_pnl, strat)
     POS_FILE.unlink(missing_ok=True)
 
-    notify(build_sell_message(symbol, entry, actual_price, actual_qty, cost, trade_pnl, at_pnl))
+    notify(build_sell_message(symbol, entry, actual_price, actual_qty, cost, trade_pnl, at_pnl, sell_label=label))
     log(f"Closed. Trade P&L: ${trade_pnl:+.2f}  All-time: ${at_pnl:+.2f}")
 
 
@@ -2349,6 +2344,9 @@ def hold_and_sell(balance: float = 0.0) -> None:
                         f"🔍 Will scan for new pick after sell..."
                     )
                     _execute_sell_order(symbol, entry, shares, cost, strat, "Force Sell")
+                    if LEGACY_FILE.exists():
+                        log("Selling legacy position after force sell...")
+                        _sell_legacy_position()
                     return
             except Exception:
                 pass
@@ -2434,15 +2432,9 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
         last_status_t[0] = time.time()
         return new_bias
 
-    # Startup scan on first entry
+    # Startup scan on first entry — always send trading plan to Telegram
     if "startup" not in scans_done:
-        if now_et().hour >= 9 and _load_cached_scan_result() is not None:
-            cached = _load_cached_scan_result()
-            if cached:
-                bias = cached[1]
-                log("Near buy window with cached scan — skipping startup notification.")
-        else:
-            bias = _do_scan("Startup Scan")
+        bias = _do_scan("Startup Scan")
         scans_done.add("startup")
 
     # Immediate pre-market check on startup (Rule: no idle cash)
@@ -2746,7 +2738,7 @@ def main() -> None:
             "startTime": now_et().isoformat(),
         }))
 
-        # ── After-hours buy: no position + AH window + past regular close ──
+        # ── Window Check 1: After-hours buy ───────────────────────────────
         _now_main = now_et()
         _past_close = _now_main.hour > _SELL_HOUR or (
             _now_main.hour == _SELL_HOUR and _now_main.minute >= _SELL_MINUTE
@@ -2761,12 +2753,17 @@ def main() -> None:
         if not POS_FILE.exists() and _is_afterhours_window() and _past_close:
             log("No position in AH window — scanning for after-hours buy.")
             _run_afterhours_strategy(balance, sell_existing=False)
-            # If AH buy placed and monitored, fall through to overnight wait
-            if not args.balance:
-                fresh = fetch_live_balance(retries=2)
-                if fresh:
-                    balance = fresh
 
+        # ── Window Check 2: Pre-market rotation ────────────────────────────
+        # (Rule: if no position, OR if we want to rotate out of an overnight hold)
+        if "pm" not in scans_done and _is_premarket_window():
+            log("Pre-market window open — checking for deployment/rotation...")
+            scans_done.add("pm")
+            _run_premarket_strategy(balance)
+            # If PM buy successful, it enters hold_and_sell inside the strategy.
+            # If it returns here, it means it either failed or didn't find anything.
+
+        # ── Wait for regular market open if we skipped wait above or finished PM ──
         if not skip_wait:
             bias = wait_overnight(bias, scans_done, last_status_t, balance)
         skip_wait = False
@@ -2777,21 +2774,18 @@ def main() -> None:
             log("Weekend — back to overnight loop.")
             continue
 
-        # PM buy may have fired during overnight wait — go straight to hold/sell
+        # Regular hours position check
         if POS_FILE.exists():
             try:
                 _pm_check = json.loads(POS_FILE.read_text())
-                if _pm_check.get("forceSell") or _pm_check.get("afterHours"):
-                    log(f"PM position {_pm_check.get('symbol','?')} found — "
-                        f"entering hold loop (forceSell at 9:31 AM, then intraday rotation)")
-                    hold_and_sell(balance=balance)
-                    if not args.balance:
-                        fresh = fetch_live_balance(retries=2)
-                        if fresh:
-                            balance = fresh
-                    if POS_FILE.exists():
-                        continue  # held overnight
-                    # fall through to scan + fresh intraday buy below
+                log(f"Active position {_pm_check.get('symbol','?')} found — entering hold loop.")
+                hold_and_sell(balance=balance)
+                if not args.balance:
+                    fresh = fetch_live_balance(retries=2)
+                    if fresh:
+                        balance = fresh
+                if POS_FILE.exists():
+                    continue  # held overnight
             except Exception:
                 pass
 

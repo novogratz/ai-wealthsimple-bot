@@ -960,7 +960,7 @@ def _fetch_yahoo_trending() -> set:
 @dataclass
 class SmartMarketContext:
     """SPY + sector context fetched once per scan — includes regime gate."""
-    tsx_5d_pct:       float
+    spy_5d_pct:       float
     sector_returns:   dict   # ETF symbol → 5d return %
     trending:         set    # Yahoo Finance trending US symbols
     spy_above_sma50:  bool   # SPY healthy short-term (Minervini regime gate)
@@ -985,7 +985,7 @@ class SmartMarketContext:
                 if time.time() - SMART_CONTEXT_CACHE.stat().st_mtime < max_age:
                     raw = json.loads(SMART_CONTEXT_CACHE.read_text(encoding="utf-8"))
                     return cls(
-                        tsx_5d_pct=float(raw["tsx_5d_pct"]),
+                        spy_5d_pct=float(raw["spy_5d_pct"]),
                         sector_returns={k: float(v) for k, v in raw["sector_returns"].items()},
                         trending=set(raw.get("trending", [])),
                         spy_above_sma50=bool(raw.get("spy_above_sma50", True)),
@@ -1000,14 +1000,14 @@ class SmartMarketContext:
 
     @classmethod
     def _fetch(cls) -> "SmartMarketContext":
-        tsx_pct = 0.0
+        spy_pct = 0.0
         sectors: dict = {}
         trending: set = set()
         spy_above_sma50 = True
         spy_above_sma200 = True
         spy_sma50 = spy_sma200 = spy_price = 0.0
 
-        syms = ["^GSPC"] + _SECTOR_ETFS
+        syms = ["SPY"] + _SECTOR_ETFS
         try:
             raw = yf.download(
                 syms, period="1y", interval="1d",
@@ -1021,8 +1021,8 @@ class SmartMarketContext:
                         continue
                     c = df["Close"].values.astype(float)
                     pct = float((c[-1] - c[-6]) / c[-6] * 100)
-                    if sym == "^GSPC":
-                        tsx_pct = pct
+                    if sym == "SPY":
+                        spy_pct = pct
                         spy_price  = float(c[-1])
                         spy_sma50  = float(c[-50:].mean())  if len(c) >= 50  else spy_price
                         spy_sma200 = float(c[-200:].mean()) if len(c) >= 200 else spy_price
@@ -1041,13 +1041,13 @@ class SmartMarketContext:
             pass
 
         ctx = cls(
-            tsx_5d_pct=tsx_pct, sector_returns=sectors, trending=trending,
+            spy_5d_pct=spy_pct, sector_returns=sectors, trending=trending,
             spy_above_sma50=spy_above_sma50, spy_above_sma200=spy_above_sma200,
             spy_sma50=spy_sma50, spy_sma200=spy_sma200, spy_price=spy_price,
         )
         try:
             SMART_CONTEXT_CACHE.write_text(json.dumps({
-                "tsx_5d_pct": tsx_pct,
+                "spy_5d_pct": spy_pct,
                 "sector_returns": sectors,
                 "trending": list(trending),
                 "spy_above_sma50":  spy_above_sma50,
@@ -1183,7 +1183,7 @@ class SmartGrinderStrategy:
             elif pct_from_high <= 0.30: s +=  1.0          # still in striking range
 
         # G — Relative strength vs SPY (0-8) ─────────────────────────────
-        rs = sig.pct_5d - self.ctx.tsx_5d_pct
+        rs = sig.pct_5d - self.ctx.spy_5d_pct
         if   rs > 5: s += 8.0
         elif rs > 2: s += 5.0
         elif rs > 0: s += 3.0

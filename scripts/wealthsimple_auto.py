@@ -361,7 +361,17 @@ def get_live_balance(page) -> float | None:
     except Exception:
         pass
 
-    # Strategy 2: Available to trade (fallback)
+    # Strategy 2: Available to trade (fallback — WS shows CAD for Canadian accounts, convert to USD)
+    _cad_usd = 0.73
+    try:
+        import yfinance as _yf
+        _rate = _yf.Ticker("CADUSD=X").fast_info.last_price
+        if _rate and float(_rate) > 0.50:
+            _cad_usd = float(_rate)
+    except Exception:
+        pass
+    print(f"  CAD/USD rate: {_cad_usd:.4f}")
+
     for pattern in [
         r"Available to trade\s+\$?([0-9,.]+)",
         r"Non-registered.*?\$([0-9,.]+)",
@@ -372,8 +382,9 @@ def get_live_balance(page) -> float | None:
         if match:
             val = parse_money(match.group(1))
             if val is not None and val > 0:
-                print(f"  Found balance using pattern '{pattern}': ${val}")
-                return val
+                usd_val = round(val * _cad_usd, 2)
+                print(f"  Found balance: CAD ${val:.2f} -> USD ${usd_val:.2f} (rate {_cad_usd:.4f})")
+                return usd_val
 
     return None
 
