@@ -1271,6 +1271,11 @@ def execute_buy(pick: GrinderPick, balance: float, bias: FuturesBias,
     shares_est = int(deploy // pick.last_close) if pick.last_close > 0 else 0
     use_shares = fixed_shares or shares_est
 
+    # Skip stocks we can't afford even 1 whole share of (WS won't do fractional for all tickers)
+    if shares_est == 0 and not fixed_shares:
+        log(f"Skipping {pick.symbol}: price ${pick.last_close:.2f} > deploy ${deploy:.2f} — can't buy 1 share")
+        return False
+
     notify(build_buy_message(pick, balance, bias, futures_detail, ai_analysis, is_bounce))
     log(f"Placing buy: {pick.symbol}  ~{use_shares} sh @ ~${pick.last_close:.2f}")
 
@@ -2483,6 +2488,7 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
             scans_done.discard("5pm")
             scans_done.discard("pm")
             scans_done.discard("daily_report")
+            failed_buys_today.clear()
 
         # Near buy window → exit sleep loop
         if now.weekday() < 5:
@@ -2722,7 +2728,8 @@ def main() -> None:
         )
 
     # ── Main loop ─────────────────────────────────────────────────────────
-    scans_done:    set[str] = set()
+    scans_done:      set[str] = set()
+    failed_buys_today: set[str] = set()   # symbols that failed to buy — skip until midnight
     last_status_t: list     = [0.0]
     bias = FuturesBias.NEUTRAL
     skip_wait = args.now or args.buy_today
@@ -2768,6 +2775,7 @@ def main() -> None:
             bias = wait_overnight(bias, scans_done, last_status_t, balance)
         skip_wait = False
         scans_done.clear()
+        failed_buys_today.clear()  # new trading day — reset failed picks
 
         # Weekday guard
         if now_et().weekday() >= 5:
@@ -2804,6 +2812,9 @@ def main() -> None:
         )
         ai = get_ai_analysis(picks, bias, fut_det, balance)
 
+        # Filter out symbols that already failed to buy today
+        picks = [p for p in picks if p.symbol not in failed_buys_today]
+
         if not picks:
             notify(
                 "❌ <b>No data at buy time — skipping today</b>\n\n"
@@ -2835,6 +2846,7 @@ def main() -> None:
                 full_refresh=full_refresh,
             )
             ai = get_ai_analysis(picks, bias, fut_det, balance)
+            picks = [p for p in picks if p.symbol not in failed_buys_today]
             if not picks:
                 notify("❌ <b>Bounce scan returned no data — skipping today.</b>")
                 log("Bounce scan returned no data — skipping.")
@@ -2851,10 +2863,23 @@ def main() -> None:
                 f"📡 {_bias_line(bias, fut_det)}"
             )
 
-        # Execute buy
-        ok = execute_buy(top, balance, bias, fut_det, ai, fixed_shares=args.shares)
+        # Execute buy — try up to 5 picks in order before giving up
+        ok = False
+        for attempt_pick in picks[:5]:
+            ok = execute_buy(attempt_pick, balance, bias, fut_det, ai, fixed_shares=args.shares)
+            if ok:
+                top = attempt_pick
+                break
+            failed_buys_today.add(attempt_pick.symbol)
+            remaining = [p.symbol for p in picks[:5] if p.symbol not in failed_buys_today]
+            if remaining:
+                log(f"Buy failed for {attempt_pick.symbol} — trying next: {remaining[0]}")
+            else:
+                log(f"Buy failed for {attempt_pick.symbol} — no more picks to try.")
+
         if not ok:
-            log("Buy failed — entering overnight loop.")
+            notify("❌ <b>All picks failed — entering overnight loop</b>\n\nWill retry at next scan.")
+            log("All picks failed — entering overnight loop.")
             continue
 
         # Fill confirm (pre-market orders only)
