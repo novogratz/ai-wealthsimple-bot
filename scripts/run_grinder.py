@@ -2434,7 +2434,7 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
         last_status_t[0] = time.time()
         return new_bias
 
-    # Startup scan on first entry — skip silently after 9 AM if 5 AM scan is cached
+    # Startup scan on first entry
     if "startup" not in scans_done:
         if now_et().hour >= 9 and _load_cached_scan_result() is not None:
             cached = _load_cached_scan_result()
@@ -2444,6 +2444,15 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
         else:
             bias = _do_scan("Startup Scan")
         scans_done.add("startup")
+
+    # Immediate pre-market check on startup (Rule: no idle cash)
+    if "pm" not in scans_done and _is_premarket_window() and not POS_FILE.exists():
+        log("Startup: In pre-market window with cash — executing PM strategy.")
+        scans_done.add("pm")
+        _run_premarket_strategy(balance)
+        if POS_FILE.exists():
+            log("PM buy successful on startup — exiting to hold loop.")
+            return bias
 
     while True:
         now = now_et()
