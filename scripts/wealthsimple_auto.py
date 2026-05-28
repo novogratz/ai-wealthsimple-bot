@@ -162,6 +162,65 @@ def use_max_shares(page) -> None:
     page.wait_for_timeout(700)
 
 
+def cancel_pending_on_stock_page(page) -> int:
+    """
+    Cancel any pending sell orders visible on the current WS stock trade page.
+    WS shows a clickable 'X open order(s)' banner when pending orders exist.
+    Returns number of orders cancelled (0 if none found — safe to call always).
+    """
+    cancelled = 0
+    try:
+        page.wait_for_timeout(600)
+        # WS shows pending orders as a banner: "1 open order" / "open order" / "pending"
+        banner_texts = ["open order", "pending order", "Open order", "Pending order"]
+        for text in banner_texts:
+            try:
+                banner = page.locator(f':text("{text}")').first
+                if not banner.is_visible(timeout=400):
+                    continue
+                print(f"  Pending order banner found: '{text}' — attempting cancel...")
+                banner.click()
+                page.wait_for_timeout(1500)
+                snap(page, "pending_order_opened")
+                # Look for a Cancel button in the panel/modal that opened
+                for cancel_sel in [
+                    'button:has-text("Cancel order")',
+                    'button:has-text("Cancel Order")',
+                    '[aria-label*="cancel" i]',
+                ]:
+                    try:
+                        btn = page.locator(cancel_sel).last
+                        if btn.is_visible(timeout=800):
+                            btn.click()
+                            page.wait_for_timeout(1500)
+                            # Confirm cancel dialog if it appears
+                            for conf_sel in [
+                                'button:has-text("Yes, cancel")',
+                                'button:has-text("Yes")',
+                                'button:has-text("Confirm")',
+                            ]:
+                                try:
+                                    conf = page.locator(conf_sel).first
+                                    if conf.is_visible(timeout=800):
+                                        conf.click()
+                                        page.wait_for_timeout(1000)
+                                        break
+                                except Exception:
+                                    pass
+                            snap(page, "order_cancelled")
+                            print("  Pending order cancelled OK")
+                            cancelled += 1
+                            break
+                    except Exception:
+                        pass
+                break
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return cancelled
+
+
 def wait_before_close(page, keep_open: bool) -> None:
     if keep_open:
         print("Browser left open. Close it manually when you are done reviewing.")
@@ -613,7 +672,7 @@ def choose_unregistered_account(page, side: str) -> None:
 def place_order(
     page,
     side: str,
-    shares: Optional[int],
+    shares: Optional[float],
     price: Optional[float],
     confirm: bool,
     max_dollars: bool = False,
@@ -685,14 +744,15 @@ def place_order(
         use_max_dollars(page)
         snap(page, f"{side}_max")
     elif sell_all and side == "sell":
-        # For limit sell: Max may only give whole-share count; try Max then verify
         use_max_shares(page)
-        # If a limit price was set, check if the shares field looks like a whole number;
-        # if so, re-enter the actual fractional shares passed to us (avoids leaving residual)
-        if price is not None and shares is not None:
+        # In limit-sell mode WS Max button may give only the whole-share count.
+        # Re-enter the exact fractional quantity we were given so nothing is left behind.
+        if price is not None and shares is not None and shares > 0:
             try:
                 page.wait_for_timeout(300)
-                fill_visible_input(page, 1, str(shares))
+                # Format as decimal without trailing zeros (e.g. "1.5941" not "1.59410000")
+                qty_str = f"{shares:.6f}".rstrip("0").rstrip(".")
+                fill_visible_input(page, 1, qty_str)
                 page.wait_for_timeout(300)
             except Exception:
                 pass  # keep whatever Max populated
@@ -884,6 +944,10 @@ def cmd_sell(args) -> None:
             ctx, page = open_browser(p)
             try:
                 page = navigate_to_stock(page, strip_exchange(args.symbol))
+                n_cancelled = cancel_pending_on_stock_page(page)
+                if n_cancelled:
+                    print(f"  Cleared {n_cancelled} pending order(s) before sell")
+                    page.wait_for_timeout(800)
                 result = place_order(page, "sell", args.shares, args.price, confirm=True, sell_all=args.sell_all)
                 result["symbol"] = args.symbol
                 label = "all shares" if args.sell_all else f"{args.shares} shares"
@@ -973,7 +1037,7 @@ def main() -> None:
 
     sell_p = sub.add_parser("sell", help="Prepare a sell order")
     sell_p.add_argument("--symbol", required=True)
-    sell_p.add_argument("--shares", type=int, default=None)
+    sell_p.add_argument("--shares", type=float, default=None, help="Exact share count (supports fractional)")
     sell_p.add_argument("--price", type=float, default=None, help="Limit price (omit for Market)")
     sell_p.add_argument("--sell-all", action="store_true", help="Click Max/Sell all on the sell ticket")
 

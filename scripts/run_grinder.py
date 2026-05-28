@@ -86,8 +86,8 @@ UNIVERSE_SCRIPT   = ROOT / "scripts" / "update_universe.py"
 
 # ── After-hours / extended-hours trading ──────────────────────────────────────
 _AH_BUY_START_HOUR  = 16   # 4:00 PM ET — AH buy window opens
-_AH_BUY_END_HOUR    = 19   # 7:50 PM ET — stop new AH entries (AH closes 8 PM)
-_AH_BUY_END_MINUTE  = 50
+_AH_BUY_END_HOUR    = 19   # 7:57 PM ET — stop new AH entries (AH closes 8 PM)
+_AH_BUY_END_MINUTE  = 57
 _AH_PROFIT_PCT      = 3.0  # sell AH position immediately at +3%
 _AH_LIMIT_PREMIUM   = 0.005  # pay up to 0.5% above current AH price on limit buy
 _AH_SELL_PREMIUM    = 0.01   # set limit sell target at +1% above AH entry
@@ -1402,7 +1402,7 @@ def _afterhours_sell_limit(symbol: str, entry: float, shares: float, cost: float
         "--symbol", symbol,
         "--sell-all",
         "--price", f"{limit_price:.2f}",
-        "--shares", str(int(shares) if shares >= 1 else 1),
+        "--shares", f"{shares:.6f}".rstrip("0").rstrip("."),
     ]
     sell_result = subprocess.run(
         sell_cmd,
@@ -1467,13 +1467,15 @@ def _afterhours_hold_loop(symbol: str, entry: float, shares: float,
             if price and entry > 0:
                 pnl_pct = (price - entry) / entry * 100
                 if pnl_pct >= _AH_PROFIT_PCT:
-                    log(f"AH PROFIT TARGET: {pnl_pct:+.1f}% — limit sell now")
+                    # Limit 0.5% below current price — fills immediately at market
+                    sell_limit = round(price * 0.995, 2)
+                    log(f"AH PROFIT TARGET: {pnl_pct:+.1f}% — limit sell at ${sell_limit:.2f}")
                     notify(
                         f"🎯 <b>AH PROFIT TARGET HIT — <code>{symbol}</code></b>\n\n"
                         f"📈 {pnl_pct:+.1f}%  |  AH price: ${price:.2f}\n"
-                        f"💰 Placing limit sell at ${price:.2f}"
+                        f"💰 Limit sell at ${sell_limit:.2f} (fills immediately)"
                     )
-                    _afterhours_sell_limit(symbol, entry, shares, cost, round(price, 2), "AH profit target")
+                    _afterhours_sell_limit(symbol, entry, shares, cost, sell_limit, "AH profit target")
                     return
                 log(f"AH update: {symbol}  ${price:.2f}  ({pnl_pct:+.2f}%)")
         except Exception as exc:
@@ -1505,9 +1507,10 @@ def _run_afterhours_strategy(balance: float, sell_existing: bool = False) -> Non
             import yfinance as yf
             fi  = yf.Ticker(sym).fast_info
             ah  = fi.last_price or entry
-            limit_price = round(max(ah, entry * 1.003), 2)  # at least entry+0.3%
+            # Set limit 0.5% BELOW current AH price so the order fills immediately
+            limit_price = round(ah * 0.995, 2)
 
-            log(f"AH limit sell of existing position: {sym} @ ${limit_price:.2f}")
+            log(f"AH limit sell of existing position: {sym} @ ${limit_price:.2f} (AH=${ah:.2f} -0.5%)")
             sold = _afterhours_sell_limit(sym, entry, shares, cost,
                                            limit_price, "AH strategy entry")
             if not sold:
