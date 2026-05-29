@@ -23,15 +23,16 @@ MARKET_CAP_CACHE    = ROOT / "data" / "market_cap_cache.json"
 FUTURES_CACHE       = ROOT / "data" / "futures_bias_cache.json"
 UNIVERSE_FILE       = ROOT / "data" / "universe.json"
 SMART_CONTEXT_CACHE = ROOT / "data" / "smart_context_cache.json"
+EARNINGS_CACHE      = ROOT / "data" / "earnings_cache.json"
+SHORT_CACHE         = ROOT / "data" / "short_interest_cache.json"
 
 _SECTOR_ETFS = ["XLK", "XLV", "XLE", "XLF", "XLI", "XLY"]
 YF_CACHE.mkdir(parents=True, exist_ok=True)
 yf.set_tz_cache_location(str(YF_CACHE))
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Universe — dynamically loaded from data/universe.json (built by
-# scripts/update_universe.py which pulls TSX + TSXV from the TMX public API).
-# Falls back to the 109-ticker hardcoded list if the file is missing.
+# Universe — NYSE / NASDAQ universe loaded from data/us_universe.json.
+# Falls back to the hardcoded list of ~350 liquid US tickers if missing.
 # ──────────────────────────────────────────────────────────────────────────────
 
 _HARDCODED_WATCHLIST: list[str] = [
@@ -1061,20 +1062,203 @@ class SmartMarketContext:
         return ctx
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Sector map — symbol → sector ETF (XLK/XLF/XLE/XLV/XLI/XLY)
+# Used by SmartGrinderStrategy to boost picks in hot sectors.
+# ──────────────────────────────────────────────────────────────────────────────
+
+_SECTOR_MAP: dict[str, str] = {
+    **{s: "XLK" for s in [
+        "AAPL", "MSFT", "NVDA", "AMD", "META", "GOOGL", "AMZN", "AVGO", "QCOM",
+        "MU", "MRVL", "AMAT", "LRCX", "KLAC", "INTC", "TXN", "ON", "MCHP",
+        "SMCI", "ARM", "SLAB", "CRM", "NOW", "SNOW", "PLTR", "ORCL", "ADBE",
+        "WDAY", "TEAM", "PANW", "CRWD", "ZS", "FTNT", "DDOG", "NET", "CYBR",
+        "S", "DELL", "HPE", "IONQ", "RGTI", "QUBT", "SNPS", "CDNS", "TER",
+        "MPWR", "NXPI", "SWKS", "QRVO", "AKAM", "JNPR", "NTAP", "STX", "WDC",
+    ]},
+    **{s: "XLF" for s in [
+        "V", "MA", "PYPL", "SQ", "JPM", "BAC", "GS", "MS", "C", "WFC",
+        "BX", "BLK", "SCHW", "IBKR", "RJF", "COIN", "HOOD", "SOFI", "AFRM",
+        "MARA", "RIOT", "CLSK", "HUT", "CIFR", "COF", "AXP", "DFS", "SYF",
+        "BK", "STT", "NTRS", "TROW", "IVZ", "BEN", "AIG", "MET", "PRU",
+        "AFL", "ALL", "TRV", "CB", "PGR", "CINF", "EG", "RE", "WRB",
+    ]},
+    **{s: "XLE" for s in [
+        "XOM", "CVX", "COP", "OXY", "MRO", "DVN", "FANG", "HES", "EOG",
+        "SLB", "HAL", "BKR", "NOG", "SM", "PLUG", "NRG", "AES", "NEE",
+        "DUK", "SO", "D", "EXC", "XEL", "SRE", "ES", "ATO", "LNT",
+        "PNW", "CNP", "NI", "EIX", "PPL", "PEG", "WEC", "CMS",
+    ]},
+    **{s: "XLV" for s in [
+        "LLY", "NVO", "ABBV", "MRK", "PFE", "BMY", "AMGN", "GILD", "REGN",
+        "VRTX", "MRNA", "BNTX", "BIIB", "ALNY", "EXAS", "RXRX", "ACHR",
+        "JNJ", "ABT", "MDT", "BSX", "EW", "SYK", "ISRG", "BDX", "DHR",
+        "TMO", "IQV", "CNC", "UNH", "HCA", "CVS", "MCK", "CI", "ANTM",
+        "HOLX", "PKI", "IDXX", "MTD", "BMRN", "BIIB", "INCY", "REGN",
+    ]},
+    **{s: "XLI" for s in [
+        "GE", "CAT", "BA", "RTX", "LMT", "NOC", "DE", "HON", "MMM",
+        "EMR", "ITW", "ROK", "PH", "ETN", "IR", "OTIS", "CARR",
+        "LUNR", "RKLB", "F", "GM", "RIVN", "LCID", "NIO", "LI", "XPEV",
+        "ENPH", "FSLR", "UPS", "FDX", "CSX", "UNP", "NSC", "WAB",
+        "JBHT", "CHRW", "EXPD", "XYL", "ROP", "FAST", "GD", "HII",
+        "LDOS", "ACM", "PWR", "VMC", "MLM", "SWK", "TXT", "HWM",
+    ]},
+    **{s: "XLY" for s in [
+        "TSLA", "WMT", "COST", "TGT", "HD", "LOW", "NKE", "DIS",
+        "NFLX", "UBER", "LYFT", "DASH", "BKNG", "ABNB", "RBLX", "EA",
+        "TTWO", "SPOT", "GME", "AMC", "SPCE", "WKHS", "BBBY",
+        "MCD", "SBUX", "YUM", "DPZ", "DRI", "CHTR", "CMCSA",
+        "NWS", "FOXA", "PARA", "WBD", "DIS", "NFLX", "TTWO",
+        "RL", "PVH", "TPR", "VFC", "HAS", "MAT", "NKE",
+        "ULTA", "TJX", "ROST", "KMX", "AN", "AZO", "ORLY",
+        "LVS", "WYNN", "MGM", "CZR", "RCL", "CCL", "NCLH", "MAR", "HLT",
+    ]},
+}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Earnings blackout — skip stocks with earnings within next 3 days
+# ──────────────────────────────────────────────────────────────────────────────
+
+_earnings_mem: dict = {}   # in-memory cache (lives for process lifetime)
+_earnings_mem_loaded = False
+
+def _load_earnings_mem() -> None:
+    global _earnings_mem, _earnings_mem_loaded
+    if _earnings_mem_loaded:
+        return
+    _earnings_mem_loaded = True
+    if EARNINGS_CACHE.exists():
+        try:
+            if time.time() - EARNINGS_CACHE.stat().st_mtime < 12 * 3600:
+                _earnings_mem = json.loads(EARNINGS_CACHE.read_text())
+        except Exception:
+            pass
+
+def _save_earnings_mem() -> None:
+    try:
+        EARNINGS_CACHE.write_text(json.dumps(_earnings_mem, indent=2))
+    except Exception:
+        pass
+
+def _is_earnings_blackout(symbol: str, window_days: int = 3) -> bool:
+    """Return True if earnings are within the next window_days calendar days."""
+    from datetime import date as _date
+    _load_earnings_mem()
+    entry = _earnings_mem.get(symbol, {})
+    if entry and time.time() - entry.get("ts", 0) < 12 * 3600:
+        raw = entry.get("next_earnings")
+        if not raw:
+            return False
+        try:
+            delta = (_date.fromisoformat(raw) - _date.today()).days
+            return 0 <= delta <= window_days
+        except Exception:
+            return False
+
+    next_earnings = None
+    try:
+        dates_df = yf.Ticker(symbol).get_earnings_dates(limit=4)
+        if dates_df is not None and not dates_df.empty:
+            today = _date.today()
+            for dt_idx in sorted(dates_df.index):
+                try:
+                    d = dt_idx.date() if hasattr(dt_idx, "date") else \
+                        __import__("pandas").Timestamp(dt_idx).date()
+                    if d >= today:
+                        next_earnings = d.isoformat()
+                        break
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+    _earnings_mem[symbol] = {"next_earnings": next_earnings, "ts": time.time()}
+    _save_earnings_mem()
+    if not next_earnings:
+        return False
+    try:
+        delta = (_date.fromisoformat(next_earnings) - _date.today()).days
+        return 0 <= delta <= window_days
+    except Exception:
+        return False
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Short squeeze radar — short % of float + momentum = squeeze setup
+# ──────────────────────────────────────────────────────────────────────────────
+
+_short_mem: dict = {}
+_short_mem_loaded = False
+
+def _load_short_mem() -> None:
+    global _short_mem, _short_mem_loaded
+    if _short_mem_loaded:
+        return
+    _short_mem_loaded = True
+    if SHORT_CACHE.exists():
+        try:
+            if time.time() - SHORT_CACHE.stat().st_mtime < 24 * 3600:
+                _short_mem = json.loads(SHORT_CACHE.read_text())
+        except Exception:
+            pass
+
+def _save_short_mem() -> None:
+    try:
+        SHORT_CACHE.write_text(json.dumps(_short_mem, indent=2))
+    except Exception:
+        pass
+
+def _get_short_pct(symbol: str) -> float:
+    """Return short % of float (0.0–1.0). Returns 0.0 on error."""
+    _load_short_mem()
+    entry = _short_mem.get(symbol, {})
+    if entry and time.time() - entry.get("ts", 0) < 24 * 3600:
+        return float(entry.get("short_pct", 0.0))
+
+    short_pct = 0.0
+    try:
+        info = yf.Ticker(symbol).get_info()
+        val = info.get("shortPercentOfFloat")
+        if val is not None:
+            short_pct = float(val)   # already a ratio: 0.25 = 25%
+    except Exception:
+        pass
+
+    _short_mem[symbol] = {"short_pct": short_pct, "ts": time.time()}
+    _save_short_mem()
+    return short_pct
+
+
+def _squeeze_bonus(symbol: str, yesterday_pct: float) -> float:
+    """Score bonus for high short interest + momentum (short squeeze setup)."""
+    if yesterday_pct < 2.0:
+        return 0.0
+    sp = _get_short_pct(symbol)
+    if sp >= 0.30:  return 8.0   # >30% short float + momentum = prime squeeze
+    if sp >= 0.20:  return 5.0   # >20% short float
+    if sp >= 0.10:  return 2.0   # modest short interest
+    return 0.0
+
+
 class SmartGrinderStrategy:
     """
-    Primary screener — 9-signal composite score (0-~110 pts).
+    Primary screener — 12-signal composite score (0-~125 pts).
 
     Signals (from 4 quant repos — IBKR, Minervini, CANSLIM, LangChain):
-      A. Momentum alignment — 1d/5d/20d alignment alignment        (0-25 pts)
-      B. MACD(12,26,9)      — bullish crossover / above signal      (0-12 pts)
-      C. RSI(14) zone       — 45-70 = momentum, <35 = bounce       (0-10 pts)
-      D. Stage 2 MA align   — Price>SMA50>SMA150>SMA200 [Minervini](0-12 pts)
-      E. Volume conviction  — rel vol + trend + 1yr breakthrough    (0-18 pts)
-      F. 52-week proximity  — within 20% of 52-week high [CANSLIM] (0-10 pts)
-      G. Rel strength SPY   — outperforms SPY 5d return            (0-8 pts)
-      H. OBV smart money    — volume-weighted up/down              (0-5 pts)
-      I. Bonuses            — close quality + ATR + trending        (0-10 pts)
+      A. Momentum alignment — 1d/5d/20d alignment                   (0-25 pts)
+      B. MACD(12,26,9)      — bullish crossover / above signal       (0-12 pts)
+      C. RSI(14) zone       — 45-70 = momentum, <35 = bounce        (0-10 pts)
+      D. Stage 2 MA align   — Price>SMA50>SMA150>SMA200 [Minervini] (0-12 pts)
+      E. Volume conviction  — rel vol + trend + 1yr breakthrough     (0-18 pts)
+      F. 52-week proximity  — within 20% of 52-week high [CANSLIM]  (0-10 pts)
+      G. Rel strength SPY   — outperforms SPY 5d return             (0-8 pts)
+      H. OBV smart money    — volume-weighted up/down               (0-5 pts)
+      I. Bonuses            — close quality + ATR + trending         (0-10 pts)
+      J. Sector alignment   — stock in top-performing sector         (0-5 pts)
+      K. Earnings blackout  — filtered out if earnings within 3 days (hard filter)
+      L. Short squeeze      — high short float + momentum bonus      (0-8 pts)
 
     Market regime gate (Minervini): SPY below SMA200 → scores × 0.70
     Base filters: price $1–$1000 | avg vol ≥100k | yesterday ≥+0.5% | above EMA20
@@ -1112,8 +1296,21 @@ class SmartGrinderStrategy:
 
         scored.sort(key=lambda x: x[0], reverse=True)
 
+        # ── Earnings blackout + short squeeze (top 50 only — slow yf calls) ──
+        enriched: list = []
+        for score, snap, sig in scored[:50]:
+            if _is_earnings_blackout(snap.symbol):
+                continue  # hard filter: skip earnings week
+            score += _squeeze_bonus(snap.symbol, snap.yesterday_pct_change)
+            enriched.append((score, snap, sig))
+        # Append remainder (rank 51+) without enrichment as fallback pool
+        combined = sorted(
+            enriched + scored[50:],
+            key=lambda x: x[0], reverse=True,
+        )
+
         out: list = []
-        for score, snap, _sig in scored[:self.SCAN_LIMIT]:
+        for score, snap, _sig in combined[:self.SCAN_LIMIT]:
             out.append(GrinderPick(
                 symbol         = snap.symbol,
                 last_close     = snap.last_close,
@@ -1196,6 +1393,14 @@ class SmartGrinderStrategy:
         s += min(2.5, snap.atr_pct * 0.5)
         if snap.symbol in self.ctx.trending:
             s += 4.0
+
+        # J — Sector alignment: stock in a hot sector (0-5) ──────────────
+        sector = _SECTOR_MAP.get(snap.symbol)
+        if sector:
+            sector_ret = self.ctx.sector_returns.get(sector, 0.0)
+            if   sector_ret >= 4.0: s += 5.0   # sector on fire this week
+            elif sector_ret >= 2.0: s += 3.0   # sector trending well
+            elif sector_ret >= 0.0: s += 1.0   # sector positive
 
         # Market regime gate (Minervini): never fight the tape ────────────
         s *= self.ctx.regime_multiplier

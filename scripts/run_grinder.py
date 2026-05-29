@@ -82,9 +82,6 @@ _TRAILING_STOP_TRIGGER_PCT  = 2.0  # activate trailing stop at +2.0%
 _TRAILING_STOP_DISTANCE_PCT = 1.0  # trail by 1.0% from peak
 _LATE_LOCK_PCT        = 2.0       # legacy constant — kept for messages only (always sell at 3:55 PM now)
 _MIN_SMART_HOLD_SCORE = 20        # hold overnight if re-scan smart score still >= this
-_UNIVERSE_MAX_AGE = 7 * 86400  # refresh universe.json if older than 7 days
-UNIVERSE_FILE     = ROOT / "data" / "universe.json"
-UNIVERSE_SCRIPT   = ROOT / "scripts" / "update_universe.py"
 
 # ── After-hours / extended-hours trading ──────────────────────────────────────
 _AH_BUY_START_HOUR  = 16   # 4:00 PM ET — AH buy window opens
@@ -1135,6 +1132,92 @@ def build_update_message(
         f"  ⏰ Selling in <b>{time_str}</b>  ({sell_label})\n"
         f"  {at_color} All-time: <b>${stats['total_pnl']:+.2f} USD</b>"
         f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
+    )
+
+
+def _pick_why(p: GrinderPick) -> str:
+    """One-line human reason for a pick based on available GrinderPick fields."""
+    reasons = []
+    if p.yesterday_pct >= 5:
+        reasons.append(f"🚀 +{p.yesterday_pct:.1f}% yesterday")
+    elif p.yesterday_pct >= 2:
+        reasons.append(f"📈 +{p.yesterday_pct:.1f}% yesterday")
+    else:
+        reasons.append(f"+{p.yesterday_pct:.1f}% yesterday")
+
+    if p.rel_volume >= 3:
+        reasons.append(f"🔥 {p.rel_volume:.1f}x vol")
+    elif p.rel_volume >= 1.5:
+        reasons.append(f"{p.rel_volume:.1f}x vol")
+
+    if p.above_ema5 and p.above_ema20:
+        reasons.append("Stage 2 trend")
+    elif p.above_ema20:
+        reasons.append("above EMA20")
+
+    if p.close_strength >= 0.85:
+        reasons.append("closed at day high")
+    elif p.close_strength >= 0.65:
+        reasons.append("strong close")
+
+    if p.atr_pct >= 4:
+        reasons.append(f"ATR {p.atr_pct:.1f}% (volatile)")
+
+    # Sector context from cached market data
+    try:
+        from kzer_bot.grinder_strategy import _SECTOR_MAP, SMART_CONTEXT_CACHE
+        sector = _SECTOR_MAP.get(p.symbol)
+        if sector and SMART_CONTEXT_CACHE.exists():
+            ctx_raw = json.loads(SMART_CONTEXT_CACHE.read_text())
+            sr = ctx_raw.get("sector_returns", {}).get(sector, 0)
+            if sr >= 3:
+                reasons.append(f"{sector} sector +{sr:.1f}%")
+    except Exception:
+        pass
+
+    return "  •  ".join(reasons)
+
+
+def build_watchlist_alert(current_symbol: str | None = None) -> str | None:
+    """
+    Build a Telegram message showing the top 3 picks from the last scan
+    that the user could trade manually. Returns None if no picks available.
+    """
+    state = _load_scan_state()
+    picks_raw = state.get("picks", [])
+    picks: list[GrinderPick] = []
+    for raw in picks_raw:
+        p = _pick_from_dict(raw)
+        if p and p.symbol != current_symbol:
+            picks.append(p)
+
+    if not picks:
+        return None
+
+    top3 = picks[:3]
+    scan_age_min = 0
+    try:
+        updated = _parse_ts(state.get("updated"))
+        if updated:
+            scan_age_min = int((now_et() - updated).total_seconds() / 60)
+    except Exception:
+        pass
+
+    lines = []
+    medals = ["1️⃣", "2️⃣", "3️⃣"]
+    for i, p in enumerate(top3):
+        conf_emoji = "🔥" if p.score >= 80 else ("⚡" if p.score >= 50 else "📊")
+        lines.append(
+            f"{medals[i]} {conf_emoji} <code>{p.symbol}</code>  "
+            f"<b>${p.last_close:.2f}</b>  [score {p.score:.0f}]\n"
+            f"    {_pick_why(p)}"
+        )
+
+    age_str = f"  •  scan {scan_age_min}min ago" if scan_age_min > 0 else ""
+    return (
+        f"👀 <b>Watchlist — top picks right now</b>{age_str}\n\n"
+        + "\n\n".join(lines)
+        + "\n\n<i>These are what the bot would buy with more cash.</i>"
     )
 
 
@@ -2200,6 +2283,9 @@ def hold_and_sell(balance: float = 0.0) -> None:
                                 symbol, entry, snap.last_price, shares, cost,
                                 next_sell_dt=next_sell,
                             ))
+                            watchlist_msg = build_watchlist_alert(current_symbol=symbol)
+                            if watchlist_msg:
+                                notify(watchlist_msg)
                             log(f"30-min update: ${snap.last_price:.2f} ({(snap.last_price/entry-1)*100:+.2f}%)")
                         else:
                             cur2 = now_et()
@@ -2346,6 +2432,9 @@ def hold_and_sell(balance: float = 0.0) -> None:
 
                 if time.time() - last_update_t >= UPDATE_INTERVAL:
                     notify(build_update_message(symbol, entry, price, shares, cost))
+                    watchlist_msg = build_watchlist_alert(current_symbol=symbol)
+                    if watchlist_msg:
+                        notify(watchlist_msg)
                     log(f"30-min update: ${price:.2f} ({pnl_pct:+.2f}%)")
                     last_update_t = time.time()
         except Exception as exc:
@@ -2494,11 +2583,11 @@ def main() -> None:
     parser.add_argument("--now", "--buy-now", action="store_true",
                         help="Skip all waiting and buy immediately (debug)")
     parser.add_argument("--ticker", type=str, default=None,
-                        help="Skip 4000-stock scan and buy this single ticker immediately (e.g. SHOP.TO)")
+                        help="Skip scan and buy this single US ticker immediately (e.g. NVDA)")
     parser.add_argument("--lite", action="store_true",
-                        help="Use hardcoded ~100 ticker watchlist instead of full 4000-stock universe (avoids rate limits)")
+                        help="Use hardcoded ~350 ticker watchlist instead of full universe (avoids rate limits)")
     parser.add_argument("--yahoo", action="store_true",
-                        help="Use Yahoo Finance most active Canadian stocks (~755 tickers sorted by volume)")
+                        help="Use Yahoo Finance most active US stocks sorted by volume")
     parser.add_argument("--buy-today", action="store_true",
                         help="Skip all timing (overnight wait + buy window) — scan and buy immediately")
     parser.add_argument("--shares", type=int, default=None,
@@ -2534,7 +2623,7 @@ def main() -> None:
             log(f"Fetched {len(symbols)} Yahoo most active symbols")
         yahoo_data = json.loads(yahoo_file.read_text(encoding="utf-8"))
         WATCHLIST = yahoo_data["symbols"]
-        log(f"Yahoo mode: using top {len(WATCHLIST)} most active Canadian stocks")
+        log(f"Yahoo mode: using top {len(WATCHLIST)} most active US stocks")
         # Clear cached scan state so full Yahoo watchlist is used (not stale shortlist)
         SCAN_STATE_FILE.unlink(missing_ok=True)
         log("  Cleared cached scan state for fresh Yahoo scan")
@@ -2636,27 +2725,15 @@ def main() -> None:
             hold_and_sell(balance=balance)
         # nothing to clean up here — hold_and_sell / AH strategy manages pos file
 
-    # ── Single-ticker mode (skip 4000-stock scan, buy immediately) ────────
+    # ── Single-ticker mode (skip scan, buy immediately) ───────────────────
     if args.ticker:
         raw_symbol = args.ticker.upper().strip()
-
-        # Auto-append .TO if no exchange suffix given
-        if "." not in raw_symbol:
-            raw_symbol = f"{raw_symbol}.TO"
 
         log(f"Single-ticker mode: {raw_symbol}")
         log("Fetching data for single ticker...")
 
         md = GrinderMarketData()
         snap = md.snapshot(raw_symbol)
-
-        # Fallback: try .V if .TO returned nothing
-        if snap is None and raw_symbol.endswith(".TO"):
-            alt = raw_symbol.replace(".TO", ".V")
-            log(f"  No data for {raw_symbol}, trying {alt}...")
-            snap = md.snapshot(alt)
-            if snap is not None:
-                raw_symbol = alt
 
         if snap is None:
             log(f"No data for {raw_symbol} — aborting.")
