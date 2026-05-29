@@ -2619,7 +2619,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
                                 f"📋 Pre-market order fills at <b>9:30 AM ET open</b>\n"
                                 f"🎫 {shares:.4f} sh @ ~${entry:.2f}  |  💰 ${cost:.2f} USD\n"
                                 f"⏰ Market opens in <b>{mins_left} min</b>\n"
-                                f"🔄 {'Market sell + rotation at 9:35 AM' if is_ah_position else 'Sell at 9:31 AM → buy new pick at 9:35 AM'}"
+                                f"🔴 {'SELL at 9:35 AM market open → rotate' if is_ah_position else 'Hold decision at 9:31 AM → target/trail/3:55 PM'}"
                             )
                             sc_syms2, _ = _choose_scan_symbols()
                             fresh2 = _quick_scan_picks(sc_syms2, current_symbol=symbol)
@@ -3032,12 +3032,18 @@ def main() -> None:
         elif _pre_open:
             _open_t = _now.replace(hour=9, minute=30, second=0, microsecond=0)
             _mins = max(0, int((_open_t - _now).total_seconds() / 60))
+            _is_pm_ah = bool(pos.get("afterHours")) or pos.get("strategyName") in ("After-Hours Limit", "Pre-Market Limit")
+            _exit_line = (
+                f"🔴 <b>SELL at 9:35 AM ET</b> → rotate to next pick"
+                if _is_pm_ah else
+                f"🎯 Hold decision at 9:31 AM → target/trail/3:55 PM exit"
+            )
             notify(
                 f"⏳ <b>Bot restarted — order pending fill</b>\n\n"
                 f"🎫 <code>{pos['symbol']}</code>  "
                 f"{pos.get('shares', 0):.4f} sh @ ~${pos.get('buyPrice', 0):.2f}\n"
                 f"📋 Pre-market order fills at <b>9:30 AM ET open</b>  ({_mins} min)\n"
-                f"🎯 Autonomous exit: +{_PROFIT_TARGET_PCT:.0f}% target  |  lock at 3:55 PM if +{_LATE_LOCK_PCT:.0f}%"
+                f"{_exit_line}"
             )
             hold_and_sell(balance=balance)
         else:
