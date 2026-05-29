@@ -1101,37 +1101,67 @@ def build_update_message(
     symbol: str, entry: float, price: float, shares: float, cost: float,
     next_sell_dt: "datetime | None" = None,
 ) -> str:
+    """30-min executive summary: current position + today's realized trades + all-time P&L."""
     unrealized = shares * price - cost
     pnl_pct    = unrealized / cost * 100 if cost else 0.0
-    color      = _pnl_color(unrealized)
-    arrow      = _pnl_arrow(unrealized)
+    pos_color  = _pnl_color(unrealized)
+    pos_arrow  = "📈" if unrealized >= 0 else "📉"
+
     if next_sell_dt is not None:
-        secs_left = max(0, (next_sell_dt - now_et()).total_seconds())
-        mins_left = int(secs_left / 60)
+        secs_left  = max(0, (next_sell_dt - now_et()).total_seconds())
         sell_label = f"{next_sell_dt:%I:%M %p} ET"
     else:
-        mins_left  = int(_time_until_sell() / 60)
+        secs_left  = max(0, _time_until_sell())
         sell_label = "3:55 PM ET"
-    h_left     = mins_left // 60
-    m_left     = mins_left % 60
-    stats      = _get_trade_stats()
-    at_color   = _pnl_color(stats["total_pnl"])
-    time_str   = f"{h_left}h {m_left:02d}min" if h_left else f"{m_left} min"
-    
-    # Trailing stop info
-    target_info = f"  🎯 Target: <b>+{_PROFIT_TARGET_PCT:.0f}%</b>"
-    if _TRAILING_STOP_TRIGGER_PCT > 0:
-        target_info += f"  |  🛡️ Trail: <b>+{_TRAILING_STOP_TRIGGER_PCT:.1f}%</b>"
+    mins_left = int(secs_left / 60)
+    h_left    = mins_left // 60
+    m_left    = mins_left % 60
+    time_str  = f"{h_left}h {m_left:02d}min" if h_left else f"{m_left} min"
+
+    # Today's realized trades
+    stats  = _get_trade_stats()
+    ledger = []
+    if PNL_LEDGER.exists():
+        try:
+            ledger = json.loads(PNL_LEDGER.read_text())
+        except Exception:
+            pass
+    today_str    = now_et().strftime("%Y-%m-%d")
+    today_trades = [t for t in ledger if str(t.get("time", "")).startswith(today_str)]
+    daily_pnl    = sum(t.get("realizedPnl", 0) for t in today_trades)
+    daily_cost   = sum(t.get("buyCost", 0)     for t in today_trades)
+    daily_pct    = (daily_pnl / daily_cost * 100) if daily_cost else 0.0
+    daily_wins   = sum(1 for t in today_trades if t.get("realizedPnl", 0) >= 0)
+    daily_loss   = len(today_trades) - daily_wins
+    d_color      = _pnl_color(daily_pnl)
+
+    trade_lines = ""
+    for t in today_trades:
+        t_pnl  = t.get("realizedPnl", 0)
+        t_cost = t.get("buyCost", 0) or 1
+        t_pct  = t_pnl / t_cost * 100
+        ic     = _pnl_color(t_pnl)
+        trade_lines += f"  {ic} <code>{t['symbol']}</code>  <b>{t_pct:+.1f}%</b>  (${t_pnl:+.2f})\n"
+    if not trade_lines:
+        trade_lines = "  <i>No realized trades today.</i>\n"
+
+    all_wr   = (stats["wins"] / stats["count"] * 100) if stats["count"] else 0.0
+    at_color = _pnl_color(stats["total_pnl"])
 
     return (
-        f"{color} <b>Position Update — <code>{symbol}</code></b>  |  {now_et():%H:%M} ET\n\n"
-        f"  {arrow} Price: <b>${price:.2f}</b>  (entry ${entry:.2f})\n"
-        f"  {color} Unrealized P&L: <b>${unrealized:+.2f} USD ({pnl_pct:+.2f}%)</b>\n"
-        f"  💼 Position value: <b>${shares * price:.2f} USD</b>\n\n"
-        f"{target_info}\n"
-        f"  ⏰ Selling in <b>{time_str}</b>  ({sell_label})\n"
-        f"  {at_color} All-time: <b>${stats['total_pnl']:+.2f} USD</b>"
-        f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
+        f"📊 <b>LE GRINDER  •  {now_et():%H:%M} ET</b>\n\n"
+        f"<b>POSITION  •  <code>{symbol}</code></b>\n"
+        f"  {pos_arrow} ${price:.2f}  (entry ${entry:.2f})  "
+        f"{pos_color} <b>{pnl_pct:+.1f}%  (${unrealized:+.2f})</b>\n"
+        f"  ⏰ Exit in <b>{time_str}</b>  ({sell_label})"
+        f"  |  🎯 +{_PROFIT_TARGET_PCT:.0f}%  |  🛡️ Trail +{_TRAILING_STOP_TRIGGER_PCT:.0f}%\n\n"
+        f"<b>TODAY  •  {len(today_trades)} trade{'s' if len(today_trades) != 1 else ''}</b>\n"
+        f"{trade_lines}"
+        f"  {d_color} Day P&L:  <b>{daily_pnl:+.2f} USD  ({daily_pct:+.1f}%)</b>"
+        f"  |  🏆 <b>{daily_wins}W / {daily_loss}L</b>\n\n"
+        f"<b>ALL TIME  •  {stats['count']} trades</b>\n"
+        f"  {at_color} P&L:  <b>{stats['total_pnl']:+.2f} USD</b>  ({stats['total_pnl_pct']:+.1f}% ROI)"
+        f"  |  🏆 <b>{stats['wins']}W / {stats['losses']}L</b>  —  <b>{all_wr:.0f}% win rate</b>"
     )
 
 
@@ -2547,6 +2577,8 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
         bias = _do_scan("Startup Scan")
         scans_done.add("startup")
 
+    _last_watchlist_t: float = 0.0  # tracks 30-min watchlist cadence in PM/overnight window
+
     # Immediate pre-market check on startup (Rule: no idle cash)
     if "pm" not in scans_done and _is_premarket_window() and not POS_FILE.exists():
         log("Startup: In pre-market window with cash — executing PM strategy.")
@@ -2605,6 +2637,19 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
             if POS_FILE.exists():
                 log("PM buy from overnight wait — exiting to hold loop.")
                 return bias
+
+        # 30-min watchlist alert during pre-market window (no position held)
+        if _is_premarket_window() and not POS_FILE.exists() and (time.time() - _last_watchlist_t) >= 1800:
+            try:
+                log("Pre-market 30-min watchlist refresh...")
+                sc_syms, _ = _choose_scan_symbols()
+                fresh = _quick_scan_picks(sc_syms)
+                wl_msg = build_watchlist_alert(fresh)
+                if wl_msg:
+                    notify(wl_msg)
+            except Exception as _wl_exc:
+                log(f"  Watchlist alert error: {_wl_exc}")
+            _last_watchlist_t = time.time()
 
         # Reset slots at midnight
         if now.hour == 0 and now.minute < 2:
