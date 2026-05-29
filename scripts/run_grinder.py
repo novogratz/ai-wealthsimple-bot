@@ -1139,7 +1139,7 @@ def build_update_message(
 
 
 def build_daily_report() -> str:
-    """Build a professional daily performance report."""
+    """Build daily performance report."""
     stats = _get_trade_stats()
     ledger = []
     if PNL_LEDGER.exists():
@@ -1147,49 +1147,64 @@ def build_daily_report() -> str:
             ledger = json.loads(PNL_LEDGER.read_text())
         except Exception:
             pass
-    
-    # Filter today's trades
-    today_str = now_et().strftime("%Y-%m-%d")
-    today_trades = [t for t in ledger if str(t.get("time", "")).startswith(today_str)]
-    
-    daily_pnl = sum(t.get("realizedPnl", 0) for t in today_trades)
-    daily_pnl_pct = 0.0
-    if today_trades:
-        # Approximate daily % based on starting balance
-        try:
-            sb = float(json.loads(SESSION_FILE.read_text()).get("startingBalance", 100.0))
-            daily_pnl_pct = (daily_pnl / sb) * 100
-        except Exception:
-            pass
 
-    color = _pnl_color(daily_pnl)
-    at_color = _pnl_color(stats["total_pnl"])
-    
+    today_str    = now_et().strftime("%Y-%m-%d")
+    today_trades = [t for t in ledger if str(t.get("time", "")).startswith(today_str)]
+
+    daily_pnl   = sum(t.get("realizedPnl", 0) for t in today_trades)
+    daily_cost  = sum(t.get("buyCost", 0) for t in today_trades)
+    daily_pct   = (daily_pnl / daily_cost * 100) if daily_cost else 0.0
+    daily_wins  = sum(1 for t in today_trades if t.get("realizedPnl", 0) >= 0)
+    daily_loss  = len(today_trades) - daily_wins
+    daily_wr    = (daily_wins / len(today_trades) * 100) if today_trades else 0.0
+
+    all_wr      = (stats["wins"] / stats["count"] * 100) if stats["count"] else 0.0
+    color       = _pnl_color(daily_pnl)
+    at_color    = _pnl_color(stats["total_pnl"])
+
+    # Per-trade lines — compute % from buyCost (ledger has realizedPnl + buyCost)
     trade_lines = ""
     for t in today_trades:
-        t_color = _pnl_color(t.get("realizedPnl", 0))
-        trade_lines += (
-            f"  {t_color} <code>{t['symbol']}</code>: "
-            f"<b>{t.get('realizedPnl', 0):+.2f} USD</b> ({t.get('pnlPct', 0):+.2f}%)\n"
-        )
+        pnl  = t.get("realizedPnl", 0)
+        cost = t.get("buyCost", 0) or 1
+        pct  = pnl / cost * 100
+        ic   = _pnl_color(pnl)
+        trade_lines += f"  {ic} <code>{t['symbol']}</code>  <b>{pct:+.1f}%</b>  (${pnl:+.2f})\n"
     if not trade_lines:
         trade_lines = "  <i>No realized trades today.</i>\n"
 
-    report = (
-        f"📊 <b>DAILY QUANT REPORT — {now_et():%b %d, %Y}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"<b>PROFIT & LOSS:</b>\n"
-        f"  {color} Daily P&L: <b>${daily_pnl:+.2f} USD ({daily_pnl_pct:+.2f}%)</b>\n"
-        f"  {at_color} All-time: <b>${stats['total_pnl']:+.2f} USD</b>\n\n"
-        f"<b>ACTIVITY:</b>\n"
-        f"{trade_lines}\n"
-        f"<b>PERFORMANCE METRICS:</b>\n"
-        f"  🏆 Win Rate: <b>{(stats['wins'] / stats['count'] * 100) if stats['count'] else 0.0:.1f}%</b>\n"
-        f"  📊 Total Trades: <b>{stats['count']}</b>\n"
-        f"  💰 Current Balance: <b>${fetch_live_balance() or 0:.2f} USD</b>\n\n"
-        f"<i>Generated autonomously by Le Grinder v4.0</i>"
+    # Open position snapshot (best-effort, no crash if yfinance fails)
+    open_line = ""
+    if POS_FILE.exists():
+        try:
+            pos    = json.loads(POS_FILE.read_text())
+            sym    = pos["symbol"]
+            entry  = float(pos.get("buyPrice", 0))
+            sh     = float(pos.get("shares", 0))
+            fi     = yf.Ticker(sym).fast_info
+            price  = float(fi.last_price or entry)
+            upct   = (price - entry) / entry * 100 if entry else 0
+            upnl   = (price - entry) * sh
+            ic2    = "📈" if upct >= 0 else "📉"
+            open_line = (
+                f"\n<b>OPEN:</b>  {ic2} <code>{sym}</code>  "
+                f"{sh:.0f} sh @ ${entry:.2f}  →  ${price:.2f}  "
+                f"<b>{upct:+.1f}%</b>  (${upnl:+.2f} unrealized)\n"
+            )
+        except Exception:
+            pass
+
+    return (
+        f"📊 <b>LE GRINDER — {now_et():%b %d, %Y}</b>\n\n"
+        f"<b>TODAY  •  {len(today_trades)} trade{'s' if len(today_trades) != 1 else ''}</b>\n"
+        f"{trade_lines}"
+        f"{open_line}\n"
+        f"  {color} Day P&L:  <b>{daily_pnl:+.2f} USD  ({daily_pct:+.1f}%)</b>\n"
+        f"  🏆 Day record:  <b>{daily_wins}W / {daily_loss}L</b>  —  <b>{daily_wr:.0f}% win rate</b>\n\n"
+        f"<b>ALL TIME  •  {stats['count']} trades</b>\n"
+        f"  {at_color} P&L:  <b>{stats['total_pnl']:+.2f} USD</b>  ({stats['total_pnl_pct']:+.1f}% ROI)\n"
+        f"  🏆 Record:  <b>{stats['wins']}W / {stats['losses']}L</b>  —  <b>{all_wr:.0f}% win rate</b>\n"
     )
-    return report
 
 
 def build_sell_message(
@@ -1206,21 +1221,16 @@ def build_sell_message(
     label_line = f"  ⏰ {sell_label}\n" if sell_label else ""
 
     return (
-        f"🏁 <b>ALL SOLD — <code>{symbol}</code></b>\n\n"
+        f"🏁 <b>SOLD — <code>{symbol}</code></b>\n\n"
         f"{label_line}"
-        f"  Entry: ${entry:.2f}  →  Exit: <b>${exit_price:.2f} USD</b>\n"
-        f"  🔢 Shares sold: {shares:.4f}\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>TODAY'S RESULT:</b>\n"
-        f"  {color} P&L: <b>${trade_pnl:+.2f} USD ({pnl_pct:+.2f}%)</b>\n"
-        f"  💰 Invested: ${cost:.2f}  →  Proceeds: <b>${proceeds:.2f}</b>\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>ACCOUNT:</b>\n"
-        f"  {at_color} All-time PnL: <b>${at_pnl:+.2f} USD</b>"
-        f"  ({stats['total_pnl_pct']:+.2f}% ROI)\n"
-        f"  🏆 Record: <b>{stats['wins']}W / {stats['losses']}L</b>"
-        f"  ({win_rate:.0f}% win rate)  |  {stats['count']} total trades\n"
-        f"  {'🚀 Account GREEN — keep it going!' if at_pnl >= 0 else '💪 Account RED — grind it back!'}"
+        f"  {color} <b>{pnl_pct:+.1f}%</b>  (${trade_pnl:+.2f})\n"
+        f"  Entry: ${entry:.2f}  →  Exit: ${exit_price:.2f}"
+        f"  |  {shares:.0f} sh  |  cost ${cost:.2f}\n\n"
+        f"<b>ALL TIME  •  {stats['count']} trades</b>\n"
+        f"  {at_color} P&L: <b>${at_pnl:+.2f} USD</b>  ({stats['total_pnl_pct']:+.1f}% ROI)\n"
+        f"  🏆 <b>{stats['wins']}W / {stats['losses']}L</b>"
+        f"  —  {win_rate:.0f}% win rate\n"
+        f"  {'🚀 GREEN — keep grinding!' if at_pnl >= 0 else '💪 RED — grind it back!'}"
     )
 
 
