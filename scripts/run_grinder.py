@@ -2435,7 +2435,6 @@ def hold_and_sell(balance: float = 0.0) -> None:
             eod_pct = (price_eod - entry) / entry * 100 if entry > 0 else 0
             log(f"3:55 PM: {eod_pct:+.1f}% — selling always, AH rotation follows")
             _execute_sell_order(symbol, entry, shares, cost, strat, "3:55 PM")
-            notify(build_daily_report())
             return
 
         # ── forceSell flag check — immediate exit ─────────────────────────
@@ -2864,9 +2863,9 @@ def main() -> None:
             _now_main.hour == _SELL_HOUR and _now_main.minute >= _SELL_MINUTE
         )
         
-        # Daily report at market close if not already sent by hold_and_sell
-        if _past_close and "daily_report" not in scans_done:
-            log("Market closed — sending daily performance report.")
+        # Daily report at 4:00 PM ET
+        if _now_main.hour >= 16 and "daily_report" not in scans_done:
+            log("4:00 PM — sending daily performance report.")
             notify(build_daily_report())
             scans_done.add("daily_report")
 
