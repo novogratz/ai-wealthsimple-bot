@@ -2621,6 +2621,11 @@ def hold_and_sell(balance: float = 0.0) -> None:
                                 f"⏰ Market opens in <b>{mins_left} min</b>\n"
                                 f"🔄 {'Market sell + rotation at 9:35 AM' if is_ah_position else 'Sell at 9:31 AM → buy new pick at 9:35 AM'}"
                             )
+                            sc_syms2, _ = _choose_scan_symbols()
+                            fresh2 = _quick_scan_picks(sc_syms2, current_symbol=symbol)
+                            watchlist_msg = build_watchlist_alert(fresh2, symbol, snap.last_price, entry, shares, cost)
+                            if watchlist_msg:
+                                notify(watchlist_msg)
                             log(f"Pre-open update: order pending, {mins_left} min to open")
                 except Exception as exc:
                     log(f"30-min update error: {exc}")
