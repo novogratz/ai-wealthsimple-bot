@@ -1316,6 +1316,30 @@ def build_daily_report() -> str:
         except Exception:
             pass
 
+    # Live account balance (best-effort — skip gracefully if Playwright unavailable)
+    balance_line = ""
+    try:
+        live_bal = fetch_live_balance(retries=2)
+        if live_bal is not None:
+            sb = stats.get("starting_balance") or 0.0
+            bal_delta = live_bal - sb if sb else 0.0
+            bal_delta_pct = (bal_delta / sb * 100) if sb else 0.0
+            bal_color = "📈" if bal_delta >= 0 else "📉"
+            balance_line = (
+                f"\n💰 <b>Account balance:</b>  <b>${live_bal:.2f} USD</b>"
+                + (f"  {bal_color} <b>{bal_delta_pct:+.1f}%</b> since session start" if sb else "")
+                + "\n"
+            )
+    except Exception:
+        pass
+
+    # All-time % gain on starting capital (use starting_balance as baseline if available)
+    at_gain_line = ""
+    sb = stats.get("starting_balance") or 0.0
+    if sb and stats["total_pnl"] != 0:
+        at_gain_pct = stats["total_pnl"] / sb * 100
+        at_gain_line = f"  💹 All-time gain on capital:  <b>{at_gain_pct:+.1f}%</b>\n"
+
     return (
         f"📊 <b>LE GRINDER — {now_et():%b %d, %Y}</b>\n\n"
         f"<b>TODAY  •  {len(today_trades)} trade{'s' if len(today_trades) != 1 else ''}</b>\n"
@@ -1326,6 +1350,8 @@ def build_daily_report() -> str:
         f"<b>ALL TIME  •  {stats['count']} trades</b>\n"
         f"  {at_color} P&L:  <b>{stats['total_pnl']:+.2f} USD</b>  ({stats['total_pnl_pct']:+.1f}% ROI)\n"
         f"  🏆 Record:  <b>{stats['wins']}W / {stats['losses']}L</b>  —  <b>{all_wr:.0f}% win rate</b>\n"
+        f"{at_gain_line}"
+        f"{balance_line}"
     )
 
 
