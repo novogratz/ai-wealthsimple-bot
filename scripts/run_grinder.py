@@ -461,7 +461,7 @@ def _get_trade_stats() -> dict:
             "wins": wins,
             "losses": len(trades) - wins,
             "total_pnl": total_pnl,
-            "total_pnl_pct": (total_pnl / total_cost * 100) if total_cost else 0.0,
+            "total_pnl_pct": (total_pnl / bal * 100) if bal else 0.0,
             "starting_balance": bal,
         }
     except Exception:
