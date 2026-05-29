@@ -310,8 +310,8 @@ def read_position_from_trade_page(page, symbol: str) -> dict | None:
         return None
 
 
-def parse_review_details(page, side: str, submitted: bool) -> dict:
-    text = page.locator("body").inner_text(timeout=5000)
+def parse_review_details(page, side: str, submitted: bool, review_text: str = "") -> dict:
+    text = review_text or page.locator("body").inner_text(timeout=5000)
 
     def find_number(patterns: list[str]) -> float | None:
         for pattern in patterns:
@@ -862,6 +862,12 @@ def place_order(
         raise RuntimeError("Next button not found")
     page.wait_for_timeout(3000)
     snap(page, f"{side}_review")
+    # Capture review page text NOW — before submit changes the page
+    _review_text = ""
+    try:
+        _review_text = page.locator("body").inner_text(timeout=3000)
+    except Exception:
+        pass
     submitted = False
 
     if confirm:
@@ -874,6 +880,10 @@ def place_order(
                 review_intermediate.click()
                 page.wait_for_timeout(2000)
                 snap(page, f"{side}_review2")
+                try:
+                    _review_text = page.locator("body").inner_text(timeout=3000)
+                except Exception:
+                    pass
         except Exception:
             pass
         # Use JS click to bypass chat-widget overlay that intercepts pointer events
@@ -922,7 +932,7 @@ def place_order(
         print("  Stopped at review page - confirm manually.")
 
     try:
-        return parse_review_details(page, side, submitted)
+        return parse_review_details(page, side, submitted, review_text=_review_text)
     except Exception:
         return {"side": side, "submitted": submitted}
 

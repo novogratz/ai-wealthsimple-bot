@@ -2345,7 +2345,15 @@ def _execute_sell_order(
         return
 
     actual_qty   = float(order_data.get("estimated_quantity") or shares)
-    actual_value = float(order_data.get("estimated_value") or (actual_qty * entry))
+    actual_value = float(order_data.get("estimated_value") or 0)
+    if not actual_value:
+        # WS didn't return sell proceeds — use live yfinance price so P&L isn't $0
+        try:
+            _fi = yf.Ticker(symbol).fast_info
+            _last = float(_fi.last_price or 0)
+            actual_value = actual_qty * (_last if _last > 0 else entry)
+        except Exception:
+            actual_value = actual_qty * entry
     actual_price = actual_value / actual_qty if actual_qty else entry
     trade_pnl    = actual_value - cost
     at_pnl       = _record_trade(symbol, cost, actual_value, actual_qty)
