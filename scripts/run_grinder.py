@@ -1494,7 +1494,11 @@ def build_daily_report() -> str:
             upnl  = (price - entry) * sh
             ic2   = "📈" if upct >= 0 else "📉"
             is_ah = bool(pos.get("afterHours")) or pos.get("strategyName", "") in ("After-Hours Limit", "Pre-Market Limit")
-            sell_note = "9:35 AM ET tomorrow" if is_ah else "3:55 PM ET (hard lock)"
+            if is_ah:
+                _next_sell_dt = _next_weekday_buy()
+                sell_note = f"9:35 AM ET {_next_sell_dt:%a %b %d}"
+            else:
+                sell_note = "3:55 PM ET (hard lock)"
             open_section = (
                 f"\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"📌 <b>OPEN POSITION</b>  (selling: {sell_note})\n"
@@ -1515,6 +1519,150 @@ def build_daily_report() -> str:
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📋 <b>TODAY'S TRADES  •  {len(today_trades)}</b>\n"
         f"{trade_lines}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏆 <b>ALL TIME  •  {stats['count']} trades</b>\n"
+        f"  {at_color} P&L:  <b>${stats['total_pnl']:+.2f} USD</b>\n"
+        f"  🏆 <b>{stats['wins']}W / {stats['losses']}L</b>  —  <b>{all_wr:.0f}% win rate</b>"
+        f"{open_section}"
+    )
+
+
+def build_weekly_report() -> str:
+    """Weekly Quant Summary — sent every Friday at 5 PM ET."""
+    stats = _get_trade_stats()
+    ledger = []
+    if PNL_LEDGER.exists():
+        try:
+            ledger = json.loads(PNL_LEDGER.read_text())
+        except Exception:
+            pass
+
+    now = now_et()
+    # Week window: Mon 00:00 → Sun 23:59 of the current calendar week
+    week_start = (now - timedelta(days=now.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    week_end = week_start + timedelta(days=6, hours=23, minutes=59)
+
+    week_trades = [
+        t for t in ledger
+        if _parse_ts(str(t.get("time", ""))) is not None
+        and _parse_ts(str(t.get("time", ""))) >= week_start
+    ]
+
+    weekly_pnl  = sum(t.get("realizedPnl", 0) for t in week_trades)
+    weekly_cost = sum(t.get("buyCost", 0) for t in week_trades)
+    weekly_pct  = (weekly_pnl / weekly_cost * 100) if weekly_cost else 0.0
+    weekly_wins = sum(1 for t in week_trades if t.get("realizedPnl", 0) > 0)
+    weekly_loss = sum(1 for t in week_trades if t.get("realizedPnl", 0) < 0)
+    weekly_flat = len(week_trades) - weekly_wins - weekly_loss
+    weekly_wr   = (weekly_wins / len(week_trades) * 100) if week_trades else 0.0
+    avg_pnl     = (weekly_pnl / len(week_trades)) if week_trades else 0.0
+
+    best  = max(week_trades, key=lambda t: t.get("realizedPnl", 0), default=None)
+    worst = min(week_trades, key=lambda t: t.get("realizedPnl", 0), default=None)
+
+    # Most traded symbol
+    from collections import Counter
+    sym_counts = Counter(t.get("symbol", "") for t in week_trades)
+    top_sym, top_count = sym_counts.most_common(1)[0] if sym_counts else ("—", 0)
+
+    w_color  = _pnl_color(weekly_pnl)
+    at_color = _pnl_color(stats["total_pnl"])
+    all_wr   = (stats["wins"] / stats["count"] * 100) if stats["count"] else 0.0
+
+    # ── Live balance ────────────────────────────────────────────────────────
+    live_bal = None
+    try:
+        live_bal = fetch_live_balance(retries=2)
+    except Exception:
+        pass
+
+    sb = stats.get("starting_balance") or 0.0
+    if live_bal is not None:
+        equity_line = f"  💵 Account:  <b>${live_bal:.2f} USD</b>"
+        if sb:
+            delta     = live_bal - sb
+            delta_pct = delta / sb * 100
+            equity_line += f"  {'📈' if delta >= 0 else '📉'} <b>{delta_pct:+.1f}%</b> vs session open"
+        equity_line += "\n"
+    else:
+        equity_line = ""
+
+    # ── Per-trade lines grouped by day ──────────────────────────────────────
+    day_abbr = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
+    trade_lines = ""
+    for t in week_trades:
+        pnl  = t.get("realizedPnl", 0)
+        cost = t.get("buyCost", 0) or 1
+        pct  = pnl / cost * 100
+        ic   = _pnl_color(pnl)
+        ts   = _parse_ts(str(t.get("time", "")))
+        day  = day_abbr.get(ts.weekday(), "???") if ts else "???"
+        trade_lines += (
+            f"  {ic} <b>{day}</b>  <code>{t['symbol']}</code>"
+            f"  <b>{pct:+.1f}%</b>  (${pnl:+.2f})\n"
+        )
+    if not trade_lines:
+        trade_lines = "  <i>No closed trades this week.</i>\n"
+
+    # ── Best / worst ────────────────────────────────────────────────────────
+    best_line  = (
+        f"  🏆 Best:   <code>{best['symbol']}</code>  ${best.get('realizedPnl', 0):+.2f}\n"
+        if best else ""
+    )
+    worst_line = (
+        f"  💔 Worst:  <code>{worst['symbol']}</code>  ${worst.get('realizedPnl', 0):+.2f}\n"
+        if worst else ""
+    )
+
+    # ── Open position ───────────────────────────────────────────────────────
+    open_section = ""
+    if POS_FILE.exists():
+        try:
+            pos   = json.loads(POS_FILE.read_text())
+            sym   = pos["symbol"]
+            entry = float(pos.get("buyPrice", 0))
+            sh    = float(pos.get("shares", 0))
+            fi    = yf.Ticker(sym).fast_info
+            price = float(fi.last_price or entry)
+            upct  = (price - entry) / entry * 100 if entry else 0
+            upnl  = (price - entry) * sh
+            ic2   = "📈" if upct >= 0 else "📉"
+            is_ah = bool(pos.get("afterHours")) or pos.get("strategyName", "") in ("After-Hours Limit", "Pre-Market Limit")
+            if is_ah:
+                _next_sell_dt = _next_weekday_buy()
+                sell_note = f"9:35 AM ET {_next_sell_dt:%a %b %d}"
+            else:
+                sell_note = "3:55 PM ET"
+            open_section = (
+                f"\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📌 <b>OPEN POSITION</b>  (selling: {sell_note})\n"
+                f"  {ic2} <code>{sym}</code>  {sh:.0f} sh @ ${entry:.2f}"
+                f"  →  ${price:.2f}  <b>{upct:+.1f}%</b>  (${upnl:+.2f} unrealized)\n"
+            )
+        except Exception:
+            pass
+
+    flat_str = f" / {weekly_flat}flat" if weekly_flat else ""
+    return (
+        f"🗓️ <b>LE GRINDER — Weekly Quant Summary</b>\n"
+        f"Week of {week_start:%b %d} – {week_end:%b %d, %Y}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💹 <b>WEEKLY PERFORMANCE</b>\n"
+        f"{equity_line}"
+        f"  {w_color} Week P&L:  <b>${weekly_pnl:+.2f} USD</b>  ({weekly_pct:+.1f}%)\n"
+        f"  {at_color} All-time P&L:  <b>${stats['total_pnl']:+.2f} USD</b>  ({stats['total_pnl_pct']:+.1f}% ROI)\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 <b>TRADE LOG  •  {len(week_trades)} trades</b>"
+        f"  |  🏆 <b>{weekly_wins}W/{weekly_loss}L{flat_str}</b>  ({weekly_wr:.0f}% win rate)\n"
+        f"{trade_lines}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>WEEK STATS</b>\n"
+        f"{best_line}"
+        f"{worst_line}"
+        f"  📈 Avg P&L/trade:  <b>${avg_pnl:+.2f}</b>\n"
+        f"  ⚡ Most traded:  <code>{top_sym}</code>  ({top_count}×)\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🏆 <b>ALL TIME  •  {stats['count']} trades</b>\n"
         f"  {at_color} P&L:  <b>${stats['total_pnl']:+.2f} USD</b>\n"
@@ -2603,6 +2751,12 @@ def hold_and_sell(balance: float = 0.0) -> None:
                 log("4:00 PM — sending daily performance report (overnight loop).")
                 notify(build_daily_report())
 
+            # 5 PM Friday weekly quant summary
+            if "weekly_report" not in _scanned and cur.weekday() == 4 and cur.hour >= 17:
+                _scanned.add("weekly_report")
+                log("5:00 PM Friday — sending weekly quant summary (overnight loop).")
+                notify(build_weekly_report())
+
             # 5 PM preview scan (tonight)
             if "5pm" not in _scanned and cur.hour >= 17 and cur.weekday() < 5:
                 _scanned.add("5pm")
@@ -2906,6 +3060,7 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
             scans_done.discard("pm")
             scans_done.discard("ah")
             scans_done.discard("daily_report")
+            scans_done.discard("weekly_report")
             failed_buys_today.clear()
 
         # Near buy window → exit sleep loop
@@ -3167,6 +3322,12 @@ def main() -> None:
             log("4:00 PM — sending daily performance report.")
             notify(build_daily_report())
             scans_done.add("daily_report")
+
+        # Weekly quant summary — every Friday at 5 PM ET
+        if _now_main.weekday() == 4 and _now_main.hour >= 17 and "weekly_report" not in scans_done:
+            log("5:00 PM Friday — sending weekly quant summary.")
+            notify(build_weekly_report())
+            scans_done.add("weekly_report")
 
         if not POS_FILE.exists() and _is_afterhours_window() and _past_close:
             log("No position in AH window — scanning for after-hours buy.")
