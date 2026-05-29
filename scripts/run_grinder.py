@@ -2091,25 +2091,33 @@ def hold_and_sell(balance: float = 0.0) -> None:
     now = now_et()
 
     # ── Overnight path: after 3:55 PM, OR position bought on a previous calendar day ──
-    pos_time      = _parse_ts(pos.get("time"))
+    pos_time        = _parse_ts(pos.get("time"))
     bought_prev_day = pos_time is not None and pos_time.date() < now.date()
-    is_overnight  = (
+    is_overnight    = (
         now.hour > _SELL_HOUR or
         (now.hour == _SELL_HOUR and now.minute >= _SELL_MINUTE) or
         bought_prev_day
     )
+    # AH/PM entries always sell at 9:35 AM and rotate — no morning hold decision
+    is_ah_position  = bool(pos.get("afterHours")) or strat in ("After-Hours Limit", "Pre-Market Limit")
     if is_overnight:
+        # AH/PM positions sell at 9:35 AM (same as next buy — rotate immediately)
+        _sell_hour   = _BUY_HOUR   if is_ah_position else _OVERNIGHT_SELL_HOUR
+        _sell_minute = _BUY_MINUTE if is_ah_position else _OVERNIGHT_SELL_MINUTE
         next_sell = now.replace(
-            hour=_OVERNIGHT_SELL_HOUR, minute=_OVERNIGHT_SELL_MINUTE, second=0, microsecond=0,
+            hour=_sell_hour, minute=_sell_minute, second=0, microsecond=0,
         )
-        # if 9:31 AM is already past today, push to tomorrow
+        # if sell time is already past today, push to tomorrow
         if now >= next_sell:
             next_sell += timedelta(days=1)
         while next_sell.weekday() >= 5:
             next_sell += timedelta(days=1)
 
         secs = (next_sell - now).total_seconds()
-        log(f"After-hours buy — selling at market open {next_sell:%a %b %d %H:%M} ET ({secs/3600:.1f}h). Will buy new pick at 9:35 AM.")
+        if is_ah_position:
+            log(f"AH/PM position — market sell + rotation at 9:35 AM {next_sell:%a %b %d %H:%M} ET ({secs/3600:.1f}h).")
+        else:
+            log(f"Overnight position — morning decision at 9:31 AM {next_sell:%a %b %d %H:%M} ET ({secs/3600:.1f}h). Will buy new pick at 9:35 AM.")
 
         pre_open = now.hour < 9 or (now.hour == 9 and now.minute < 30)
         if pre_open:
@@ -2120,7 +2128,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
                 f"🎫 <code>{symbol}</code>  {shares:.4f} sh @ ~${entry:.2f}\n"
                 f"💰 Deploying: <b>${cost:.2f} USD</b>  |  📋 {strat}\n"
                 f"📋 Pre-market order — fills at <b>9:30 AM ET open</b>  ({mins_to_open} min)\n"
-                f"🔄 Morning decision at <b>9:31 AM ET</b> — hold if trending or rotate to new pick\n"
+                f"🔄 {'Market sell + rotation at' if is_ah_position else 'Morning decision at'} <b>9:35 AM ET</b>\n"
                 f"🎯 Target: +{_PROFIT_TARGET_PCT:.0f}%  |  3:55 PM lock: +{_LATE_LOCK_PCT:.0f}%  |  No stop loss"
             )
         else:
@@ -2128,7 +2136,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
                 f"📊 <b>Position open — overnight hold</b>\n\n"
                 f"🎫 <code>{symbol}</code>  |  {shares:.4f} sh @ ${entry:.2f}\n"
                 f"💰 Cost: <b>${cost:.2f} USD</b>  |  📋 {strat}\n"
-                f"🔄 Morning decision at <b>9:31 AM ET</b> — hold if trending or rotate to new pick\n"
+                f"🔄 {'Market sell + rotation at <b>9:35 AM ET</b>' if is_ah_position else 'Morning decision at <b>9:31 AM ET</b> — hold if trending or rotate'}\n"
                 f"🎯 Target: +{_PROFIT_TARGET_PCT:.0f}%  |  3:55 PM lock: +{_LATE_LOCK_PCT:.0f}%  |  No stop loss"
             )
 
@@ -2192,7 +2200,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
                                 f"📋 Pre-market order fills at <b>9:30 AM ET open</b>\n"
                                 f"🎫 {shares:.4f} sh @ ~${entry:.2f}  |  💰 ${cost:.2f} USD\n"
                                 f"⏰ Market opens in <b>{mins_left} min</b>\n"
-                                f"🔄 Sell at 9:31 AM → buy new pick at 9:35 AM"
+                                f"🔄 {'Market sell + rotation at 9:35 AM' if is_ah_position else 'Sell at 9:31 AM → buy new pick at 9:35 AM'}"
                             )
                             log(f"Pre-open update: order pending, {mins_left} min to open")
                 except Exception as exc:
@@ -2201,7 +2209,20 @@ def hold_and_sell(balance: float = 0.0) -> None:
 
             time.sleep(60)
 
-        # ── Morning decision: sell or hold another day ─────────────────────
+        # ── Morning exit ───────────────────────────────────────────────────
+        if is_ah_position:
+            # AH/PM positions: always market sell at 9:35 AM, then rotate — no hold decision
+            _sleep_until(next_sell, "9:35 AM AH/PM sell + rotation")
+            log(f"9:35 AM — market selling AH/PM position {symbol}, rotating to next pick.")
+            notify(
+                f"🔔 <b>9:35 AM — Selling AH/PM position</b>\n\n"
+                f"🎫 <code>{symbol}</code>  {shares:.4f} sh @ ${entry:.2f}\n"
+                f"🔄 Market sell → scanning for next pick now..."
+            )
+            _execute_sell_order(symbol, entry, shares, cost, strat, label="9:35 AM ET")
+            return  # main loop scans + buys new pick immediately
+
+        # Regular overnight positions: morning hold-or-rotate decision at 9:31 AM
         _sleep_until(next_sell, "9:31 AM morning decision")
 
         # Sell any legacy position from pre-market rotation (before hold decision)
