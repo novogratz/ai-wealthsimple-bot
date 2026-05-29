@@ -1506,58 +1506,10 @@ def _afterhours_buy(pick: dict, balance: float) -> bool:
     return True
 
 
-def _afterhours_sell_limit(symbol: str, entry: float, shares: float, cost: float,
-                            limit_price: float, label: str = "AH target") -> bool:
-    """Place a limit sell order during extended hours.
-    
-    NOTE: Wealthsimple does NOT support limit-selling fractional shares (< 1 share)
-    during extended-hours trading. Whole-share limit sells work fine.
-    """
-    # Guard: fractional shares can't be limit-sold in after-hours
-    if shares != int(shares):
-        log(f"Cannot limit-sell fractional shares ({shares:.4f}) in after-hours — "
-            f"will sell at 9:31 AM market open instead.")
-        return False
-
-    notify(
-        f"🎯 <b>AH limit SELL — <code>{symbol}</code></b>\n\n"
-        f"📉 Limit: <b>${limit_price:.2f}</b>  |  Entry: ${entry:.2f}\n"
-        f"💰 Reason: {label}"
-    )
-    # Pass --shares so the limit sell form can fill fractional amount if Max gives whole numbers
-    sell_cmd = [
-        PYTHON, str(AUTO_SCRIPT), "sell",
-        "--symbol", symbol,
-        "--sell-all",
-        "--price", f"{limit_price:.2f}",
-        "--shares", f"{shares:.6f}".rstrip("0").rstrip("."),
-    ]
-    sell_result = subprocess.run(
-        sell_cmd,
-        capture_output=True, text=True, timeout=180,
-    )
-    for line in sell_result.stdout.splitlines():
-        print(f"  {line}", flush=True)
-
-    order_data = _parse_order_result(sell_result.stdout)
-    submitted  = order_data.get("submitted") or sell_result.returncode == 0
-    if not submitted:
-        log(f"AH limit sell failed for {symbol}")
-        notify(f"⚠️ AH limit sell order failed for <code>{symbol}</code> — will retry at 9:31 AM.")
-        return False
-
-    # Use actual shares sold and compute proper proceeds
-    actual_qty   = float(order_data.get("estimated_quantity") or shares)
-    actual_value = actual_qty * limit_price  # limit price × qty = proper proceeds
-    actual_price = actual_value / actual_qty if actual_qty else limit_price
-    trade_pnl    = actual_value - cost
-    at_pnl       = _record_trade(symbol, cost, actual_value, actual_qty)
-
-    _append_trade_history(symbol, "SELL", actual_price, actual_qty, cost, trade_pnl, "After-Hours Limit")
-    POS_FILE.unlink(missing_ok=True)
-    notify(build_sell_message(symbol, entry, actual_price, actual_qty, cost, trade_pnl, at_pnl, sell_label="After-Hours Limit Sell"))
-    log(f"AH sell confirmed: ${trade_pnl:+.2f} trade P&L  |  All-time: ${at_pnl:+.2f}")
-    return True
+def _afterhours_sell_limit(*args, **kwargs) -> bool:
+    """DISABLED — never limit sell in extended hours. Wait for 9:31 AM market open."""
+    log("_afterhours_sell_limit called but is permanently disabled — no limit sells in extended hours.")
+    return False
 
 
 def _afterhours_hold_loop(symbol: str, entry: float, shares: float,
@@ -1797,45 +1749,10 @@ def _premarket_buy(pick: dict, balance: float) -> bool:
     return True
 
 
-def _premarket_sell_limit(symbol: str, entry: float, shares: float,
-                          cost: float, limit_price: float, label: str) -> bool:
-    """Execute a limit sell during pre-market."""
-    if shares != int(shares):
-        log(f"Cannot limit-sell fractional shares ({shares:.4f}) in pre-market — "
-            f"will sell at 9:31 AM market open instead.")
-        return False
-
-    notify(
-        f"🎯 <b>PM limit SELL — <code>{symbol}</code></b>\n\n"
-        f"📉 Limit: <b>${limit_price:.2f}</b>  |  Entry: ${entry:.2f}\n"
-        f"💰 Reason: {label}"
-    )
-    sell_cmd = [
-        PYTHON, str(AUTO_SCRIPT), "sell",
-        "--symbol", symbol,
-        "--sell-all",
-        "--price", f"{limit_price:.2f}",
-        "--shares", f"{shares:.6f}".rstrip("0").rstrip("."),
-    ]
-    sell_result = subprocess.run(sell_cmd, capture_output=True, text=True, timeout=180)
-    order_data = _parse_order_result(sell_result.stdout)
-    submitted  = order_data.get("submitted") or sell_result.returncode == 0
-    if not submitted:
-        log(f"PM limit sell failed for {symbol}")
-        notify(f"⚠️ PM limit sell order failed for <code>{symbol}</code> — will retry at 9:31 AM.")
-        return False
-
-    actual_qty   = float(order_data.get("estimated_quantity") or shares)
-    actual_value = actual_qty * limit_price
-    actual_price = actual_value / actual_qty if actual_qty else limit_price
-    trade_pnl    = actual_value - cost
-    at_pnl       = _record_trade(symbol, cost, actual_value, actual_qty)
-
-    _append_trade_history(symbol, "SELL", actual_price, actual_qty, cost, trade_pnl, "Pre-Market Limit")
-    POS_FILE.unlink(missing_ok=True)
-    notify(build_sell_message(symbol, entry, actual_price, actual_qty, cost, trade_pnl, at_pnl, sell_label="Pre-Market Limit Sell"))
-    log(f"PM sell confirmed: ${trade_pnl:+.2f} trade P&L  |  All-time: ${at_pnl:+.2f}")
-    return True
+def _premarket_sell_limit(*args, **kwargs) -> bool:
+    """DISABLED — never limit sell in extended hours. Wait for 9:31 AM market open."""
+    log("_premarket_sell_limit called but is permanently disabled — no limit sells in extended hours.")
+    return False
 
 
 def _premarket_hold_loop(symbol: str, entry: float, shares: float,
@@ -2655,18 +2572,17 @@ def main() -> None:
         log(f"Open position found: {pos['symbol']} — resuming hold/sell loop.")
 
         if _is_afterhours_window():
-            # After-hours window: limit-sell existing position then scan for AH buy
-            log("After-hours window — running AH strategy on existing position.")
+            # After-hours window: no limit sells — hold existing position, monitor until 9:31 AM
+            log("After-hours window — holding existing position until 9:31 AM (no limit sells in extended hours).")
             notify(
                 f"🌙 <b>After-hours window detected</b>\n\n"
                 f"🎫 Holding <code>{pos['symbol']}</code>  "
                 f"{pos.get('shares', 0):.4f} sh @ ${pos.get('buyPrice', 0):.2f}\n"
-                f"💡 Attempting limit sell + AH rotation..."
+                f"📋 No limit sells in extended hours — holding until <b>9:31 AM ET</b> market open"
             )
             _run_afterhours_strategy(balance, sell_existing=True)
-            # If position still open (sell failed), fall through to overnight hold
+            # Position still open — fall through to overnight hold
             if POS_FILE.exists():
-                log("AH sell failed — falling back to overnight hold.")
                 hold_and_sell(balance=balance)
         elif _pre_open:
             _open_t = _now.replace(hour=9, minute=30, second=0, microsecond=0)
