@@ -512,6 +512,18 @@ def _time_until_sell() -> float:
     return max(0.0, (t - now).total_seconds())
 
 
+def _is_quiet_weekend() -> bool:
+    """True when we should suppress non-critical Telegram noise.
+    Quiet window: all day Saturday + Sunday before 6 PM ET (futures open at ~6 PM Sun).
+    """
+    n = now_et()
+    if n.weekday() == 5:        # Saturday — all day
+        return True
+    if n.weekday() == 6 and n.hour < 18:   # Sunday before 6 PM
+        return True
+    return False
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Universe refresh
 # ──────────────────────────────────────────────────────────────────────────────
@@ -2745,10 +2757,10 @@ def hold_and_sell(balance: float = 0.0) -> None:
                 wait_for_fill_confirm(symbol)
                 log("Fill confirmed at market open.")
 
-            # 4 PM daily performance report
-            if "daily_report" not in _scanned and cur.hour >= 16 and cur.weekday() < 5:
+            # 5 PM daily performance report (Mon–Fri only)
+            if "daily_report" not in _scanned and cur.hour >= 17 and cur.weekday() < 5:
                 _scanned.add("daily_report")
-                log("4:00 PM — sending daily performance report (overnight loop).")
+                log("5:00 PM — sending daily performance report (overnight loop).")
                 notify(build_daily_report())
 
             # 5 PM Friday weekly quant summary
@@ -2757,13 +2769,19 @@ def hold_and_sell(balance: float = 0.0) -> None:
                 log("5:00 PM Friday — sending weekly quant summary (overnight loop).")
                 notify(build_weekly_report())
 
-            # 5 PM preview scan (tonight)
+            # 5 PM preview scan (weekdays only — skip quiet weekend)
             if "5pm" not in _scanned and cur.hour >= 17 and cur.weekday() < 5:
                 _scanned.add("5pm")
                 _run_overnight_scan("5 PM Tonight's Preview", balance_approx, "5pm")
 
-            # 5 AM morning scan
-            if "5am" not in _scanned and 5 <= cur.hour < 7:
+            # Sunday 6 PM — futures open, send game-plan preview
+            if "sunday_preview" not in _scanned and cur.weekday() == 6 and cur.hour >= 18:
+                _scanned.add("sunday_preview")
+                log("Sunday 6 PM — futures open, sending Sunday preview scan.")
+                _run_overnight_scan("Sunday 6 PM — Futures Open Preview", balance_approx, "sunday")
+
+            # 5 AM morning scan (weekdays only — skip quiet weekend)
+            if "5am" not in _scanned and 5 <= cur.hour < 7 and cur.weekday() < 5:
                 _scanned.add("5am")
                 _run_overnight_scan("5 AM Morning Scan", balance_approx, "5am")
 
@@ -2784,8 +2802,13 @@ def hold_and_sell(balance: float = 0.0) -> None:
                     except Exception:
                         pass
 
-            # 30-min position update
+            # 30-min position update (suppressed during quiet weekend)
             if time.time() - last_update_t >= UPDATE_INTERVAL:
+                last_update_t = time.time()  # always reset timer to avoid burst on wake
+                if _is_quiet_weekend():
+                    log(f"Quiet weekend — skipping 30-min Telegram update.")
+                    time.sleep(60)
+                    continue
                 try:
                     snap = md.snapshot(symbol)
                     if snap:
@@ -2819,7 +2842,6 @@ def hold_and_sell(balance: float = 0.0) -> None:
                             log(f"Pre-open update: order pending, {mins_left} min to open")
                 except Exception as exc:
                     log(f"30-min update error: {exc}")
-                last_update_t = time.time()
 
             time.sleep(60)
 
@@ -3317,9 +3339,9 @@ def main() -> None:
             _now_main.hour == _SELL_HOUR and _now_main.minute >= _SELL_MINUTE
         )
         
-        # Daily report at 4:00 PM ET
-        if _now_main.hour >= 16 and "daily_report" not in scans_done:
-            log("4:00 PM — sending daily performance report.")
+        # Daily report at 5:00 PM ET (Mon–Fri)
+        if _now_main.hour >= 17 and _now_main.weekday() < 5 and "daily_report" not in scans_done:
+            log("5:00 PM — sending daily performance report.")
             notify(build_daily_report())
             scans_done.add("daily_report")
 
