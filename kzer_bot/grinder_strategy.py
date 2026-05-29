@@ -1375,11 +1375,13 @@ class SmartGrinderStrategy:
             key=lambda x: x[0], reverse=True,
         )
 
-        # ── Live/pre-market gap enrichment (all candidates — parallel fast_info) ─
+        # ── Live/pre-market gap enrichment (all candidates — parallel prepost history) ─
         def _fetch_gap(sym: str, lc: float) -> tuple[str, float | None]:
             try:
-                fi = yf.Ticker(sym).fast_info
-                live = float(fi.last_price or 0)
+                df = yf.Ticker(sym).history(period="1d", interval="5m", prepost=True)
+                if df.empty:
+                    return sym, None
+                live = float(df["Close"].iloc[-1])
                 if live > 0 and lc > 0:
                     return sym, (live - lc) / lc * 100
             except Exception:
