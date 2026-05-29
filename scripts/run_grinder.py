@@ -1410,8 +1410,21 @@ def build_watchlist_alert(
     )
 
 
+def _get_weekly_pnl(ledger: list) -> float:
+    """Sum realized P&L for the current calendar week (Mon–Sun)."""
+    now = now_et()
+    week_start = (now - timedelta(days=now.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return sum(
+        t.get("realizedPnl", 0) for t in ledger
+        if _parse_ts(str(t.get("time", ""))) is not None
+        and _parse_ts(str(t.get("time", ""))) >= week_start
+    )
+
+
 def build_daily_report() -> str:
-    """Build daily performance report."""
+    """Build daily performance report — sent at 4 PM ET every trading day."""
     stats = _get_trade_stats()
     ledger = []
     if PNL_LEDGER.exists():
@@ -1420,21 +1433,43 @@ def build_daily_report() -> str:
         except Exception:
             pass
 
-    today_str    = now_et().strftime("%Y-%m-%d")
+    now       = now_et()
+    today_str = now.strftime("%Y-%m-%d")
     today_trades = [t for t in ledger if str(t.get("time", "")).startswith(today_str)]
 
-    daily_pnl   = sum(t.get("realizedPnl", 0) for t in today_trades)
-    daily_cost  = sum(t.get("buyCost", 0) for t in today_trades)
-    daily_pct   = (daily_pnl / daily_cost * 100) if daily_cost else 0.0
-    daily_wins  = sum(1 for t in today_trades if t.get("realizedPnl", 0) >= 0)
-    daily_loss  = len(today_trades) - daily_wins
-    daily_wr    = (daily_wins / len(today_trades) * 100) if today_trades else 0.0
+    daily_pnl  = sum(t.get("realizedPnl", 0) for t in today_trades)
+    daily_cost = sum(t.get("buyCost", 0) for t in today_trades)
+    daily_pct  = (daily_pnl / daily_cost * 100) if daily_cost else 0.0
+    daily_wins = sum(1 for t in today_trades if t.get("realizedPnl", 0) >= 0)
+    daily_loss = len(today_trades) - daily_wins
+    daily_wr   = (daily_wins / len(today_trades) * 100) if today_trades else 0.0
 
-    all_wr      = (stats["wins"] / stats["count"] * 100) if stats["count"] else 0.0
-    color       = _pnl_color(daily_pnl)
-    at_color    = _pnl_color(stats["total_pnl"])
+    weekly_pnl = _get_weekly_pnl(ledger)
+    all_wr     = (stats["wins"] / stats["count"] * 100) if stats["count"] else 0.0
 
-    # Per-trade lines — compute % from buyCost (ledger has realizedPnl + buyCost)
+    d_color  = _pnl_color(daily_pnl)
+    w_color  = _pnl_color(weekly_pnl)
+    at_color = _pnl_color(stats["total_pnl"])
+
+    # ── Live balance (best-effort) ──────────────────────────────────────────
+    live_bal = None
+    try:
+        live_bal = fetch_live_balance(retries=2)
+    except Exception:
+        pass
+
+    sb = stats.get("starting_balance") or 0.0
+    if live_bal is not None:
+        equity_line = f"  💵 Account:  <b>${live_bal:.2f} USD</b>"
+        if sb:
+            delta = live_bal - sb
+            delta_pct = delta / sb * 100
+            equity_line += f"  {'📈' if delta >= 0 else '📉'} <b>{delta_pct:+.1f}%</b> since open"
+        equity_line += "\n"
+    else:
+        equity_line = ""
+
+    # ── Per-trade lines ─────────────────────────────────────────────────────
     trade_lines = ""
     for t in today_trades:
         pnl  = t.get("realizedPnl", 0)
@@ -1445,63 +1480,46 @@ def build_daily_report() -> str:
     if not trade_lines:
         trade_lines = "  <i>No realized trades today.</i>\n"
 
-    # Open position snapshot (best-effort, no crash if yfinance fails)
-    open_line = ""
+    # ── Open position snapshot ──────────────────────────────────────────────
+    open_section = ""
     if POS_FILE.exists():
         try:
-            pos    = json.loads(POS_FILE.read_text())
-            sym    = pos["symbol"]
-            entry  = float(pos.get("buyPrice", 0))
-            sh     = float(pos.get("shares", 0))
-            fi     = yf.Ticker(sym).fast_info
-            price  = float(fi.last_price or entry)
-            upct   = (price - entry) / entry * 100 if entry else 0
-            upnl   = (price - entry) * sh
-            ic2    = "📈" if upct >= 0 else "📉"
-            open_line = (
-                f"\n<b>OPEN:</b>  {ic2} <code>{sym}</code>  "
-                f"{sh:.0f} sh @ ${entry:.2f}  →  ${price:.2f}  "
+            pos   = json.loads(POS_FILE.read_text())
+            sym   = pos["symbol"]
+            entry = float(pos.get("buyPrice", 0))
+            sh    = float(pos.get("shares", 0))
+            fi    = yf.Ticker(sym).fast_info
+            price = float(fi.last_price or entry)
+            upct  = (price - entry) / entry * 100 if entry else 0
+            upnl  = (price - entry) * sh
+            ic2   = "📈" if upct >= 0 else "📉"
+            is_ah = bool(pos.get("afterHours")) or pos.get("strategyName", "") in ("After-Hours Limit", "Pre-Market Limit")
+            sell_note = "9:35 AM ET tomorrow" if is_ah else "3:55 PM ET (hard lock)"
+            open_section = (
+                f"\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📌 <b>OPEN POSITION</b>  (selling: {sell_note})\n"
+                f"  {ic2} <code>{sym}</code>  {sh:.0f} sh @ ${entry:.2f}  →  ${price:.2f}  "
                 f"<b>{upct:+.1f}%</b>  (${upnl:+.2f} unrealized)\n"
             )
         except Exception:
             pass
 
-    # Live account balance (best-effort — skip gracefully if Playwright unavailable)
-    balance_line = ""
-    try:
-        live_bal = fetch_live_balance(retries=2)
-        if live_bal is not None:
-            sb = stats.get("starting_balance") or 0.0
-            bal_delta = live_bal - sb if sb else 0.0
-            bal_delta_pct = (bal_delta / sb * 100) if sb else 0.0
-            bal_color = "📈" if bal_delta >= 0 else "📉"
-            balance_line = (
-                f"\n💰 <b>Account balance:</b>  <b>${live_bal:.2f} USD</b>"
-                + (f"  {bal_color} <b>{bal_delta_pct:+.1f}%</b> since session start" if sb else "")
-                + "\n"
-            )
-    except Exception:
-        pass
-
-    # All-time % gain on starting capital (use starting_balance as baseline if available)
-    at_gain_line = ""
-    sb = stats.get("starting_balance") or 0.0
-    if sb and stats["total_pnl"] != 0:
-        at_gain_pct = stats["total_pnl"] / sb * 100
-        at_gain_line = f"  💹 All-time gain on capital:  <b>{at_gain_pct:+.1f}%</b>\n"
-
     return (
-        f"📊 <b>LE GRINDER — {now_et():%b %d, %Y}</b>\n\n"
-        f"<b>TODAY  •  {len(today_trades)} trade{'s' if len(today_trades) != 1 else ''}</b>\n"
-        f"{trade_lines}"
-        f"{open_line}\n"
-        f"  {color} Day P&L:  <b>{daily_pnl:+.2f} USD  ({daily_pct:+.1f}%)</b>\n"
-        f"  🏆 Day record:  <b>{daily_wins}W / {daily_loss}L</b>  —  <b>{daily_wr:.0f}% win rate</b>\n\n"
-        f"<b>ALL TIME  •  {stats['count']} trades</b>\n"
-        f"  {at_color} P&L:  <b>{stats['total_pnl']:+.2f} USD</b>  ({stats['total_pnl_pct']:+.1f}% ROI)\n"
-        f"  🏆 Record:  <b>{stats['wins']}W / {stats['losses']}L</b>  —  <b>{all_wr:.0f}% win rate</b>\n"
-        f"{at_gain_line}"
-        f"{balance_line}"
+        f"📊 <b>LE GRINDER — Daily Report</b>  •  {now:%b %d, %Y}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💹 <b>EQUITY OVERVIEW</b>\n"
+        f"{equity_line}"
+        f"  {at_color} All-time P&L:  <b>${stats['total_pnl']:+.2f} USD</b>  ({stats['total_pnl_pct']:+.1f}% ROI)\n"
+        f"  {d_color} Today:  <b>${daily_pnl:+.2f} USD</b>  ({daily_pct:+.1f}%)  |  🏆 {daily_wins}W/{daily_loss}L\n"
+        f"  {w_color} This week:  <b>${weekly_pnl:+.2f} USD</b>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 <b>TODAY'S TRADES  •  {len(today_trades)}</b>\n"
+        f"{trade_lines}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏆 <b>ALL TIME  •  {stats['count']} trades</b>\n"
+        f"  {at_color} P&L:  <b>${stats['total_pnl']:+.2f} USD</b>\n"
+        f"  🏆 <b>{stats['wins']}W / {stats['losses']}L</b>  —  <b>{all_wr:.0f}% win rate</b>"
+        f"{open_section}"
     )
 
 
