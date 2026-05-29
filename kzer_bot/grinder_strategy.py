@@ -1404,12 +1404,18 @@ class SmartGrinderStrategy:
         for score, snap, sig in combined:
             gap_pct = gaps.get(snap.symbol)
             if gap_pct is not None:
-                if gap_pct >= 3.0:
-                    score += 12.0   # strong continuation confirmed
-                elif gap_pct >= 1.0:
-                    score += 6.0    # mild continuation
+                if   gap_pct >= 5.0:
+                    score += 20.0   # explosive intraday momentum
+                elif gap_pct >= 3.0:
+                    score += 14.0   # strong continuation
+                elif gap_pct >= 1.5:
+                    score += 9.0    # moderate intraday mover
+                elif gap_pct >= 0.5:
+                    score += 5.0    # slight positive drift
                 elif gap_pct <= -1.0:
-                    score = max(0.0, score - 15.0)  # momentum reversed — penalise
+                    score = max(0.0, score - 18.0)  # momentum reversed — penalise
+                elif gap_pct <= -0.5:
+                    score = max(0.0, score - 10.0)  # slight negative drift
             gap_adjusted.append((score, snap, sig, gap_pct or 0.0))
         combined = sorted(gap_adjusted, key=lambda x: x[0], reverse=True)
 
