@@ -77,7 +77,33 @@ _FULL_REFRESH_TTL  = 24 * 3600
 _CACHED_SCAN_TTL   = 18 * 3600
 _MIN_COVERAGE_FOR_CACHE = 0.35
 _DEPLOY_PCT           = 100       # 100% of balance deployed per trade
-_PROFIT_TARGET_PCT    = 10.0      # sell immediately when unrealized >= +10%
+_PROFIT_TARGET_PCT    = 10.0      # default fallback profit target (adaptive per trade)
+
+
+def _dynamic_profit_target(atr_pct: float) -> float:
+    """ATR-adaptive profit target: 3.5× daily ATR, floored at 7%, capped at 15%."""
+    return round(max(7.0, min(15.0, atr_pct * 3.5)), 1)
+
+
+def _filter_extended_at_buy(picks: list) -> "GrinderPick":
+    """
+    At actual buy time, check if the top pick has already run too far since scan.
+    If live price is >4% above scan price, skip to next pick (chasing = bad).
+    Falls back to picks[0] after checking top 3.
+    """
+    for pick in picks[:3]:
+        try:
+            fi   = yf.Ticker(pick.symbol).fast_info
+            live = float(fi.last_price or 0)
+            if live > 0 and pick.last_close > 0:
+                gap = (live - pick.last_close) / pick.last_close * 100
+                if gap > 4.0:
+                    log(f"  {pick.symbol} already +{gap:.1f}% from scan price ${pick.last_close:.2f} — chasing, trying next pick")
+                    continue
+        except Exception:
+            pass
+        return pick
+    return picks[0]
 _TRAILING_STOP_TRIGGER_PCT  = 2.0  # activate trailing stop at +2.0%
 _TRAILING_STOP_DISTANCE_PCT = 1.0  # trail by 1.0% from peak
 _LATE_LOCK_PCT        = 2.0       # legacy constant — kept for messages only (always sell at 3:55 PM now)
@@ -370,9 +396,21 @@ def _choose_scan_symbols(force_full: bool = False) -> tuple[list[str], bool]:
         else:
             use_full = (now_et() - last_full).total_seconds() >= _FULL_REFRESH_TTL
 
-    if use_full:
-        return WATCHLIST, True
-    return shortlist, False
+    base = WATCHLIST if use_full else shortlist
+
+    # Blend in Yahoo trending — puts that day's real movers at the front of the scan
+    try:
+        ctx = SmartMarketContext.load_or_fetch()
+        new_trending = [
+            s for s in ctx.trending
+            if s and "." not in s and s not in base
+        ]
+        if new_trending:
+            base = new_trending[:30] + base
+    except Exception:
+        pass
+
+    return base, use_full
 
 
 def _build_shortlist(md: GrinderMarketData, picks: list[GrinderPick]) -> list[str]:
@@ -1503,11 +1541,14 @@ def execute_buy(pick: GrinderPick, balance: float, bias: FuturesBias,
     actual_qty  = float(order.get("estimated_quantity") or
                         (actual_cost / pick.last_close if pick.last_close else shares_est))
 
+    profit_target = _dynamic_profit_target(pick.atr_pct)
     pos = {
         "symbol": pick.symbol, "buyPrice": pick.last_close,
         "shares": actual_qty, "estimatedCost": actual_cost,
         "sellAll": True, "strategyName": pick.strategy_name,
         "time": now_et().isoformat(),
+        "profitTargetPct": profit_target,
+        "atrPct": round(pick.atr_pct, 2),
     }
     POS_FILE.write_text(json.dumps(pos))
     _append_trade_history(pick.symbol, "BUY", pick.last_close, actual_qty,
@@ -1520,10 +1561,10 @@ def execute_buy(pick: GrinderPick, balance: float, bias: FuturesBias,
         f"🎫 <code>{pick.symbol}</code>\n"
         f"🔢 Shares: <b>{actual_qty:.4f}</b>  |  💵 Entry: <b>${pick.last_close:.2f} USD</b>\n"
         f"💰 Invested: <b>${actual_cost:.2f} USD</b>\n"
-        f"🎯 Target: <b>+{_PROFIT_TARGET_PCT:.0f}%</b>  |  3:55 PM lock if +{_LATE_LOCK_PCT:.0f}%  |  No stop loss\n\n"
+        f"🎯 Target: <b>+{profit_target:.1f}%</b>  (ATR {pick.atr_pct:.1f}%)  |  No stop loss\n\n"
         f"{at_color} All-time PnL: <b>${at_pnl:+.2f} USD</b>"
     )
-    log(f"Buy confirmed: {actual_qty:.4f} sh @ ${pick.last_close:.2f}  cost ${actual_cost:.2f}")
+    log(f"Buy confirmed: {actual_qty:.4f} sh @ ${pick.last_close:.2f}  cost ${actual_cost:.2f}  target +{profit_target:.1f}%")
     return True
 
 
@@ -2262,10 +2303,14 @@ def hold_and_sell(balance: float = 0.0) -> None:
     cost   = float(pos.get("estimatedCost", 0))
     shares = float(pos.get("shares", 0))
     strat  = pos.get("strategyName", "")
+    # ATR-adaptive profit target — falls back to module default if not saved
+    _profit_target_pct = float(pos.get("profitTargetPct", _PROFIT_TARGET_PCT))
 
     if shares < 0.01 and cost > 0 and entry > 0:
         shares = cost / entry
         log(f"Corrected share count to {shares:.4f}")
+
+    log(f"Profit target for this position: +{_profit_target_pct:.1f}%")
 
     from kzer_bot.market_data import YFinanceMarketData
     md = YFinanceMarketData()
@@ -2317,7 +2362,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
                 f"💰 Deploying: <b>${cost:.2f} USD</b>  |  📋 {strat}\n"
                 f"📋 Pre-market order — fills at <b>9:30 AM ET open</b>  ({mins_to_open} min)\n"
                 f"🔄 {'Market sell + rotation at' if is_ah_position else 'Morning decision at'} <b>9:35 AM ET</b>\n"
-                f"🎯 Target: +{_PROFIT_TARGET_PCT:.0f}%  |  3:55 PM lock: +{_LATE_LOCK_PCT:.0f}%  |  No stop loss"
+                f"🎯 Target: +{_profit_target_pct:.1f}%  |  3:55 PM lock: +{_LATE_LOCK_PCT:.0f}%  |  No stop loss"
             )
         else:
             notify(
@@ -2325,7 +2370,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
                 f"🎫 <code>{symbol}</code>  |  {shares:.4f} sh @ ${entry:.2f}\n"
                 f"💰 Cost: <b>${cost:.2f} USD</b>  |  📋 {strat}\n"
                 f"🔄 {'Market sell + rotation at <b>9:35 AM ET</b>' if is_ah_position else 'Morning decision at <b>9:31 AM ET</b> — hold if trending or rotate'}\n"
-                f"🎯 Target: +{_PROFIT_TARGET_PCT:.0f}%  |  3:55 PM lock: +{_LATE_LOCK_PCT:.0f}%  |  No stop loss"
+                f"🎯 Target: +{_profit_target_pct:.1f}%  |  3:55 PM lock: +{_LATE_LOCK_PCT:.0f}%  |  No stop loss"
             )
 
         fill_notified = not pre_open
@@ -2447,7 +2492,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
         f"📊 <b>Position open — autonomous hold</b>\n\n"
         f"🎫 <code>{symbol}</code>  |  {shares:.4f} sh @ ${entry:.2f}\n"
         f"💰 Cost: <b>${cost:.2f} USD</b>  |  📋 {strat}\n"
-        f"🎯 Profit target: <b>+{_PROFIT_TARGET_PCT:.0f}%</b>  |  "
+        f"🎯 Profit target: <b>+{_profit_target_pct:.1f}%</b>  |  "
         f"Late lock: <b>+{_LATE_LOCK_PCT:.0f}%</b> at 3:55 PM\n"
         f"🌙 Below target at 3:55 PM → hold overnight, no stop loss"
     )
@@ -2501,13 +2546,13 @@ def hold_and_sell(balance: float = 0.0) -> None:
                 
                 max_pnl_pct = (max_price - entry) / entry * 100 if entry > 0 else 0
 
-                # 1. Hard Profit Target
-                if pnl_pct >= _PROFIT_TARGET_PCT:
-                    log(f"PROFIT TARGET: {pnl_pct:+.1f}% ≥ +{_PROFIT_TARGET_PCT:.0f}% — selling now")
+                # 1. Hard Profit Target (ATR-adaptive)
+                if pnl_pct >= _profit_target_pct:
+                    log(f"PROFIT TARGET: {pnl_pct:+.1f}% ≥ +{_profit_target_pct:.1f}% — selling now")
                     notify(
                         f"🎯 <b>PROFIT TARGET HIT — selling <code>{symbol}</code></b>\n\n"
                         f"📈 Unrealized: <b>{pnl_pct:+.1f}%</b>  |  Price: ${price:.2f}\n"
-                        f"💰 Locking in gains — executing sell now"
+                        f"🎯 Target was +{_profit_target_pct:.1f}%  |  Locking in gains"
                     )
                     _execute_sell_order(symbol, entry, shares, cost, strat, "Profit Target")
                     return
@@ -3020,6 +3065,10 @@ def main() -> None:
                 f"📡 {_bias_line(bias, fut_det)}"
             )
 
+        # Extended-at-buy check: skip picks that already ran >4% from scan price
+        top = _filter_extended_at_buy(picks)
+        picks = [top] + [p for p in picks if p.symbol != top.symbol]
+
         # Execute buy — try up to 5 picks in order before giving up
         ok = False
         for attempt_pick in picks[:5]:
@@ -3075,7 +3124,7 @@ def main() -> None:
             if not _picks:
                 log("No intraday picks found — entering overnight loop.")
                 break
-            top = _picks[0]
+            top = _filter_extended_at_buy(_picks)
             notify(
                 f"⚡ <b>INTRADAY ROTATION — <code>{top.symbol}</code></b>\n\n"
                 f"🔄 Previous position closed — locking in next mover\n"

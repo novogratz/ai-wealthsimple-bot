@@ -71,8 +71,8 @@ _HARDCODED_WATCHLIST: list[str] = [
     # ── Media / Gaming ───────────────────────────────────────────────────────
     "RBLX", "EA", "TTWO", "SPOT", "NFLX",
     # ── High-beta momentum ───────────────────────────────────────────────────
-    "GME", "AMC", "BBBY", "UWMC", "CLOV", "SPCE",
-    "SNDL", "NKLA", "WKHS", "RIDE", "GOEV",
+    "GME", "AMC", "UWMC", "CLOV", "SPCE",
+    "SNDL", "NKLA", "WKHS",
     # ── S&P 500 high-volume liquid names ─────────────────────────────────────
     "AAON", "ACM", "AES", "AIG", "AIZ", "AJG", "AKAM", "ALB", "ALGN",
     "ALK", "ALL", "ALLE", "ANET", "AON", "APA", "APD", "APH", "APTV",
@@ -803,7 +803,12 @@ class BestEffortStrategy:
 
         positives = [s for s in candidates if s.yesterday_pct_change > 0]
         pool = positives if positives else candidates
+        if not pool:
+            return []
         best = max(pool, key=lambda s: s.score)
+        # Refuse to deploy into a flat/negative market — cash is better
+        if best.yesterday_pct_change <= 0:
+            return []
 
         return [GrinderPick(
             symbol        = best.symbol,
@@ -840,6 +845,7 @@ class SmartSignals:
     sma200:       float   # 200-day SMA (Minervini Stage 2)
     high_52w:     float   # 52-week high (CANSLIM "N" — leadership proxy)
     vol_1yr_ratio: float  # yesterday_vol / 1yr max vol (>1.0 = 1yr volume record)
+    consec_green:  int    # consecutive up-close days (2–3 = sweet spot, 6+ = extended)
 
 
 def _calc_rsi(closes: "np.ndarray", period: int = 14) -> float:
@@ -917,12 +923,21 @@ def _build_smart_signals(df: pd.DataFrame) -> SmartSignals:
     vol_252   = float(vol[-252:].max()) if n >= 60 else float(vol.max())
     vol_1yr_ratio = float(vol[-1]) / vol_252 if vol_252 > 0 else 0.0
 
+    # Consecutive up-close days (extension detector)
+    consec_green = 0
+    for i in range(-1, -min(10, n), -1):
+        if cls[i] > cls[i - 1]:
+            consec_green += 1
+        else:
+            break
+
     return SmartSignals(
         pct_5d=pct_5d, pct_20d=pct_20d, high_20d=high_20d,
         vol_trend=vol_trend, obv_score=obv_score,
         rsi14=rsi14, macd_diff=macd_diff, macd_crossed=macd_crossed,
         sma50=sma50, sma150=sma150, sma200=sma200,
         high_52w=high_52w, vol_1yr_ratio=vol_1yr_ratio,
+        consec_green=consec_green,
     )
 
 
@@ -960,7 +975,7 @@ def _fetch_yahoo_trending() -> set:
 
 @dataclass
 class SmartMarketContext:
-    """SPY + sector context fetched once per scan — includes regime gate."""
+    """SPY + sector + VIX context fetched once per scan — includes regime gate."""
     spy_5d_pct:       float
     sector_returns:   dict   # ETF symbol → 5d return %
     trending:         set    # Yahoo Finance trending US symbols
@@ -969,15 +984,33 @@ class SmartMarketContext:
     spy_sma50:        float
     spy_sma200:       float
     spy_price:        float
+    vix_level:        float = 0.0  # CBOE VIX — volatility regime gate
 
     @property
     def regime_multiplier(self) -> float:
-        """Score multiplier based on SPY market regime (Minervini/RyanJHamby concept)."""
+        """Combined SPY trend + VIX volatility regime multiplier."""
+        # SPY trend regime (Minervini)
         if self.spy_above_sma50 and self.spy_above_sma200:
-            return 1.0    # full bull — no penalty
-        if self.spy_above_sma200:
-            return 0.85   # SPY pulled back below 50d but still above 200d
-        return 0.70       # SPY below 200d = bear market — very selective
+            spy_mult = 1.0
+        elif self.spy_above_sma200:
+            spy_mult = 0.85
+        else:
+            spy_mult = 0.70
+
+        # VIX volatility regime — high VIX = whipsaw, kills intraday +10% targets
+        vix = self.vix_level
+        if vix >= 30:
+            vix_mult = 0.55   # panic/crisis — extremely selective
+        elif vix >= 25:
+            vix_mult = 0.70   # elevated fear — hard to hit +10% cleanly
+        elif vix >= 20:
+            vix_mult = 0.88   # mild anxiety — slight caution
+        elif 0 < vix <= 14:
+            vix_mult = 1.12   # complacency — momentum runs clean
+        else:
+            vix_mult = 1.0    # normal (VIX 14-20)
+
+        return spy_mult * vix_mult
 
     @classmethod
     def load_or_fetch(cls, max_age: int = 7_200) -> "SmartMarketContext":
@@ -994,6 +1027,7 @@ class SmartMarketContext:
                         spy_sma50=float(raw.get("spy_sma50", 0)),
                         spy_sma200=float(raw.get("spy_sma200", 0)),
                         spy_price=float(raw.get("spy_price", 0)),
+                        vix_level=float(raw.get("vix_level", 0.0)),
                     )
             except Exception:
                 pass
@@ -1007,6 +1041,7 @@ class SmartMarketContext:
         spy_above_sma50 = True
         spy_above_sma200 = True
         spy_sma50 = spy_sma200 = spy_price = 0.0
+        vix_level = 0.0
 
         syms = ["SPY"] + _SECTOR_ETFS
         try:
@@ -1036,6 +1071,18 @@ class SmartMarketContext:
         except Exception:
             pass
 
+        # VIX — volatility regime gate
+        try:
+            vix_raw = yf.download(
+                "^VIX", period="5d", interval="1d",
+                auto_adjust=False, progress=False, timeout=10,
+            )
+            if not vix_raw.empty:
+                vix_close = vix_raw["Close"] if "Close" in vix_raw.columns else vix_raw.iloc[:, 0]
+                vix_level = float(vix_close.dropna().iloc[-1])
+        except Exception:
+            pass
+
         try:
             trending = _fetch_yahoo_trending()
         except Exception:
@@ -1045,6 +1092,7 @@ class SmartMarketContext:
             spy_5d_pct=spy_pct, sector_returns=sectors, trending=trending,
             spy_above_sma50=spy_above_sma50, spy_above_sma200=spy_above_sma200,
             spy_sma50=spy_sma50, spy_sma200=spy_sma200, spy_price=spy_price,
+            vix_level=vix_level,
         )
         try:
             SMART_CONTEXT_CACHE.write_text(json.dumps({
@@ -1056,6 +1104,7 @@ class SmartMarketContext:
                 "spy_sma50":   spy_sma50,
                 "spy_sma200":  spy_sma200,
                 "spy_price":   spy_price,
+                "vix_level":   vix_level,
             }, indent=2), encoding="utf-8")
         except Exception:
             pass
@@ -1210,58 +1259,71 @@ def _save_short_mem() -> None:
     except Exception:
         pass
 
-def _get_short_pct(symbol: str) -> float:
-    """Return short % of float (0.0–1.0). Returns 0.0 on error."""
+def _get_float_info(symbol: str) -> tuple[float, float]:
+    """Return (short_pct, float_shares). short_pct is 0.0–1.0. Cached 24h."""
     _load_short_mem()
     entry = _short_mem.get(symbol, {})
     if entry and time.time() - entry.get("ts", 0) < 24 * 3600:
-        return float(entry.get("short_pct", 0.0))
+        return float(entry.get("short_pct", 0.0)), float(entry.get("float_shares", 0.0))
 
     short_pct = 0.0
+    float_shares = 0.0
     try:
         info = yf.Ticker(symbol).get_info()
         val = info.get("shortPercentOfFloat")
         if val is not None:
-            short_pct = float(val)   # already a ratio: 0.25 = 25%
+            short_pct = float(val)
+        fv = info.get("floatShares")
+        if fv is not None:
+            float_shares = float(fv)
     except Exception:
         pass
 
-    _short_mem[symbol] = {"short_pct": short_pct, "ts": time.time()}
+    _short_mem[symbol] = {"short_pct": short_pct, "float_shares": float_shares, "ts": time.time()}
     _save_short_mem()
-    return short_pct
+    return short_pct, float_shares
 
 
 def _squeeze_bonus(symbol: str, yesterday_pct: float) -> float:
-    """Score bonus for high short interest + momentum (short squeeze setup)."""
+    """Score bonus: high short interest + small float + momentum = explosive squeeze."""
     if yesterday_pct < 2.0:
         return 0.0
-    sp = _get_short_pct(symbol)
-    if sp >= 0.30:  return 8.0   # >30% short float + momentum = prime squeeze
-    if sp >= 0.20:  return 5.0   # >20% short float
-    if sp >= 0.10:  return 2.0   # modest short interest
-    return 0.0
+    sp, float_shares = _get_float_info(symbol)
+    if sp >= 0.30:   base = 8.0   # >30% short float = prime squeeze
+    elif sp >= 0.20: base = 5.0   # >20% short float
+    elif sp >= 0.10: base = 2.0   # modest short interest
+    else:            return 0.0
+    # Small float amplifies squeeze violence
+    if 0 < float_shares <= 10_000_000:
+        return base * 2.0   # tiny float: max pain for shorts
+    if float_shares <= 50_000_000:
+        return base * 1.3   # small float: meaningful squeeze potential
+    return base
 
 
 class SmartGrinderStrategy:
     """
-    Primary screener — 12-signal composite score (0-~125 pts).
+    Primary screener — 14-signal composite score (0-~140 pts).
 
     Signals (from 4 quant repos — IBKR, Minervini, CANSLIM, LangChain):
-      A. Momentum alignment — 1d/5d/20d alignment                   (0-25 pts)
-      B. MACD(12,26,9)      — bullish crossover / above signal       (0-12 pts)
-      C. RSI(14) zone       — 45-70 = momentum, <35 = bounce        (0-10 pts)
-      D. Stage 2 MA align   — Price>SMA50>SMA150>SMA200 [Minervini] (0-12 pts)
-      E. Volume conviction  — rel vol + trend + 1yr breakthrough     (0-18 pts)
-      F. 52-week proximity  — within 20% of 52-week high [CANSLIM]  (0-10 pts)
-      G. Rel strength SPY   — outperforms SPY 5d return             (0-8 pts)
-      H. OBV smart money    — volume-weighted up/down               (0-5 pts)
-      I. Bonuses            — close quality + ATR + trending         (0-10 pts)
-      J. Sector alignment   — stock in top-performing sector         (0-5 pts)
-      K. Earnings blackout  — filtered out if earnings within 3 days (hard filter)
-      L. Short squeeze      — high short float + momentum bonus      (0-8 pts)
+      A. Momentum alignment  — 1d/5d/20d alignment                    (0-25 pts)
+      B. MACD(12,26,9)       — bullish crossover / above signal        (0-12 pts)
+      C. RSI(14) zone        — 45-70 = momentum, <35 = bounce         (0-10 pts)
+      D. Stage 2 MA align    — Price>SMA50>SMA150>SMA200 [Minervini]  (0-12 pts)
+      E. Volume conviction   — rel vol + trend + 1yr breakthrough      (0-18 pts)
+      F. 52-week proximity   — within 20% of 52-week high [CANSLIM]   (0-10 pts)
+      G. Rel strength SPY    — outperforms SPY 5d return              (0-8 pts)
+      H. OBV smart money     — volume-weighted up/down                (0-5 pts)
+      I. Bonuses             — close quality + ATR + trending          (0-10 pts)
+      J. Sector alignment    — stock in top-performing sector          (0-5 pts)
+      K. Earnings blackout   — hard filter: skip if earnings ≤3 days  (filter)
+      L. Short squeeze       — float-adjusted short interest bonus     (0-16 pts)
+      M. Live gap            — pre-market/intraday gap vs yesterday    (-15 to +12 pts)
+      N. Consecutive days    — 2-3 green = sweet spot, 6+ = filtered  (-8 to +6 pts)
 
-    Market regime gate (Minervini): SPY below SMA200 → scores × 0.70
-    Base filters: price $1–$1000 | avg vol ≥100k | yesterday ≥+0.5% | above EMA20
+    Regime gate: SPY×VIX combined multiplier (0.55–1.12)
+    Hard filters: price $1–$1000 | avg vol ≥100k | yesterday ≥+0.5% | above EMA20
+                  6+ consecutive green days = extended (skipped)
     Confidence: HIGH ≥80 | MEDIUM ≥45 | LOW <45
     """
 
@@ -1289,14 +1351,16 @@ class SmartGrinderStrategy:
             df = self.md.get_frame(sym)
             if df is None or len(df) < 7:
                 continue
-            sig   = _build_smart_signals(df)
+            sig = _build_smart_signals(df)
+            if sig.consec_green >= 6:
+                continue  # hard filter: 6+ consecutive green days = extended
             score = self._score(snap, sig)
             if score > 0:
                 scored.append((score, snap, sig))
 
         scored.sort(key=lambda x: x[0], reverse=True)
 
-        # ── Earnings blackout + short squeeze (top 50 only — slow yf calls) ──
+        # ── Earnings blackout + float-adjusted squeeze (top 50 only) ──────
         enriched: list = []
         for score, snap, sig in scored[:50]:
             if _is_earnings_blackout(snap.symbol):
@@ -1308,6 +1372,25 @@ class SmartGrinderStrategy:
             enriched + scored[50:],
             key=lambda x: x[0], reverse=True,
         )
+
+        # ── Live/pre-market gap enrichment (top 20 only — fast_info calls) ─
+        gap_adjusted: list = []
+        for score, snap, sig in combined[:20]:
+            try:
+                fi   = yf.Ticker(snap.symbol).fast_info
+                live = float(fi.last_price or 0)
+                if live > 0 and snap.last_close > 0:
+                    gap_pct = (live - snap.last_close) / snap.last_close * 100
+                    if gap_pct >= 3.0:
+                        score += 12.0   # strong continuation confirmed
+                    elif gap_pct >= 1.0:
+                        score += 6.0    # mild continuation
+                    elif gap_pct <= -1.0:
+                        score = max(0.0, score - 15.0)  # momentum reversed — penalise
+            except Exception:
+                pass
+            gap_adjusted.append((score, snap, sig))
+        combined = sorted(gap_adjusted, key=lambda x: x[0], reverse=True) + combined[20:]
 
         out: list = []
         for score, snap, _sig in combined[:self.SCAN_LIMIT]:
@@ -1402,7 +1485,14 @@ class SmartGrinderStrategy:
             elif sector_ret >= 2.0: s += 3.0   # sector trending well
             elif sector_ret >= 0.0: s += 1.0   # sector positive
 
-        # Market regime gate (Minervini): never fight the tape ────────────
+        # N — Consecutive green days: sweet spot 2-3, penalise 5+ (extended)
+        cg = sig.consec_green
+        if   cg == 2: s += 4.0   # early in move — ideal entry
+        elif cg == 3: s += 6.0   # confirmed 3-day trend — sweet spot
+        elif cg == 4: s -= 3.0   # getting extended
+        elif cg >= 5: s -= 8.0   # overextended — likely to reverse
+
+        # Market regime gate (Minervini + VIX): never fight the tape ─────
         s *= self.ctx.regime_multiplier
 
         return s
