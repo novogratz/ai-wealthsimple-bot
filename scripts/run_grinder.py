@@ -1178,46 +1178,85 @@ def _pick_why(p: GrinderPick) -> str:
     return "  •  ".join(reasons)
 
 
-def build_watchlist_alert(current_symbol: str | None = None) -> str | None:
+def _quick_scan_picks(scan_symbols: list[str], current_symbol: str | None = None) -> list[GrinderPick]:
     """
-    Build a Telegram message showing the top 3 picks from the last scan
-    that the user could trade manually. Returns None if no picks available.
+    Run a fresh SmartGrinderStrategy scan on scan_symbols and return picks,
+    excluding current_symbol. Falls back to cached picks if scan fails.
+    Runs in ~15-30s for a 150-ticker shortlist (batch yfinance download).
     """
-    state = _load_scan_state()
-    picks_raw = state.get("picks", [])
-    picks: list[GrinderPick] = []
-    for raw in picks_raw:
-        p = _pick_from_dict(raw)
-        if p and p.symbol != current_symbol:
-            picks.append(p)
+    try:
+        log(f"30-min watchlist refresh: scanning {len(scan_symbols)} tickers...")
+        md  = GrinderMarketData()
+        md.prefetch(scan_symbols)
+        ctx = SmartMarketContext.load_or_fetch()
+        picks = SmartGrinderStrategy(md, ctx).scan(scan_symbols)
+        if not picks:
+            picks = GrinderStrategy(md).scan(scan_symbols)
+        if not picks:
+            picks = FallbackStrategy(md).scan(scan_symbols)
+        picks = [p for p in picks if p.symbol != current_symbol]
+        log(f"  Watchlist refresh done: {len(picks)} picks")
+        return picks
+    except Exception as exc:
+        log(f"  Watchlist refresh error: {exc} — using cached picks")
+        # Fall back to cached scan state picks
+        state = _load_scan_state()
+        cached: list[GrinderPick] = []
+        for raw in state.get("picks", []):
+            p = _pick_from_dict(raw)
+            if p and p.symbol != current_symbol:
+                cached.append(p)
+        return cached
 
-    if not picks:
+
+def build_watchlist_alert(
+    picks: list[GrinderPick],
+    current_symbol: str | None = None,
+    current_price: float = 0.0,
+    entry: float = 0.0,
+    shares: float = 0.0,
+    cost: float = 0.0,
+) -> str | None:
+    """
+    Build a Telegram message with:
+    - Today's bot pick (current position live P&L)
+    - Top 3 picks the user can trade manually (fresh scan)
+    """
+    top3 = [p for p in picks if p.symbol != current_symbol][:3]
+    if not top3 and not current_symbol:
         return None
 
-    top3 = picks[:3]
-    scan_age_min = 0
-    try:
-        updated = _parse_ts(state.get("updated"))
-        if updated:
-            scan_age_min = int((now_et() - updated).total_seconds() / 60)
-    except Exception:
-        pass
-
     lines = []
-    medals = ["1️⃣", "2️⃣", "3️⃣"]
-    for i, p in enumerate(top3):
-        conf_emoji = "🔥" if p.score >= 80 else ("⚡" if p.score >= 50 else "📊")
+
+    # ── Today's bot pick ─────────────────────────────────────────────────
+    if current_symbol and entry > 0:
+        pnl       = (current_price - entry) * shares if current_price > 0 else 0.0
+        pnl_pct   = (current_price - entry) / entry * 100 if entry > 0 else 0.0
+        price_str = f"${current_price:.2f}" if current_price > 0 else "n/a"
+        ic        = "🟢" if pnl >= 0 else "🔴"
         lines.append(
-            f"{medals[i]} {conf_emoji} <code>{p.symbol}</code>  "
-            f"<b>${p.last_close:.2f}</b>  [score {p.score:.0f}]\n"
-            f"    {_pick_why(p)}"
+            f"🤖 <b>Bot's pick:</b> <code>{current_symbol}</code>  "
+            f"{shares:.0f} sh @ ${entry:.2f}  →  {price_str}  "
+            f"{ic} <b>{pnl_pct:+.1f}%</b>  (${pnl:+.2f})"
         )
 
-    age_str = f"  •  scan {scan_age_min}min ago" if scan_age_min > 0 else ""
+    # ── Top 3 manual picks ────────────────────────────────────────────────
+    if top3:
+        lines.append(f"\n<b>Top {len(top3)} picks if you had more cash:</b>")
+        medals = ["1️⃣", "2️⃣", "3️⃣"]
+        for i, p in enumerate(top3):
+            conf_emoji = "🔥" if p.score >= 80 else ("⚡" if p.score >= 50 else "📊")
+            lines.append(
+                f"{medals[i]} {conf_emoji} <code>{p.symbol}</code>  "
+                f"<b>${p.last_close:.2f}</b>  [score {p.score:.0f}]\n"
+                f"    {_pick_why(p)}"
+            )
+    else:
+        lines.append("\n<i>No additional picks found right now.</i>")
+
     return (
-        f"👀 <b>Watchlist — top picks right now</b>{age_str}\n\n"
+        f"👀 <b>Watchlist — {now_et():%H:%M} ET</b>\n\n"
         + "\n\n".join(lines)
-        + "\n\n<i>These are what the bot would buy with more cash.</i>"
     )
 
 
@@ -2283,7 +2322,9 @@ def hold_and_sell(balance: float = 0.0) -> None:
                                 symbol, entry, snap.last_price, shares, cost,
                                 next_sell_dt=next_sell,
                             ))
-                            watchlist_msg = build_watchlist_alert(current_symbol=symbol)
+                            sc_syms2, _ = _choose_scan_symbols()
+                            fresh2 = _quick_scan_picks(sc_syms2, current_symbol=symbol)
+                            watchlist_msg = build_watchlist_alert(fresh2, symbol, snap.last_price, entry, shares, cost)
                             if watchlist_msg:
                                 notify(watchlist_msg)
                             log(f"30-min update: ${snap.last_price:.2f} ({(snap.last_price/entry-1)*100:+.2f}%)")
@@ -2432,7 +2473,9 @@ def hold_and_sell(balance: float = 0.0) -> None:
 
                 if time.time() - last_update_t >= UPDATE_INTERVAL:
                     notify(build_update_message(symbol, entry, price, shares, cost))
-                    watchlist_msg = build_watchlist_alert(current_symbol=symbol)
+                    sc_syms, _ = _choose_scan_symbols()
+                    fresh = _quick_scan_picks(sc_syms, current_symbol=symbol)
+                    watchlist_msg = build_watchlist_alert(fresh, symbol, price, entry, shares, cost)
                     if watchlist_msg:
                         notify(watchlist_msg)
                     log(f"30-min update: ${price:.2f} ({pnl_pct:+.2f}%)")
