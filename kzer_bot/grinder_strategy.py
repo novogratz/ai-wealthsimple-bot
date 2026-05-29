@@ -6,6 +6,7 @@ import json
 import time
 import urllib.request
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -580,6 +581,7 @@ class GrinderPick:
     above_ema5: bool
     above_ema20: bool
     strategy_name: str      # "Main Strategy", "Fallback", or "Best Available"
+    premarket_gap_pct: float = 0.0  # live pre-market gap from previous close
 
     @property
     def confidence(self) -> str:
@@ -1373,38 +1375,58 @@ class SmartGrinderStrategy:
             key=lambda x: x[0], reverse=True,
         )
 
-        # ── Live/pre-market gap enrichment (top 20 only — fast_info calls) ─
-        gap_adjusted: list = []
-        for score, snap, sig in combined[:20]:
+        # ── Live/pre-market gap enrichment (all candidates — parallel fast_info) ─
+        def _fetch_gap(sym: str, lc: float) -> tuple[str, float | None]:
             try:
-                fi   = yf.Ticker(snap.symbol).fast_info
+                fi = yf.Ticker(sym).fast_info
                 live = float(fi.last_price or 0)
-                if live > 0 and snap.last_close > 0:
-                    gap_pct = (live - snap.last_close) / snap.last_close * 100
-                    if gap_pct >= 3.0:
-                        score += 12.0   # strong continuation confirmed
-                    elif gap_pct >= 1.0:
-                        score += 6.0    # mild continuation
-                    elif gap_pct <= -1.0:
-                        score = max(0.0, score - 15.0)  # momentum reversed — penalise
+                if live > 0 and lc > 0:
+                    return sym, (live - lc) / lc * 100
             except Exception:
                 pass
-            gap_adjusted.append((score, snap, sig))
-        combined = sorted(gap_adjusted, key=lambda x: x[0], reverse=True) + combined[20:]
+            return sym, None
+
+        gaps: dict[str, float] = {}
+        with ThreadPoolExecutor(max_workers=10) as ex:
+            fut_map = {
+                ex.submit(_fetch_gap, snap.symbol, snap.last_close): snap.symbol
+                for _, snap, _ in combined
+            }
+            for f in as_completed(fut_map):
+                try:
+                    sym, gap_val = f.result()
+                    if gap_val is not None:
+                        gaps[sym] = gap_val
+                except Exception:
+                    pass
+
+        gap_adjusted: list = []
+        for score, snap, sig in combined:
+            gap_pct = gaps.get(snap.symbol)
+            if gap_pct is not None:
+                if gap_pct >= 3.0:
+                    score += 12.0   # strong continuation confirmed
+                elif gap_pct >= 1.0:
+                    score += 6.0    # mild continuation
+                elif gap_pct <= -1.0:
+                    score = max(0.0, score - 15.0)  # momentum reversed — penalise
+            gap_adjusted.append((score, snap, sig, gap_pct or 0.0))
+        combined = sorted(gap_adjusted, key=lambda x: x[0], reverse=True)
 
         out: list = []
-        for score, snap, _sig in combined[:self.SCAN_LIMIT]:
+        for score, snap, _sig, gap_pct in combined[:self.SCAN_LIMIT]:
             out.append(GrinderPick(
-                symbol         = snap.symbol,
-                last_close     = snap.last_close,
-                score          = round(score, 2),
-                yesterday_pct  = snap.yesterday_pct_change,
-                rel_volume     = snap.rel_volume,
-                atr_pct        = snap.atr_pct,
-                close_strength = snap.close_strength,
-                above_ema5     = snap.last_close > snap.ema5,
-                above_ema20    = True,
-                strategy_name  = "Smart Strategy",
+                symbol           = snap.symbol,
+                last_close       = snap.last_close,
+                score            = round(score, 2),
+                yesterday_pct    = snap.yesterday_pct_change,
+                rel_volume       = snap.rel_volume,
+                atr_pct          = snap.atr_pct,
+                close_strength   = snap.close_strength,
+                above_ema5       = snap.last_close > snap.ema5,
+                above_ema20      = True,
+                strategy_name    = "Smart Strategy",
+                premarket_gap_pct= round(gap_pct, 2),
             ))
         return out
 

@@ -297,6 +297,7 @@ def _pick_to_dict(pick: GrinderPick) -> dict:
         "above_ema5": pick.above_ema5,
         "above_ema20": pick.above_ema20,
         "strategy_name": pick.strategy_name,
+        "premarket_gap_pct": getattr(pick, "premarket_gap_pct", 0.0),
     }
 
 
@@ -313,6 +314,7 @@ def _pick_from_dict(data: dict) -> GrinderPick | None:
             above_ema5=bool(data["above_ema5"]),
             above_ema20=bool(data["above_ema20"]),
             strategy_name=str(data["strategy_name"]),
+            premarket_gap_pct=float(data.get("premarket_gap_pct", 0.0)),
         )
     except Exception:
         return None
@@ -1085,7 +1087,8 @@ def build_scan_message(
         f"  💪 Closed: <b>{top.close_strength:.0%}</b> of day range\n"
         f"  📊 Trend: EMA5 {'✅' if top.above_ema5 else '❌'}  "
         f"EMA20 {'✅' if top.above_ema20 else '❌'}\n"
-        f"  🎯 Score: <b>{top.score:.1f}</b>  ({top.confidence})\n\n"
+        f"  🎯 Score: <b>{top.score:.1f}</b>  ({top.confidence})\n"
+        f"  🌅 Pre-market gap: <b>{top.premarket_gap_pct:+.2f}%</b>\n\n"
         f"{_criteria_explanation(top)}\n"
     )
 
@@ -1392,9 +1395,10 @@ def build_watchlist_alert(
         medals = ["1️⃣", "2️⃣", "3️⃣"]
         for i, p in enumerate(top3):
             conf_emoji = "🔥" if p.score >= 80 else ("⚡" if p.score >= 50 else "📊")
+            gap_str = f"  gap {p.premarket_gap_pct:+.1f}%" if abs(p.premarket_gap_pct) >= 0.5 else ""
             lines.append(
                 f"{medals[i]} {conf_emoji} <code>{p.symbol}</code>  "
-                f"<b>${p.last_close:.2f}</b>  [score {p.score:.0f}]\n"
+                f"<b>${p.last_close:.2f}</b>  [score {p.score:.0f}{gap_str}]\n"
                 f"    {_pick_why(p)}"
             )
     else:
