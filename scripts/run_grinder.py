@@ -1537,13 +1537,25 @@ def execute_buy(pick: GrinderPick, balance: float, bias: FuturesBias,
         log(f"Buy failed for {pick.symbol}: order not submitted.")
         return False
 
-    actual_cost = float(order.get("estimated_value", deploy) or deploy)
-    actual_qty  = float(order.get("estimated_quantity") or
-                        (actual_cost / pick.last_close if pick.last_close else shares_est))
+    # Use actual fill data from WS if available, else compute from estimates
+    if "fill_price" in order:
+        actual_buy_price = float(order["fill_price"])
+        actual_qty       = float(order.get("fill_quantity", 0))
+        actual_cost      = float(order.get("fill_value", 0))
+        if not actual_qty or not actual_cost:
+            actual_buy_price = pick.last_close
+            actual_cost = float(order.get("estimated_value", deploy) or deploy)
+            actual_qty  = float(order.get("estimated_quantity") or
+                                (actual_cost / pick.last_close if pick.last_close else shares_est))
+    else:
+        actual_cost = float(order.get("estimated_value", deploy) or deploy)
+        actual_qty  = float(order.get("estimated_quantity") or
+                            (actual_cost / pick.last_close if pick.last_close else shares_est))
+        actual_buy_price = actual_cost / actual_qty if actual_qty else pick.last_close
 
     profit_target = _dynamic_profit_target(pick.atr_pct)
     pos = {
-        "symbol": pick.symbol, "buyPrice": pick.last_close,
+        "symbol": pick.symbol, "buyPrice": round(actual_buy_price, 4),
         "shares": actual_qty, "estimatedCost": actual_cost,
         "sellAll": True, "strategyName": pick.strategy_name,
         "time": now_et().isoformat(),
@@ -1551,7 +1563,7 @@ def execute_buy(pick: GrinderPick, balance: float, bias: FuturesBias,
         "atrPct": round(pick.atr_pct, 2),
     }
     POS_FILE.write_text(json.dumps(pos))
-    _append_trade_history(pick.symbol, "BUY", pick.last_close, actual_qty,
+    _append_trade_history(pick.symbol, "BUY", actual_buy_price, actual_qty,
                           actual_cost, 0.0, pick.strategy_name)
 
     at_pnl  = _get_total_pnl()
@@ -1559,12 +1571,12 @@ def execute_buy(pick: GrinderPick, balance: float, bias: FuturesBias,
     notify(
         f"✅ <b>Buy order submitted</b>\n\n"
         f"🎫 <code>{pick.symbol}</code>\n"
-        f"🔢 Shares: <b>{actual_qty:.4f}</b>  |  💵 Entry: <b>${pick.last_close:.2f} USD</b>\n"
+        f"🔢 Shares: <b>{actual_qty:.4f}</b>  |  💵 Entry: <b>${actual_buy_price:.2f} USD</b>\n"
         f"💰 Invested: <b>${actual_cost:.2f} USD</b>\n"
         f"🎯 Target: <b>+{profit_target:.1f}%</b>  (ATR {pick.atr_pct:.1f}%)  |  No stop loss\n\n"
         f"{at_color} All-time PnL: <b>${at_pnl:+.2f} USD</b>"
     )
-    log(f"Buy confirmed: {actual_qty:.4f} sh @ ${pick.last_close:.2f}  cost ${actual_cost:.2f}  target +{profit_target:.1f}%")
+    log(f"Buy confirmed: {actual_qty:.4f} sh @ ${actual_buy_price:.2f}  cost ${actual_cost:.2f}  target +{profit_target:.1f}%")
     return True
 
 
@@ -1708,14 +1720,28 @@ def _afterhours_buy(pick: dict, balance: float) -> bool:
         notify(f"❌ After-hours buy failed for <code>{sym}</code>.")
         return False
 
-    # We specified exact --shares N, so shares_est is authoritative
-    actual_shares = float(shares_est)
-    actual_value  = actual_shares * limit_price
-    actual_price  = limit_price
+    # Use actual fill data from WS if available
+    if "fill_price" in order_data:
+        actual_price   = float(order_data["fill_price"])
+        actual_shares  = float(order_data.get("fill_quantity", shares_est))
+        actual_value   = float(order_data.get("fill_value", actual_shares * actual_price))
+    else:
+        # Try yfinance current price — limit order may have filled below limit
+        try:
+            fi     = yf.Ticker(sym).fast_info
+            _cur   = fi.last_price
+            if _cur and 0 < _cur < limit_price * 1.5:
+                actual_price = round(_cur, 4)
+            else:
+                actual_price = limit_price
+        except Exception:
+            actual_price = limit_price
+        actual_shares = float(shares_est)
+        actual_value  = actual_shares * actual_price
 
     pos = {
         "symbol":        sym,
-        "buyPrice":      actual_price,
+        "buyPrice":      round(actual_price, 4),
         "shares":        actual_shares,
         "estimatedCost": actual_value,
         "sellAll":       True,
@@ -1726,7 +1752,7 @@ def _afterhours_buy(pick: dict, balance: float) -> bool:
     POS_FILE.write_text(json.dumps(pos, indent=2))
     _append_trade_history(sym, "BUY", actual_price, actual_shares, actual_value, 0.0, "After-Hours Limit")
 
-    log(f"AH buy confirmed: {actual_shares:.4f} sh {sym} @ ${actual_price:.2f}  cost ${actual_value:.2f}")
+    log(f"AH buy confirmed: {actual_shares:.4f} sh {sym} @ ${actual_price:.4f}  cost ${actual_value:.2f}")
     notify(
         f"✅ <b>AH buy confirmed — <code>{sym}</code></b>\n\n"
         f"💰 {actual_shares:.4f} sh @ ${actual_price:.2f}  (cost ${actual_value:.2f})\n"
@@ -1950,14 +1976,28 @@ def _premarket_buy(pick: dict, balance: float) -> bool:
         notify(f"❌ Pre-market buy failed for <code>{sym}</code>.")
         return False
 
-    # We specified exact --shares N, so shares_est is authoritative
-    actual_shares = float(shares_est)
-    actual_value  = actual_shares * limit_price
-    actual_price  = limit_price
+    # Use actual fill data from WS if available
+    if "fill_price" in order_data:
+        actual_price   = float(order_data["fill_price"])
+        actual_shares  = float(order_data.get("fill_quantity", shares_est))
+        actual_value   = float(order_data.get("fill_value", actual_shares * actual_price))
+    else:
+        # Try yfinance current price — limit order may have filled below limit
+        try:
+            fi     = yf.Ticker(sym).fast_info
+            _cur   = fi.last_price
+            if _cur and 0 < _cur < limit_price * 1.5:
+                actual_price = round(_cur, 4)
+            else:
+                actual_price = limit_price
+        except Exception:
+            actual_price = limit_price
+        actual_shares = float(shares_est)
+        actual_value  = actual_shares * actual_price
 
     pos = {
         "symbol":        sym,
-        "buyPrice":      actual_price,
+        "buyPrice":      round(actual_price, 4),
         "shares":        actual_shares,
         "estimatedCost": actual_value,
         "sellAll":       True,
@@ -1969,7 +2009,7 @@ def _premarket_buy(pick: dict, balance: float) -> bool:
     POS_FILE.write_text(json.dumps(pos, indent=2))
     _append_trade_history(sym, "BUY", actual_price, actual_shares, actual_value, 0.0, "Pre-Market Limit")
 
-    log(f"PM buy confirmed: {actual_shares:.4f} sh {sym} @ ${actual_price:.2f}  cost ${actual_value:.2f}")
+    log(f"PM buy confirmed: {actual_shares:.4f} sh {sym} @ ${actual_price:.4f}  cost ${actual_value:.2f}")
     notify(
         f"✅ <b>PM buy confirmed — <code>{sym}</code></b>\n\n"
         f"💰 {actual_shares:.4f} sh @ ${actual_price:.2f}  (cost ${actual_value:.2f})\n"

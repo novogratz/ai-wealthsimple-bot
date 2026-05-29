@@ -254,6 +254,62 @@ def parse_money(value: str) -> float | None:
         return None
 
 
+def read_position_from_trade_page(page, symbol: str) -> dict | None:
+    """
+    After a buy order is placed, navigate to the stock's trade page
+    and read the actual position details (average cost, shares, total value).
+    Returns dict with fill_price, fill_quantity, fill_value if position found.
+    """
+    trade_url = f"https://my.wealthsimple.com/app/trade/{symbol}"
+    try:
+        page.goto(trade_url, wait_until="domcontentloaded", timeout=15_000)
+        page.wait_for_timeout(3000)
+        text = page.locator("body").inner_text(timeout=5000)
+
+        own_match = re.search(
+            r"You\s+(?:own|have)\s+([0-9,.]+)\s+shares?",
+            text, flags=re.IGNORECASE
+        )
+        if not own_match:
+            return None
+
+        qty = parse_money(own_match.group(1))
+        if not qty or qty <= 0:
+            return None
+
+        avg_match = re.search(
+            r"(?:Average|Avg\.?)\s*cost\s+\$?([0-9,.]+)",
+            text, flags=re.IGNORECASE
+        )
+        if avg_match:
+            price = parse_money(avg_match.group(1))
+        else:
+            val_match = re.search(
+                r"(?:Total|Market)\s*value\s+\$?([0-9,.]+)",
+                text, flags=re.IGNORECASE
+            )
+            if val_match:
+                total_val = parse_money(val_match.group(1))
+                if total_val and qty > 0:
+                    price = total_val / qty
+                else:
+                    return None
+            else:
+                return None
+
+        if not price or price <= 0:
+            return None
+
+        return {
+            "fill_price": round(price, 4),
+            "fill_quantity": qty,
+            "fill_value": round(qty * price, 2),
+        }
+    except Exception as e:
+        safe_print(f"  [position_read] Error: {e}")
+        return None
+
+
 def parse_review_details(page, side: str, submitted: bool) -> dict:
     text = page.locator("body").inner_text(timeout=5000)
 
@@ -945,6 +1001,14 @@ def cmd_buy(args) -> None:
                 if args.price:
                     label = f"{args.shares} shares @ ${args.price:.2f}"
                 safe_print(f"\n[OK] Buy order: {args.symbol} {label}")
+
+                if result.get("submitted"):
+                    fill_data = read_position_from_trade_page(page, strip_exchange(args.symbol))
+                    if fill_data:
+                        result.update(fill_data)
+                        safe_print(f"  [fill] Actual position: {fill_data['fill_quantity']:.4f} sh @ ${fill_data['fill_price']:.4f}")
+                    else:
+                        safe_print("  [fill] Position not yet visible on trade page — will use estimate")
             except Exception as e:
                 safe_print(f"\n[ERROR] Buy failed: {e}")
             finally:
