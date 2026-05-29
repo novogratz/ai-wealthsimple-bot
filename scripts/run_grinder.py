@@ -2597,6 +2597,12 @@ def hold_and_sell(balance: float = 0.0) -> None:
                 wait_for_fill_confirm(symbol)
                 log("Fill confirmed at market open.")
 
+            # 4 PM daily performance report
+            if "daily_report" not in _scanned and cur.hour >= 16 and cur.weekday() < 5:
+                _scanned.add("daily_report")
+                log("4:00 PM — sending daily performance report (overnight loop).")
+                notify(build_daily_report())
+
             # 5 PM preview scan (tonight)
             if "5pm" not in _scanned and cur.hour >= 17 and cur.weekday() < 5:
                 _scanned.add("5pm")
