@@ -1,55 +1,110 @@
-# Le Grinder Quant v4.0
+# Le Grinder v5.0
 
-**Autonomous 24/7 Multi-Stage Momentum Rotation Engine for Wealthsimple US/CA.**
+**Autonomous 24/7 momentum rotation bot for Wealthsimple US (NYSE / NASDAQ).**
 
-Le Grinder is a professional-grade quantitative trading system designed for high-frequency autonomous rotation in the US and Canadian equity markets. It leverages a sophisticated 9-signal composite scoring engine and a 24/7 execution cycle to achieve consistent high-alpha returns.
+Le Grinder scans ~350 liquid US tickers, picks the highest-conviction momentum setup, buys it, and rotates on profit or at market close — all without manual intervention. Every 30 minutes it also sends a watchlist alert with the top 3 picks you can trade manually in your own account.
 
-## Core Mandate: 10%+ Daily Alpha
-The system is engineered for a target return of **10% per day** through:
-- **Zero Idle Cash:** 100% capital deployment across pre-market, intraday, and after-hours windows.
-- **Autonomous Rotation:** Real-time profit taking at +10% with immediate re-scanning and redeployment into the next high-conviction mover.
-- **Gain Protection:** Intelligent trailing stops (activated at +2%, 1% trail) to lock in profits and protect the downside.
+---
 
-## Strategic Framework (The 9-Signal Alpha Engine)
-Le Grinder's scoring engine synthesizes concepts from premier quantitative repositories and institutional strategies:
-1. **Momentum Cascade (IBKR):** Triple-timeframe alignment (1d/5d/20d) for high-probability trend continuation.
-2. **Stage 2 Alignment (Minervini):** Price > SMA50 > SMA150 > SMA200 trend validation.
-3. **Volume Conviction:** Relative volume (RVOL) + 5d/20d volume trend analysis.
-4. **Institutional Flow (OBV):** Volume-weighted price action to detect smart money accumulation.
-5. **Breakout Proximity (CANSLIM):** Scoring based on closeness to 52-week and 20-day highs.
-6. **Relative Strength (Alpha):** Performance benchmarking against S&P 500 (^GSPC) and TSX (^GSPTSE).
-7. **MACD Divergence:** Bullish crossover detection for optimal entry timing.
-8. **RSI Momentum:** Identifying the 'Goldilocks' zone (RSI 45-70) for sustained moves.
-9. **Market Regime Gate:** Dynamic score scaling based on broad market health (SPY vs SMA200).
+## What it does
 
-## Execution Cycle (24/7 Autonomous Operation)
-| Window | Timing (ET) | Strategic Action |
+- **Always deployed** — buys pre-market, intraday, or after-hours. Never sits in cash during market or extended hours.
+- **Rotates aggressively** — sells at +10% profit target or trailing stop, immediately re-scans and re-buys. No fees on Wealthsimple.
+- **Hard exits** — 3:55 PM sell for all daytime positions. AH/PM positions always sell at 9:35 AM market open.
+- **Watchlist for you** — every 30 min, Telegram sends the top 3 picks the bot would buy with more cash, with score and reasons, so you can trade them manually.
+
+---
+
+## The 12-Signal Engine (0–125 pts)
+
+Synthesized from IBKR, Minervini, CANSLIM, and LangChain quant strategies:
+
+| # | Signal | Max pts |
 |---|---|---|
-| **Pre-Market** | 7:00 AM – 9:29 AM | Alpha scan on top movers + Limit Buy + Intraday monitoring (+2% target) |
-| **Morning Decision** | 9:31 AM | Automated hold/rotate check on overnight positions based on fresh Smart Score |
-| **Intraday Alpha** | 9:35 AM – 3:55 PM | **The Grinder Loop:** Buy at 10% target → Sell → Re-scan → Re-buy |
-| **Market Lock** | 3:55 PM | Hard sell of all daytime positions to capture realized gains |
-| **After-Hours** | 4:00 PM – 8:00 PM | Extended-hours momentum rotation with 60s price monitoring (+3% target) |
+| A | Momentum cascade — 1d/5d/20d alignment | 25 |
+| B | MACD(12,26,9) — bullish crossover | 12 |
+| C | RSI(14) — momentum zone 45–70 | 10 |
+| D | Stage 2 MA alignment — Price > SMA50 > SMA150 > SMA200 | 12 |
+| E | Volume conviction — RVOL + trend + 1-year volume record | 18 |
+| F | 52-week high proximity — within 20% of high (CANSLIM "N") | 10 |
+| G | Relative strength vs SPY — outperforms 5d return | 8 |
+| H | OBV smart money — volume-weighted direction | 5 |
+| I | Bonuses — close quality + ATR + Yahoo trending | 10 |
+| J | Sector alignment — stock in top-performing sector (XLK/XLF/XLE…) | 5 |
+| K | **Earnings blackout** — hard filter: skip if earnings within 3 days | — |
+| L | **Short squeeze radar** — short float > 20% + momentum | 8 |
 
-## Tech Stack & Compliance
-- **Execution:** Playwright-based browser automation for Wealthsimple Trade.
-- **Data:** High-frequency yfinance wrapper with multi-threaded prefetching.
-- **Intelligence:** Claude 3.5 Sonnet (via Claude Code) for qualitative pick analysis.
-- **Reporting:** Professional Telegram integration with real-time P&L, trade logs, and EOD Quant Summaries.
+**Market regime gate:** SPY below SMA200 → all scores × 0.70
 
-## Installation & Deployment
+---
+
+## Daily Schedule (ET)
+
+| Time | Action |
+|---|---|
+| 5:00 AM | Futures check + full scan + AI analysis → Telegram game plan |
+| 7:00 AM | Pre-market scan → limit buy top < $10 mover |
+| 9:31 AM | Morning hold-or-rotate decision (regular overnight positions only) |
+| **9:35 AM** | AH/PM positions: market sell + rotate. Regular buy: market order |
+| Every 30 min | Position update + **top 3 watchlist picks** (for manual trading) |
+| 3:30 PM | Last intraday entry cutoff |
+| **3:55 PM** | Hard sell all daytime positions |
+| 4:00 PM | After-hours scan → limit buy top < $10 mover |
+| 5:00 PM | Next-day preview scan |
+
+---
+
+## Extended Hours Rules
+
+- **Pre-market (7–9:29 AM) / After-hours (4–7:57 PM):** limit buy only, stocks under $10, price set 5% above current to ensure fill
+- **NEVER limit sell** outside market hours — all sells happen at 9:35 AM market open
+- AH/PM positions skip the morning hold decision and always sell at 9:35 AM then rotate
+
+---
+
+## Installation
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 playwright install msedge
 
-# Configuration
-# Create .env with WS_EMAIL, WS_PASSWORD, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-
-# 24/7 Operation
-python scripts/run_grinder.py
+# First-time login (opens Edge, log in manually, press ENTER)
+python scripts/wealthsimple_auto.py setup
 ```
 
+Create `.env` in the project root:
+```
+TELEGRAM_BOT_TOKEN=xxx
+TELEGRAM_CHAT_ID=@yourchannel
+WS_EMAIL=you@gmail.com
+WS_PASSWORD=yourpassword
+```
+
+```powershell
+# Run 24/7
+python scripts/run_grinder.py
+
+# Debug: skip overnight wait and buy immediately
+python scripts/run_grinder.py --now
+
+# Override balance
+python scripts/run_grinder.py --balance 95.50
+```
+
+---
+
+## Stack
+
+- **Execution:** Playwright → Edge → Wealthsimple Trade (no API, browser automation)
+- **Data:** yfinance batch download with in-memory + disk cache
+- **Signals:** Custom quant engine (12 signals) + earnings/short-interest enrichment
+- **Intelligence:** Claude Code CLI for qualitative pick analysis at each scan
+- **Reporting:** Telegram (position updates, watchlist alerts, trade results, daily report)
+
+---
+
 ## Disclaimer
-This is a high-risk quantitative trading tool. Past performance is not indicative of future results. Aiming for 10% daily alpha involves significant leverage (of time and capital rotation) and market exposure.
+
+High-risk autonomous trading tool. Past performance is not indicative of future results.
