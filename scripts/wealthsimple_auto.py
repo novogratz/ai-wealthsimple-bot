@@ -978,6 +978,34 @@ def cmd_setup(_args) -> None:
     print(f"  Keep that Chrome window running in the background.")
 
 
+def cmd_position(args) -> None:
+    """Read the actual open position details (fill_price, shares) from Wealthsimple for a given symbol."""
+    from playwright.sync_api import sync_playwright
+
+    symbol = strip_exchange(args.symbol.upper())
+    _acquire_busy_lock()
+    try:
+        with sync_playwright() as p:
+            ctx, page = open_browser(p)
+            page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
+            page.wait_for_timeout(2000)
+
+            if page.locator('input[type="password"], input[placeholder*="Password" i]').first.is_visible(timeout=1500):
+                if not try_auto_login(page):
+                    print("SESSION_EXPIRED: Wealthsimple session expired")
+                    sys.exit(1)
+                page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_timeout(3000)
+
+            fill_data = read_position_from_trade_page(page, symbol)
+            if fill_data:
+                print("ORDER_RESULT_JSON:" + json.dumps(fill_data, sort_keys=True))
+            else:
+                print("POSITION_NOT_FOUND")
+    finally:
+        _release_busy_lock()
+
+
 def cmd_buy(args) -> None:
     from playwright.sync_api import sync_playwright
 
@@ -1114,6 +1142,9 @@ def main() -> None:
     sub.add_parser("setup", help="First-time login: save session to data/ws_auth.json")
     sub.add_parser("balance", help="Fetch live balance from Wealthsimple")
 
+    pos_p = sub.add_parser("position", help="Read actual position (fill price, qty) from WS")
+    pos_p.add_argument("--symbol", required=True, help="e.g. NVDA")
+
     buy_p = sub.add_parser("buy", help="Prepare a buy order")
     buy_p.add_argument("--symbol", required=True, help="e.g. SHOP or SHOP.TO")
     buy_p.add_argument("--shares", type=int, default=None)
@@ -1134,7 +1165,7 @@ def main() -> None:
         parser.error("buy requires --shares unless --max-dollars is used")
     if args.cmd == "sell" and not args.sell_all and args.shares is None:
         parser.error("sell requires --shares unless --sell-all is used")
-    {"setup": cmd_setup, "buy": cmd_buy, "sell": cmd_sell, "balance": cmd_balance, "keepalive": cmd_keepalive}[args.cmd](args)
+    {"setup": cmd_setup, "buy": cmd_buy, "sell": cmd_sell, "balance": cmd_balance, "position": cmd_position, "keepalive": cmd_keepalive}[args.cmd](args)
 
 
 if __name__ == "__main__":

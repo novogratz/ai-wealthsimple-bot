@@ -707,6 +707,42 @@ def _parse_order_result(stdout: str) -> dict:
     return {}
 
 
+def fetch_position_details(symbol: str, retries: int = 3) -> dict | None:
+    """
+    Call the wealthsimple_auto.py position command to get actual fill details
+    (fill_price, fill_quantity, fill_value) from the Wealthsimple trade page.
+    Returns None if position not found or all retries fail.
+    """
+    for attempt in range(1, retries + 1):
+        log(f"Fetching position details for {symbol} (attempt {attempt}/{retries})...")
+        try:
+            r = subprocess.run(
+                [PYTHON, str(AUTO_SCRIPT), "position", "--symbol", symbol],
+                cwd=ROOT, capture_output=True, text=True, timeout=120,
+            )
+            for line in r.stdout.splitlines():
+                if line.startswith("ORDER_RESULT_JSON:"):
+                    data = json.loads(line[len("ORDER_RESULT_JSON:"):])
+                    if data.get("fill_price") and data.get("fill_quantity"):
+                        log(f"  Position: {data['fill_quantity']:.4f} sh @ ${data['fill_price']:.4f}")
+                        return data
+                if line.strip() == "POSITION_NOT_FOUND":
+                    log(f"  Position not found for {symbol} on WS trade page")
+                    return None
+            combined = (r.stdout + r.stderr).lower()
+            if "session_expired" in combined or "session expired" in combined:
+                log(f"  Session expired — auto-login in progress, retrying...")
+                time.sleep(20)
+                continue
+        except Exception as exc:
+            log(f"  Position fetch error: {exc}")
+            time.sleep(15)
+            continue
+        break
+    log(f"  Could not fetch position details for {symbol} after {retries} attempts")
+    return None
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Scan diagnostics
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1588,6 +1624,22 @@ def wait_for_fill_confirm(symbol: str) -> None:
         log(f"Pre-market order queued — waiting {secs/60:.1f} min for 9:45 fill check...")
         time.sleep(secs)
     log("Confirming fill at 9:45 AM...")
+
+    # Refresh position cost from Wealthsimple — the limit order may have
+    # filled at a different price than the limit we submitted.
+    fill = fetch_position_details(symbol)
+    if fill and POS_FILE.exists():
+        try:
+            pos = json.loads(POS_FILE.read_text())
+            old_entry = float(pos.get("buyPrice", 0))
+            pos["buyPrice"] = round(fill["fill_price"], 4)
+            pos["shares"] = fill["fill_quantity"]
+            pos["estimatedCost"] = fill["fill_value"]
+            POS_FILE.write_text(json.dumps(pos, indent=2, default=str))
+            log(f"  Updated cost basis: ${old_entry:.4f} → ${fill['fill_price']:.4f}  (was estimated/limit price)")
+        except Exception as exc:
+            log(f"  Could not update position cost: {exc}")
+
     balance = fetch_live_balance(retries=2)
     bal_str = f"${balance:.2f} USD" if balance else "N/A"
     notify(
@@ -2003,7 +2055,6 @@ def _premarket_buy(pick: dict, balance: float) -> bool:
         "sellAll":       True,
         "strategyName":  "Pre-Market Limit",
         "afterHours":    True,
-        "forceSell":     True,
         "time":          now_et().isoformat(),
     }
     POS_FILE.write_text(json.dumps(pos, indent=2))
@@ -2268,23 +2319,9 @@ def _morning_hold_decision(symbol: str, entry: float, shares: float,
     Returns True = keep holding (skip sell + skip new buy today).
     Returns False = sell now and let main loop find a new pick.
     Criteria: stock still above EMA20 AND smart composite score >= _MIN_SMART_HOLD_SCORE.
-    If position file has forceSell=true, always rotates out.
+    AH/PM positions never reach here — they sell unconditionally at 9:35 AM.
     """
     log(f"Morning hold check for {symbol}...")
-    # Honour explicit force-sell flag (e.g. user overrides or overnight session issue)
-    try:
-        if POS_FILE.exists():
-            _pos = json.loads(POS_FILE.read_text())
-            if _pos.get("forceSell"):
-                log(f"  forceSell=true — rotating out of {symbol} unconditionally")
-                notify(
-                    f"🔄 <b>9:31 AM — Selling <code>{symbol}</code> (forced exit)</b>\n\n"
-                    f"📋 Position flagged for mandatory exit\n"
-                    f"🔍 Scanning for new pick at 9:35 AM..."
-                )
-                return False
-    except Exception:
-        pass
     try:
         from kzer_bot.grinder_strategy import (
             GrinderMarketData as _GMD,
@@ -2338,6 +2375,11 @@ def hold_and_sell(balance: float = 0.0) -> None:
         return
 
     pos    = json.loads(POS_FILE.read_text())
+    # Strip stale forceSell flag from old position files — PM/AH positions
+    # are now handled by the is_ah_position + afterHours logic.
+    if pos.pop("forceSell", None) is not None:
+        POS_FILE.write_text(json.dumps(pos, indent=2, default=str))
+        log("  Removed stale forceSell flag from position file")
     symbol = pos["symbol"]
     entry  = float(pos.get("buyPrice", 0))
     cost   = float(pos.get("estimatedCost", 0))
@@ -2361,18 +2403,44 @@ def hold_and_sell(balance: float = 0.0) -> None:
 
     log(f"Holding {symbol}  {shares:.4f} sh @ ${entry:.2f}  (cost ${cost:.2f})")
 
+    # ── Refresh AH/PM position cost from Wealthsimple ─────────────────────
+    # PM/AH limit buys use estimated prices until the order fills at market open.
+    # If the bot restarts after market open (or fill confirm was missed), fetch
+    # the actual executed price from WS so the cost basis is correct.
+    is_ah_position = bool(pos.get("afterHours")) or strat in ("After-Hours Limit", "Pre-Market Limit")
+    if is_ah_position and not pos.get("_costRefreshed"):
+        fill = fetch_position_details(symbol)
+        if fill and fill.get("fill_price") and fill.get("fill_quantity"):
+            try:
+                old_entry = float(pos.get("buyPrice", 0))
+                old_shares = float(pos.get("shares", 0))
+                pos["buyPrice"] = round(fill["fill_price"], 4)
+                pos["shares"] = fill["fill_quantity"]
+                pos["estimatedCost"] = fill["fill_value"]
+                pos["_costRefreshed"] = True
+                POS_FILE.write_text(json.dumps(pos, indent=2, default=str))
+                entry = fill["fill_price"]
+                shares = fill["fill_quantity"]
+                cost = fill["fill_value"]
+                log(f"  Refreshed cost basis: ${old_entry:.4f} → ${entry:.4f}  ({old_shares:.4f} → {shares:.4f} sh)")
+            except Exception as exc:
+                log(f"  Cost refresh failed: {exc}")
+
     now = now_et()
 
-    # ── Overnight path: after 3:55 PM, OR position bought on a previous calendar day ──
+    # ── Overnight path: after 3:55 PM, position bought on a previous day, OR
+    #    same-day AH/PM position still before its 9:35 AM sell window ──
     pos_time        = _parse_ts(pos.get("time"))
     bought_prev_day = pos_time is not None and pos_time.date() < now.date()
+    # AH/PM positions sell at 9:35 AM — if we're before that, wait in the overnight path
+    _ah_sell_dt     = now.replace(hour=_BUY_HOUR, minute=_BUY_MINUTE, second=0, microsecond=0)
+    ah_before_sell  = is_ah_position and now < _ah_sell_dt
     is_overnight    = (
         now.hour > _SELL_HOUR or
         (now.hour == _SELL_HOUR and now.minute >= _SELL_MINUTE) or
-        bought_prev_day
+        bought_prev_day or
+        ah_before_sell
     )
-    # AH/PM entries always sell at 9:35 AM and rotate — no morning hold decision
-    is_ah_position  = bool(pos.get("afterHours")) or strat in ("After-Hours Limit", "Pre-Market Limit")
     if is_overnight:
         # AH/PM positions sell at 9:35 AM (same as next buy — rotate immediately)
         _sell_hour   = _BUY_HOUR   if is_ah_position else _OVERNIGHT_SELL_HOUR
@@ -2551,25 +2619,6 @@ def hold_and_sell(balance: float = 0.0) -> None:
             log(f"3:55 PM: {eod_pct:+.1f}% — selling always, AH rotation follows")
             _execute_sell_order(symbol, entry, shares, cost, strat, "3:55 PM")
             return
-
-        # ── forceSell flag check — immediate exit ─────────────────────────
-        if POS_FILE.exists():
-            try:
-                _pos_check = json.loads(POS_FILE.read_text())
-                if _pos_check.get("forceSell"):
-                    log(f"forceSell flag detected — selling {symbol} immediately")
-                    notify(
-                        f"🔄 <b>Force sell triggered — <code>{symbol}</code></b>\n\n"
-                        f"📋 Position flagged for immediate exit\n"
-                        f"🔍 Will scan for new pick after sell..."
-                    )
-                    _execute_sell_order(symbol, entry, shares, cost, strat, "Force Sell")
-                    if LEGACY_FILE.exists():
-                        log("Selling legacy position after force sell...")
-                        _sell_legacy_position()
-                    return
-            except Exception:
-                pass
 
         # ── Profit target & Trailing stop: check every 60s ─────────────────
         try:
