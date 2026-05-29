@@ -2217,6 +2217,17 @@ def _run_premarket_strategy(balance: float) -> None:
         log("Not in pre-market window — skipping.")
         return
 
+    # Don't rotate if the existing position is itself a PM/AH buy
+    # (already deployed this morning, will sell at 9:35 AM)
+    if POS_FILE.exists():
+        try:
+            _p = json.loads(POS_FILE.read_text())
+            if bool(_p.get("afterHours")) or _p.get("strategyName") in ("After-Hours Limit", "Pre-Market Limit"):
+                log(f"Existing PM/AH position {_p.get('symbol')} — skipping PM rotation, holding until 9:35 AM sell")
+                return
+        except Exception:
+            pass
+
     # Scan pre-market movers — use shortlist from yesterday for better accuracy
     scan_symbols, _ = _choose_scan_symbols()
     picks = _scan_premarket(scan_symbols)
