@@ -3386,50 +3386,55 @@ def main() -> None:
 
     # ── Resume open position ───────────────────────────────────────────────
     if POS_FILE.exists():
-        pos  = json.loads(POS_FILE.read_text())
-        _now = now_et()
-        _pre_open = _now.hour < 9 or (_now.hour == 9 and _now.minute < 30)
-        log(f"Open position found: {pos['symbol']} — resuming hold/sell loop.")
+        try:
+            pos = json.loads(POS_FILE.read_text())
+        except Exception:
+            pos = {}
+        if not pos.get("symbol"):
+            log("Position file exists but has no symbol — clearing stale state.")
+            POS_FILE.write_text("{}")
+            pos = {}
+        if pos.get("symbol"):
+            _now = now_et()
+            _pre_open = _now.hour < 9 or (_now.hour == 9 and _now.minute < 30)
+            log(f"Open position found: {pos['symbol']} — resuming hold/sell loop.")
 
-        if _is_afterhours_window():
-            # After-hours window: no limit sells — hold existing position, monitor until 9:31 AM
-            log("After-hours window — holding existing position until 9:31 AM (no limit sells in extended hours).")
-            notify(
-                f"🌙 <b>After-hours window detected</b>\n\n"
-                f"🎫 Holding <code>{pos['symbol']}</code>  "
-                f"{pos.get('shares', 0):.4f} sh @ ${pos.get('buyPrice', 0):.2f}\n"
-                f"📋 No limit sells in extended hours — holding until <b>9:31 AM ET</b> market open"
-            )
-            _run_afterhours_strategy(balance, sell_existing=True)
-            # Position still open — fall through to overnight hold
-            if POS_FILE.exists():
+            if _is_afterhours_window():
+                log("After-hours window — holding existing position until 9:31 AM (no limit sells in extended hours).")
+                notify(
+                    f"🌙 <b>After-hours window detected</b>\n\n"
+                    f"🎫 Holding <code>{pos['symbol']}</code>  "
+                    f"{pos.get('shares', 0):.4f} sh @ ${pos.get('buyPrice', 0):.2f}\n"
+                    f"📋 No limit sells in extended hours — holding until <b>9:31 AM ET</b> market open"
+                )
+                _run_afterhours_strategy(balance, sell_existing=True)
+                if POS_FILE.exists():
+                    hold_and_sell(balance=balance)
+            elif _pre_open:
+                _open_t = _now.replace(hour=9, minute=30, second=0, microsecond=0)
+                _mins = max(0, int((_open_t - _now).total_seconds() / 60))
+                _is_pm_ah = bool(pos.get("afterHours")) or pos.get("strategyName") in ("After-Hours Limit", "Pre-Market Limit")
+                _exit_line = (
+                    f"🔴 <b>SELL at 9:35 AM ET</b> → rotate to next pick"
+                    if _is_pm_ah else
+                    f"🎯 Hold decision at 9:31 AM → target/trail/3:55 PM exit"
+                )
+                notify(
+                    f"⏳ <b>Bot restarted — order pending fill</b>\n\n"
+                    f"🎫 <code>{pos['symbol']}</code>  "
+                    f"{pos.get('shares', 0):.4f} sh @ ~${pos.get('buyPrice', 0):.2f}\n"
+                    f"📋 Pre-market order fills at <b>9:30 AM ET open</b>  ({_mins} min)\n"
+                    f"{_exit_line}"
+                )
                 hold_and_sell(balance=balance)
-        elif _pre_open:
-            _open_t = _now.replace(hour=9, minute=30, second=0, microsecond=0)
-            _mins = max(0, int((_open_t - _now).total_seconds() / 60))
-            _is_pm_ah = bool(pos.get("afterHours")) or pos.get("strategyName") in ("After-Hours Limit", "Pre-Market Limit")
-            _exit_line = (
-                f"🔴 <b>SELL at 9:35 AM ET</b> → rotate to next pick"
-                if _is_pm_ah else
-                f"🎯 Hold decision at 9:31 AM → target/trail/3:55 PM exit"
-            )
-            notify(
-                f"⏳ <b>Bot restarted — order pending fill</b>\n\n"
-                f"🎫 <code>{pos['symbol']}</code>  "
-                f"{pos.get('shares', 0):.4f} sh @ ~${pos.get('buyPrice', 0):.2f}\n"
-                f"📋 Pre-market order fills at <b>9:30 AM ET open</b>  ({_mins} min)\n"
-                f"{_exit_line}"
-            )
-            hold_and_sell(balance=balance)
-        else:
-            notify(
-                f"▶️ <b>Bot restarted — resuming position</b>\n\n"
-                f"🎫 <code>{pos['symbol']}</code>  "
-                f"{pos.get('shares', 0):.4f} sh @ ${pos.get('buyPrice', 0):.2f}\n"
-                f"🎯 Autonomous: +{_PROFIT_TARGET_PCT:.0f}% target  |  +{_LATE_LOCK_PCT:.0f}% lock at 3:55 PM"
-            )
-            hold_and_sell(balance=balance)
-        # nothing to clean up here — hold_and_sell / AH strategy manages pos file
+            else:
+                notify(
+                    f"▶️ <b>Bot restarted — resuming position</b>\n\n"
+                    f"🎫 <code>{pos['symbol']}</code>  "
+                    f"{pos.get('shares', 0):.4f} sh @ ${pos.get('buyPrice', 0):.2f}\n"
+                    f"🎯 Autonomous: +{_PROFIT_TARGET_PCT:.0f}% target  |  +{_LATE_LOCK_PCT:.0f}% lock at 3:55 PM"
+                )
+                hold_and_sell(balance=balance)
 
     # ── Single-ticker mode (skip scan, buy immediately) ───────────────────
     if args.ticker:
