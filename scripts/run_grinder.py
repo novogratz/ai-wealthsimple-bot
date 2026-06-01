@@ -2810,36 +2810,37 @@ def hold_and_sell(balance: float = 0.0) -> None:
                     time.sleep(60)
                     continue
                 try:
-                    snap = md.snapshot(symbol)
-                    if snap:
-                        if fill_notified:
-                            notify(build_update_message(
-                                symbol, entry, snap.last_price, shares, cost,
-                                next_sell_dt=next_sell,
-                            ))
-                            sc_syms2, _ = _choose_scan_symbols()
-                            fresh2 = _quick_scan_picks(sc_syms2, current_symbol=symbol)
-                            watchlist_msg = build_watchlist_alert(fresh2, symbol, snap.last_price, entry, shares, cost)
-                            if watchlist_msg:
-                                notify(watchlist_msg)
-                            log(f"30-min update: ${snap.last_price:.2f} ({(snap.last_price/entry-1)*100:+.2f}%)")
-                        else:
-                            cur2 = now_et()
-                            open_t2 = cur2.replace(hour=9, minute=30, second=0, microsecond=0)
-                            mins_left = max(0, int((open_t2 - cur2).total_seconds() / 60))
-                            notify(
-                                f"⏳ <b>Order Pending — <code>{symbol}</code></b>  |  {cur2:%H:%M} ET\n\n"
-                                f"📋 Pre-market order fills at <b>9:30 AM ET open</b>\n"
-                                f"🎫 {shares:.4f} sh @ ~${entry:.2f}  |  💰 ${cost:.2f} USD\n"
-                                f"⏰ Market opens in <b>{mins_left} min</b>\n"
-                                f"🔴 {'SELL at 9:35 AM market open → rotate' if is_ah_position else 'Hold decision at 9:31 AM → target/trail/3:55 PM'}"
-                            )
-                            sc_syms2, _ = _choose_scan_symbols()
-                            fresh2 = _quick_scan_picks(sc_syms2, current_symbol=symbol)
-                            watchlist_msg = build_watchlist_alert(fresh2, symbol, snap.last_price, entry, shares, cost)
-                            if watchlist_msg:
-                                notify(watchlist_msg)
-                            log(f"Pre-open update: order pending, {mins_left} min to open")
+                    # Use fast_info.last_price — includes AH/PM extended hours prices
+                    _fi2  = yf.Ticker(symbol).fast_info
+                    _live = float(_fi2.last_price or 0) or entry
+                    if fill_notified:
+                        notify(build_update_message(
+                            symbol, entry, _live, shares, cost,
+                            next_sell_dt=next_sell,
+                        ))
+                        sc_syms2, _ = _choose_scan_symbols()
+                        fresh2 = _quick_scan_picks(sc_syms2, current_symbol=symbol)
+                        watchlist_msg = build_watchlist_alert(fresh2, symbol, _live, entry, shares, cost)
+                        if watchlist_msg:
+                            notify(watchlist_msg)
+                        log(f"30-min update: ${_live:.2f} ({(_live/entry-1)*100:+.2f}%)")
+                    else:
+                        cur2 = now_et()
+                        open_t2 = cur2.replace(hour=9, minute=30, second=0, microsecond=0)
+                        mins_left = max(0, int((open_t2 - cur2).total_seconds() / 60))
+                        notify(
+                            f"⏳ <b>Order Pending — <code>{symbol}</code></b>  |  {cur2:%H:%M} ET\n\n"
+                            f"📋 Pre-market order fills at <b>9:30 AM ET open</b>\n"
+                            f"🎫 {shares:.4f} sh @ ~${entry:.2f}  |  💰 ${cost:.2f} USD\n"
+                            f"⏰ Market opens in <b>{mins_left} min</b>\n"
+                            f"🔴 {'SELL at 9:35 AM market open → rotate' if is_ah_position else 'Hold decision at 9:31 AM → target/trail/3:55 PM'}"
+                        )
+                        sc_syms2, _ = _choose_scan_symbols()
+                        fresh2 = _quick_scan_picks(sc_syms2, current_symbol=symbol)
+                        watchlist_msg = build_watchlist_alert(fresh2, symbol, _live, entry, shares, cost)
+                        if watchlist_msg:
+                            notify(watchlist_msg)
+                        log(f"Pre-open update: order pending, {mins_left} min to open")
                 except Exception as exc:
                     log(f"30-min update error: {exc}")
 
