@@ -159,13 +159,19 @@ def log(msg: str) -> None:
 
 
 def notify(msg: str) -> None:
+    """Silent during the trading day — all events logged, Telegram only at 9:30 AM + 4 PM."""
+    log(f"  [event] {msg[:120].replace(chr(10), ' ')}")
+
+
+def _notify_report(msg: str) -> None:
+    """Send to Telegram — used exclusively for the 9:30 AM and 4 PM scheduled reports."""
     try:
         send_message(msg)
-        log("  → Telegram sent.")
+        log("  → Telegram report sent.")
     except TelegramConfigError as exc:
         log(f"  Telegram not configured: {exc}")
     except Exception as exc:
-        log(f"  Telegram failed: {exc}")
+        log(f"  Telegram report failed: {exc}")
 
 
 def _pnl_color(v: float) -> str:
@@ -1598,6 +1604,98 @@ def build_daily_report() -> str:
     )
 
 
+def build_morning_report() -> str:
+    """9:30 AM morning briefing — open bell summary sent to Telegram."""
+    stats  = _get_trade_stats()
+    ledger = []
+    if PNL_LEDGER.exists():
+        try:
+            ledger = json.loads(PNL_LEDGER.read_text())
+        except Exception:
+            pass
+
+    now        = now_et()
+    today_str  = now.strftime("%Y-%m-%d")
+    today_trades = [t for t in ledger if str(t.get("time", "")).startswith(today_str)]
+    daily_pnl  = sum(t.get("realizedPnl", 0) for t in today_trades)
+    weekly_pnl = _get_weekly_pnl(ledger)
+    at_color   = _pnl_color(stats["total_pnl"])
+    w_color    = _pnl_color(weekly_pnl)
+
+    # ── Live balance ──────────────────────────────────────────────────────
+    live_bal = None
+    try:
+        live_bal = fetch_live_balance(retries=2)
+    except Exception:
+        pass
+    bal_str = f"<b>${live_bal:.2f} USD</b>" if live_bal else "<i>n/a</i>"
+
+    # ── Futures bias ──────────────────────────────────────────────────────
+    bias_line = ""
+    try:
+        _ctx = _SMC.load_or_fetch()
+        bias = _ctx.get("market_bias", "")
+        spy5 = _ctx.get("spy_5d_pct", 0.0)
+        if bias:
+            b_ic = "🟢" if bias == "GREEN" else ("🔴" if bias == "RED" else "⚪")
+            bias_line = f"  {b_ic} Futures:     <b>{bias}</b>  (SPY 5d {spy5:+.1f}%)\n"
+    except Exception:
+        pass
+
+    # ── Open position ──────────────────────────────────────────────────────
+    open_section = ""
+    action_line  = "  🔄 Scanning for best pick — deploying at market open.\n"
+    if POS_FILE.exists():
+        try:
+            pos  = json.loads(POS_FILE.read_text())
+            sym  = pos.get("symbol", "")
+            if sym:
+                entry  = float(pos.get("buyPrice", 0))
+                sh     = float(pos.get("shares", 0))
+                cost   = float(pos.get("estimatedCost", 0)) or (entry * sh)
+                live   = _get_ws_live_price(sym, shares=sh)
+                if not live:
+                    fi   = yf.Ticker(sym).fast_info
+                    live = float(fi.last_price or entry)
+                price  = live or entry
+                upct   = (price - entry) / entry * 100 if entry else 0
+                upnl   = (price - entry) * sh
+                ic2    = "📈" if upct >= 0 else "📉"
+                is_ah  = bool(pos.get("afterHours")) or pos.get("strategyName", "") in ("After-Hours Limit", "Pre-Market Limit")
+                open_section = (
+                    f"\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📌 <b>OPEN POSITION</b>\n"
+                    f"  {ic2} <code>{sym}</code>  {sh:.0f} sh @ ${entry:.2f}  →  ${price:.2f}  "
+                    f"<b>{upct:+.1f}%  (${upnl:+.2f} unrealized)</b>\n"
+                )
+                if is_ah:
+                    action_line = f"  🔔 AH position → <b>market sell at 9:35 AM + rotate</b>\n"
+                else:
+                    action_line = f"  🔔 Regular hold → <b>profit target / trail / 3:55 PM lock</b>\n"
+        except Exception:
+            pass
+
+    return (
+        f"🌅 <b>LE GRINDER — MORNING REPORT</b>\n"
+        f"<i>{now:%A, %b %d %Y}  ·  9:30 AM ET</i>\n\n"
+
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💼 <b>PORTFOLIO</b>\n"
+        f"  💵 Balance:      {bal_str}\n"
+        f"  {w_color} Week P&L:    <b>${weekly_pnl:+.2f}</b>\n"
+        f"  {at_color} All-time:    <b>${stats['total_pnl']:+.2f}  ({stats['total_pnl_pct']:+.1f}% ROI)</b>\n\n"
+
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📡 <b>MARKET OPEN</b>\n"
+        f"{bias_line}"
+        f"{action_line}"
+        f"{open_section}"
+
+        f"\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>🤖 Le Grinder  ·  Autonomous US Equity Bot  ·  Next report: 4:00 PM ET</i>"
+    )
+
+
 def build_weekly_report() -> str:
     """Weekly Quant Summary — sent every Friday at 5 PM ET."""
     stats = _get_trade_stats()
@@ -2818,30 +2916,28 @@ def hold_and_sell(balance: float = 0.0) -> None:
                     wait_for_fill_confirm(symbol)
                 log("Fill confirmed at market open.")
 
+            # 9:30 AM morning report (Mon–Fri only)
+            if "morning_report" not in _scanned and cur.weekday() < 5 and (cur.hour > 9 or (cur.hour == 9 and cur.minute >= 30)):
+                _scanned.add("morning_report")
+                log("9:30 AM — sending morning report (overnight loop).")
+                _notify_report(build_morning_report())
+
             # 4 PM daily quant summary (Mon–Fri only)
             if "daily_report" not in _scanned and cur.hour >= 16 and cur.weekday() < 5:
                 _scanned.add("daily_report")
                 log("4:00 PM — sending daily quant summary (overnight loop).")
-                notify(build_daily_report())
+                _notify_report(build_daily_report())
 
-            # 5 PM Friday weekly quant summary
-            if "weekly_report" not in _scanned and cur.weekday() == 4 and cur.hour >= 17:
-                _scanned.add("weekly_report")
-                log("5:00 PM Friday — sending weekly quant summary (overnight loop).")
-                notify(build_weekly_report())
-
-            # 5 PM preview scan (weekdays only — skip quiet weekend)
+            # Background scans — silent, no Telegram
             if "5pm" not in _scanned and cur.hour >= 17 and cur.weekday() < 5:
                 _scanned.add("5pm")
                 _run_overnight_scan("5 PM Tonight's Preview", balance_approx, "5pm")
 
-            # Sunday 6 PM — futures open, send game-plan preview
             if "sunday_preview" not in _scanned and cur.weekday() == 6 and cur.hour >= 18:
                 _scanned.add("sunday_preview")
-                log("Sunday 6 PM — futures open, sending Sunday preview scan.")
+                log("Sunday 6 PM — futures open, running silent preview scan.")
                 _run_overnight_scan("Sunday 6 PM — Futures Open Preview", balance_approx, "sunday")
 
-            # 5 AM morning scan (weekdays only — skip quiet weekend)
             if "5am" not in _scanned and 5 <= cur.hour < 7 and cur.weekday() < 5:
                 _scanned.add("5am")
                 _run_overnight_scan("5 AM Morning Scan", balance_approx, "5am")
@@ -3405,17 +3501,19 @@ def main() -> None:
             _now_main.hour == _SELL_HOUR and _now_main.minute >= _SELL_MINUTE
         )
         
-        # Daily quant summary at 4:00 PM ET (Mon–Fri)
+        # 9:30 AM morning report (Mon–Fri)
+        if _now_main.weekday() < 5 and "morning_report" not in scans_done and (
+            _now_main.hour > 9 or (_now_main.hour == 9 and _now_main.minute >= 30)
+        ):
+            log("9:30 AM — sending morning report.")
+            _notify_report(build_morning_report())
+            scans_done.add("morning_report")
+
+        # 4:00 PM daily quant summary (Mon–Fri)
         if _now_main.hour >= 16 and _now_main.weekday() < 5 and "daily_report" not in scans_done:
             log("4:00 PM — sending daily quant summary.")
-            notify(build_daily_report())
+            _notify_report(build_daily_report())
             scans_done.add("daily_report")
-
-        # Weekly quant summary — every Friday at 5 PM ET
-        if _now_main.weekday() == 4 and _now_main.hour >= 17 and "weekly_report" not in scans_done:
-            log("5:00 PM Friday — sending weekly quant summary.")
-            notify(build_weekly_report())
-            scans_done.add("weekly_report")
 
         if not POS_FILE.exists() and _is_afterhours_window() and _past_close:
             log("No position in AH window — scanning for after-hours buy.")
