@@ -524,6 +524,26 @@ def _is_quiet_weekend() -> bool:
     return False
 
 
+def _get_ws_live_price(symbol: str, shares: float | None = None) -> float | None:
+    """
+    Fetch live price from Wealthsimple's trade page via the already-running browser.
+    Covers overnight Blue Ocean ATS sessions that Yahoo Finance doesn't track.
+    Returns None if browser is not running or price cannot be read.
+    """
+    try:
+        args_list = [PYTHON, str(AUTO_SCRIPT), "quote", "--symbol", symbol]
+        if shares:
+            args_list += ["--shares", str(shares)]
+        r = subprocess.run(args_list, cwd=ROOT, capture_output=True, text=True, timeout=30)
+        for line in r.stdout.splitlines():
+            if line.startswith("WS_PRICE:"):
+                price = float(line.split(":", 1)[1])
+                return price if price > 0 else None
+    except Exception as exc:
+        log(f"  [ws_price] {exc}")
+    return None
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Universe refresh
 # ──────────────────────────────────────────────────────────────────────────────
@@ -2810,9 +2830,13 @@ def hold_and_sell(balance: float = 0.0) -> None:
                     time.sleep(60)
                     continue
                 try:
-                    # Use fast_info.last_price — includes AH/PM extended hours prices
-                    _fi2  = yf.Ticker(symbol).fast_info
-                    _live = float(_fi2.last_price or 0) or entry
+                    # Try Wealthsimple first — covers overnight/Blue Ocean ATS sessions
+                    # that Yahoo Finance doesn't track (e.g. Sunday night futures open)
+                    _live = _get_ws_live_price(symbol, shares=shares)
+                    if not _live:
+                        _fi2  = yf.Ticker(symbol).fast_info
+                        _live = float(_fi2.last_price or 0)
+                    _live = _live or entry
                     if fill_notified:
                         notify(build_update_message(
                             symbol, entry, _live, shares, cost,

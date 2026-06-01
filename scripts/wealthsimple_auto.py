@@ -310,6 +310,58 @@ def read_position_from_trade_page(page, symbol: str) -> dict | None:
         return None
 
 
+def get_ws_price(symbol: str, shares: float | None = None) -> float | None:
+    """
+    Fetch the live current price for symbol from Wealthsimple's trade page.
+    Works during overnight/Blue Ocean ATS sessions that Yahoo Finance misses.
+    Opens a new browser tab, reads the price, closes the tab.
+    Returns None if browser not running or price cannot be parsed.
+    """
+    from playwright.sync_api import sync_playwright
+    trade_url = f"https://my.wealthsimple.com/app/trade/{symbol.upper()}"
+    try:
+        with sync_playwright() as p:
+            try:
+                browser = p.chromium.connect_over_cdp(CDP_URL)
+            except Exception:
+                return None  # browser not running — degrade gracefully
+            ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+            page = ctx.new_page()
+            try:
+                page.goto(trade_url, wait_until="domcontentloaded", timeout=15_000)
+                page.wait_for_timeout(2000)
+                text = page.locator("body").inner_text(timeout=5000)
+            finally:
+                page.close()
+
+            # Best method: derive price from market value ÷ known share count
+            if shares and shares > 0:
+                m = re.search(
+                    r"(?:Total|Market)\s*value\s+\$?([0-9,]+\.?[0-9]*)",
+                    text, re.IGNORECASE
+                )
+                if m:
+                    mkt = parse_money(m.group(1))
+                    if mkt and mkt > 0:
+                        return round(mkt / shares, 4)
+
+            # Fallback: look for a stock price displayed on the page
+            for pattern in [
+                r"Last\s+price\s*\$([0-9]+\.[0-9]{2,4})",
+                r"\$([0-9]+\.[0-9]{2,4})\s*USD",
+                r"(?:^|\n)\$([0-9]+\.[0-9]{2,4})(?:\s|$|\n)",
+            ]:
+                m = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+                if m:
+                    price = parse_money(m.group(1))
+                    if price and price > 0.01:
+                        return price
+            return None
+    except Exception as e:
+        safe_print(f"  [ws_price] {symbol}: {e}")
+        return None
+
+
 def parse_review_details(page, side: str, submitted: bool, review_text: str = "") -> dict:
     text = review_text or page.locator("body").inner_text(timeout=5000)
 
@@ -1016,6 +1068,14 @@ def cmd_position(args) -> None:
         _release_busy_lock()
 
 
+def cmd_quote(args) -> None:
+    """Print live Wealthsimple price for a symbol (covers overnight/ATS sessions)."""
+    symbol = strip_exchange(args.symbol.upper())
+    shares = float(args.shares) if args.shares else None
+    price  = get_ws_price(symbol, shares=shares)
+    print(f"WS_PRICE:{price:.4f}" if price else "WS_PRICE:0")
+
+
 def cmd_buy(args) -> None:
     from playwright.sync_api import sync_playwright
 
@@ -1155,6 +1215,10 @@ def main() -> None:
     pos_p = sub.add_parser("position", help="Read actual position (fill price, qty) from WS")
     pos_p.add_argument("--symbol", required=True, help="e.g. NVDA")
 
+    quote_p = sub.add_parser("quote", help="Get live price for a symbol from Wealthsimple (covers overnight ATS)")
+    quote_p.add_argument("--symbol", required=True, help="e.g. AMC")
+    quote_p.add_argument("--shares", type=float, default=None, help="Known share count for market-value method")
+
     buy_p = sub.add_parser("buy", help="Prepare a buy order")
     buy_p.add_argument("--symbol", required=True, help="e.g. SHOP or SHOP.TO")
     buy_p.add_argument("--shares", type=int, default=None)
@@ -1175,7 +1239,7 @@ def main() -> None:
         parser.error("buy requires --shares unless --max-dollars is used")
     if args.cmd == "sell" and not args.sell_all and args.shares is None:
         parser.error("sell requires --shares unless --sell-all is used")
-    {"setup": cmd_setup, "buy": cmd_buy, "sell": cmd_sell, "balance": cmd_balance, "position": cmd_position, "keepalive": cmd_keepalive}[args.cmd](args)
+    {"setup": cmd_setup, "buy": cmd_buy, "sell": cmd_sell, "balance": cmd_balance, "position": cmd_position, "keepalive": cmd_keepalive, "quote": cmd_quote}[args.cmd](args)
 
 
 if __name__ == "__main__":
