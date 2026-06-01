@@ -2670,7 +2670,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
     md = YFinanceMarketData()
 
     last_update_t = 0.0
-    UPDATE_INTERVAL = 1800  # 30 min
+    UPDATE_INTERVAL = 8 * 3600  # 8 hours
     max_price = 0.0
 
     log(f"Holding {symbol}  {shares:.4f} sh @ ${entry:.2f}  (cost ${cost:.2f})")
@@ -2772,9 +2772,11 @@ def hold_and_sell(balance: float = 0.0) -> None:
             cur = now_et()
 
             # Fill confirmation at 9:30 AM market open
+            # AH positions are already filled — skip the 9:45 confirm sleep so we don't miss 9:35 sell
             if not fill_notified and (cur.hour > 9 or (cur.hour == 9 and cur.minute >= 30)):
                 fill_notified = True
-                wait_for_fill_confirm(symbol)
+                if not is_ah_position:
+                    wait_for_fill_confirm(symbol)
                 log("Fill confirmed at market open.")
 
             # 5 PM daily performance report (Mon–Fri only)
