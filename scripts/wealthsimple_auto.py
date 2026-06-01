@@ -312,13 +312,16 @@ def read_position_from_trade_page(page, symbol: str) -> dict | None:
 
 def get_ws_price(symbol: str, shares: float | None = None) -> float | None:
     """
-    Fetch the live current price for symbol from Wealthsimple's trade page.
+    Fetch the live current price for symbol from Wealthsimple.
     Works during overnight/Blue Ocean ATS sessions that Yahoo Finance misses.
-    Opens a new browser tab, reads the price, closes the tab.
+
+    Strategy: use the WS search bar — the result card shows the live market value
+    of any held position. Price = market_value / shares. No page navigation needed.
+    Falls back to navigating the security-details page for unowned symbols.
     Returns None if browser not running or price cannot be parsed.
     """
     from playwright.sync_api import sync_playwright
-    trade_url = f"https://my.wealthsimple.com/app/trade/{symbol.upper()}"
+    sym = symbol.upper()
     try:
         with sync_playwright() as p:
             try:
@@ -326,39 +329,77 @@ def get_ws_price(symbol: str, shares: float | None = None) -> float | None:
             except Exception:
                 return None  # browser not running — degrade gracefully
             ctx = browser.contexts[0] if browser.contexts else browser.new_context()
-            page = ctx.new_page()
-            try:
-                page.goto(trade_url, wait_until="domcontentloaded", timeout=15_000)
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+
+            # Ensure we're on WS home (session active)
+            if WS_HOME not in page.url:
+                page.goto(WS_HOME, wait_until="domcontentloaded", timeout=20_000)
                 page.wait_for_timeout(2000)
-                text = page.locator("body").inner_text(timeout=5000)
-            finally:
-                page.close()
 
-            # Best method: derive price from market value ÷ known share count
-            if shares and shares > 0:
-                m = re.search(
-                    r"(?:Total|Market)\s*value\s+\$?([0-9,]+\.?[0-9]*)",
-                    text, re.IGNORECASE
-                )
-                if m:
-                    mkt = parse_money(m.group(1))
-                    if mkt and mkt > 0:
-                        return round(mkt / shares, 4)
+            # Open search: force-click button (a command-surface overlay intercepts normal clicks)
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(300)
+            search_btn = first_visible(page, [
+                '[aria-label*="Search" i]',
+                '[placeholder*="Search" i]',
+                'input[type="search"]',
+                '[data-testid*="search"]',
+            ], timeout=3000)
+            if search_btn is None:
+                return None
+            search_btn.click(force=True, timeout=5000)
+            page.wait_for_timeout(400)
 
-            # Fallback: look for a stock price displayed on the page
-            for pattern in [
-                r"Last\s+price\s*\$([0-9]+\.[0-9]{2,4})",
-                r"\$([0-9]+\.[0-9]{2,4})\s*USD",
-                r"(?:^|\n)\$([0-9]+\.[0-9]{2,4})(?:\s|$|\n)",
-            ]:
-                m = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
-                if m:
-                    price = parse_money(m.group(1))
-                    if price and price > 0.01:
-                        return price
+            # Type into the active text input
+            inp = first_visible(page, [
+                'input[type="text"]',
+                'input[type="search"]',
+                'input[placeholder]',
+            ], timeout=3000)
+            if inp is None:
+                return None
+            inp.type(sym, delay=80)
+            page.wait_for_timeout(2000)
+
+            # Read the search results text — result cards include market value for held positions
+            results_text = page.locator("body").inner_text(timeout=5000)
+
+            # Dismiss search (Escape) to restore page state
+            page.keyboard.press("Escape")
+
+            # Find the block for this symbol and extract USD market value
+            # Result card format: "SYM\nN shares\n$XX.XX USD\n$Y.YY\n(+Z%)"
+            block_match = re.search(
+                rf"{re.escape(sym)}\b.*?\$([0-9,]+\.[0-9]{{2,4}})\s*USD",
+                results_text, re.IGNORECASE | re.DOTALL
+            )
+            if block_match and shares and shares > 0:
+                mkt = parse_money(block_match.group(1))
+                if mkt and mkt > 0:
+                    return round(mkt / shares, 4)
+
+            # Fallback: navigate to the security-details page (slow path)
+            link = page.locator(f'a[href*="security-details"]').first
+            try:
+                href = link.get_attribute("href", timeout=1000)
+                if href:
+                    page.goto(f"https://my.wealthsimple.com{href}" if href.startswith("/") else href,
+                              wait_until="domcontentloaded", timeout=15_000)
+                    page.wait_for_timeout(2500)
+                    sec_text = page.locator("body").inner_text(timeout=5000)
+                    page.goto(WS_HOME, wait_until="domcontentloaded", timeout=15_000)
+                    for pat in [r"\$([0-9]+\.[0-9]{2,4})\s*USD", r"([0-9]+\.[0-9]{2,4})\s*USD"]:
+                        m2 = re.search(pat, sec_text, re.IGNORECASE)
+                        if m2:
+                            price = parse_money(m2.group(1))
+                            if price and price > 0.01:
+                                return price
+            except Exception:
+                pass
+
             return None
     except Exception as e:
-        safe_print(f"  [ws_price] {symbol}: {e}")
+        safe_print(f"  [ws_price] {sym}: {e}")
         return None
 
 
