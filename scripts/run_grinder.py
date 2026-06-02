@@ -1938,14 +1938,20 @@ def build_rapport_live() -> str:
                 sh     = float(pos.get("shares", 0))
                 cost_p = float(pos.get("estimatedCost", 0)) or (entry * sh)
                 live_p = None
+                # WS browser quote — most accurate, covers AH/PM/overnight sessions
                 try:
-                    # 1-min bars with prepost=True gives the actual current price
-                    # in all sessions (regular, AH, PM) — more reliable than fast_info
-                    hist = yf.Ticker(sym).history(period="1d", interval="1m", prepost=True)
-                    if not hist.empty:
-                        live_p = float(hist["Close"].iloc[-1])
+                    live_p = _get_ws_live_price(sym, shares=sh)
                 except Exception:
                     pass
+                # yfinance 1m prepost fallback
+                if not live_p:
+                    try:
+                        hist = yf.Ticker(sym).history(period="1d", interval="1m", prepost=True)
+                        if not hist.empty:
+                            live_p = float(hist["Close"].iloc[-1])
+                    except Exception:
+                        pass
+                # last resort: fast_info
                 if not live_p:
                     try:
                         live_p = float(yf.Ticker(sym).fast_info.last_price or 0) or None
@@ -2386,6 +2392,28 @@ def _afterhours_buy(pick: dict, balance: float) -> bool:
         "time":          now_et().isoformat(),
     }
     POS_FILE.write_text(json.dumps(pos, indent=2))
+
+    # Try to get actual WS fill price (limit may fill at a different price than scan price)
+    try:
+        time.sleep(4)
+        fill = fetch_position_details(sym)
+        if fill and fill.get("fill_price") and POS_FILE.exists():
+            pos = json.loads(POS_FILE.read_text())
+            old_entry = float(pos.get("buyPrice", actual_price))
+            pos["buyPrice"] = round(fill["fill_price"], 4)
+            if fill.get("fill_quantity"):
+                pos["shares"]        = fill["fill_quantity"]
+                actual_shares        = fill["fill_quantity"]
+            if fill.get("fill_value"):
+                pos["estimatedCost"] = fill["fill_value"]
+                actual_value         = fill["fill_value"]
+            pos["_costRefreshed"] = True
+            POS_FILE.write_text(json.dumps(pos, indent=2))
+            actual_price = fill["fill_price"]
+            log(f"  AH fill refreshed: ${old_entry:.4f} → ${actual_price:.4f}")
+    except Exception as exc:
+        log(f"  AH fill refresh failed: {exc}")
+
     _append_trade_history(sym, "BUY", actual_price, actual_shares, actual_value, 0.0, "After-Hours Limit")
 
     log(f"AH buy confirmed: {actual_shares:.4f} sh {sym} @ ${actual_price:.4f}  cost ${actual_value:.2f}")
@@ -2634,6 +2662,28 @@ def _premarket_buy(pick: dict, balance: float) -> bool:
         "time":          now_et().isoformat(),
     }
     POS_FILE.write_text(json.dumps(pos, indent=2))
+
+    # Try to get actual WS fill price (limit may fill at a different price than scan price)
+    try:
+        time.sleep(4)
+        fill = fetch_position_details(sym)
+        if fill and fill.get("fill_price") and POS_FILE.exists():
+            pos = json.loads(POS_FILE.read_text())
+            old_entry = float(pos.get("buyPrice", actual_price))
+            pos["buyPrice"] = round(fill["fill_price"], 4)
+            if fill.get("fill_quantity"):
+                pos["shares"]        = fill["fill_quantity"]
+                actual_shares        = fill["fill_quantity"]
+            if fill.get("fill_value"):
+                pos["estimatedCost"] = fill["fill_value"]
+                actual_value         = fill["fill_value"]
+            pos["_costRefreshed"] = True
+            POS_FILE.write_text(json.dumps(pos, indent=2))
+            actual_price = fill["fill_price"]
+            log(f"  PM fill refreshed: ${old_entry:.4f} → ${actual_price:.4f}")
+    except Exception as exc:
+        log(f"  PM fill refresh failed: {exc}")
+
     _append_trade_history(sym, "BUY", actual_price, actual_shares, actual_value, 0.0, "Pre-Market Limit")
 
     log(f"PM buy confirmed: {actual_shares:.4f} sh {sym} @ ${actual_price:.4f}  cost ${actual_value:.2f}")
