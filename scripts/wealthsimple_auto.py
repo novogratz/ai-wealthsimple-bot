@@ -367,19 +367,10 @@ def get_ws_price(symbol: str, shares: float | None = None) -> float | None:
             # Dismiss search (Escape) to restore page state
             page.keyboard.press("Escape")
 
-            # Find the block for this symbol and extract USD market value
-            # Result card format: "SYM\nN shares\n$XX.XX USD\n$Y.YY\n(+Z%)"
-            block_match = re.search(
-                rf"{re.escape(sym)}\b.*?\$([0-9,]+\.[0-9]{{2,4}})\s*USD",
-                results_text, re.IGNORECASE | re.DOTALL
-            )
-            if block_match and shares and shares > 0:
-                mkt = parse_money(block_match.group(1))
-                if mkt and mkt > 0:
-                    return round(mkt / shares, 4)
-
-            # Fallback: navigate to the security-details page (slow path)
-            link = page.locator(f'a[href*="security-details"]').first
+            # Navigate to the security-details page — shows live price including AH/PM.
+            # The search-card market value (portfolio total / shares) is stale at close
+            # and is NOT reliable during extended hours.
+            link = page.locator('a[href*="security-details"]').first
             try:
                 href = link.get_attribute("href", timeout=1000)
                 if href:

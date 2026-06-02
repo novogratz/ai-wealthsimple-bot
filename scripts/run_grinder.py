@@ -162,14 +162,8 @@ def log(msg: str) -> None:
 
 
 def notify(msg: str) -> None:
-    """Send trade/event notification to Telegram and log it."""
+    """Log trade/event — Telegram is reserved for the 3h combined rapport only."""
     log(f"  [event] {msg[:120].replace(chr(10), ' ')}")
-    try:
-        send_message(msg)
-    except TelegramConfigError:
-        pass
-    except Exception as exc:
-        log(f"  Telegram notify failed: {exc}")
 
 
 def _notify_report(msg: str) -> None:
@@ -1876,8 +1870,40 @@ def build_sell_message(
     )
 
 
+def _build_top3_section() -> str:
+    """Return inline top-3 picks block for appending to build_rapport_live()."""
+    state = _load_scan_state()
+    raw_picks = state.get("picks", [])
+    picks: list[GrinderPick] = []
+    for raw in (raw_picks if isinstance(raw_picks, list) else []):
+        p = _pick_from_dict(raw)
+        if p:
+            picks.append(p)
+    if not picks:
+        return "🔍 <b>TOP 3 PICKS</b> : <i>Aucun scan disponible.</i>"
+    medals = ["1️⃣", "2️⃣", "3️⃣"]
+    lines = []
+    for i, p in enumerate(picks[:3]):
+        conf = "🔥" if p.score >= 80 else ("⚡" if p.score >= 50 else "📊")
+        why  = _pick_why(p)
+        lines.append(
+            f"{medals[i]} {conf} <code>{p.symbol}</code>  <b>${p.last_close:.2f}</b>  [score {p.score:.0f}]\n"
+            f"   {why}"
+        )
+    try:
+        bias = FuturesBias(state.get("bias", "neutral"))
+    except Exception:
+        bias = FuturesBias.NEUTRAL
+    bias_emoji = {"green": "🟢 VERT", "red": "🔴 ROUGE", "neutral": "⚪ NEUTRE"}[bias.value]
+    return (
+        "🔍 <b>TOP 3 PICKS</b>\n\n"
+        + "\n\n".join(lines)
+        + f"\n\n📡 Futures : <b>{bias_emoji}</b>"
+    )
+
+
 def build_rapport_live() -> str:
-    """Template-style rapport live — sent on startup and every 8h."""
+    """Template-style rapport live — sent every 3 hours, includes top 3 picks."""
     now = now_et()
     stats = _get_trade_stats()
     ledger: list = []
@@ -1980,12 +2006,18 @@ def build_rapport_live() -> str:
     d_sign        = "+" if daily_pnl >= 0 else ""
     daily_pnl_pct = daily_pnl / capital * 100 if capital > 0 else 0.0
 
+    total_trades  = stats["count"]
+    total_wins    = stats["wins"]
+    winrate       = total_wins / total_trades * 100 if total_trades > 0 else 0.0
+    stats_line    = f"  📊 Total : {total_trades} trades  |  Winrate : {winrate:.0f}%  ({total_wins}W / {total_trades - total_wins}L)\n"
+
     return (
         f"RAPPORT LIVE — {date_str}\n"
         f"Le Grinder · WEALTHSIMPLE BOT\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"PROFITS &amp; PERTES :\n"
-        f"{cap_line}\n\n"
+        f"{cap_line}\n"
+        f"{stats_line}\n"
         f"TRADES DU JOUR"
         f" (Total : {len(today_trades)}, Réussis : {daily_wins},"
         f" Ratés : {daily_loss},"
@@ -1994,6 +2026,8 @@ def build_rapport_live() -> str:
         f"POSITIONS OUVERTES ({n_open}) :\n"
         f"{open_lines}"
         f"{latent_line}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{_build_top3_section()}\n"
         f"Le Grinder · WEALTHSIMPLE BOT"
     )
 
@@ -2012,14 +2046,12 @@ def _send_rapport_live() -> None:
 
 
 def _combined_report() -> None:
-    """Send top picks then rapport live — fires every 3 hours."""
+    """Send rapport live (with top 3 picks inline) — fires every 3 hours."""
     global _last_combined_t
     if time.time() - _last_combined_t < _REPORT_INTERVAL_SECS:
         return
     _last_combined_t = time.time()
-    label = now_et().strftime("%Hh%M ET")
-    log(f"Rapport combiné — {label}...")
-    _send_top_picks(label)
+    log(f"Rapport combiné — {now_et().strftime('%Hh%M ET')}...")
     _send_rapport_live()
 
 
@@ -3162,15 +3194,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
                 _scanned.add("daily_report")
                 log("4:00 PM — rapport live actif, daily summary ignoré.")
 
-            # Background scans — silent, no Telegram
-            if "5pm" not in _scanned and cur.hour >= 17 and cur.weekday() < 5:
-                _scanned.add("5pm")
-                _run_overnight_scan("5 PM Tonight's Preview", balance_approx, "5pm")
-
-            if "sunday_preview" not in _scanned and cur.weekday() == 6 and cur.hour >= 18:
-                _scanned.add("sunday_preview")
-                log("Sunday 6 PM — futures open, running silent preview scan.")
-                _run_overnight_scan("Sunday 6 PM — Futures Open Preview", balance_approx, "sunday")
+            # 5 PM preview scan disabled — combined report covers this
 
             if "5am" not in _scanned and 5 <= cur.hour < 7 and cur.weekday() < 5:
                 _scanned.add("5am")
@@ -3441,11 +3465,6 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
 
         # Scheduled combined report every 3 hours
         _combined_report()
-
-        # 5 PM next-day preview
-        if _should_fire("5pm", 17, 0, scans_done):
-            _do_scan("5 PM Tomorrow's Preview")
-            scans_done.add("5pm")
 
         # 4-8 PM after-hours buy — Rule: no idle cash in AH window
         if "ah" not in scans_done and _is_afterhours_window() and not POS_FILE.exists():
