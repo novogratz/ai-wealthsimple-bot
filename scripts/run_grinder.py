@@ -79,7 +79,8 @@ _MIN_COVERAGE_FOR_CACHE = 0.35
 _DEPLOY_PCT           = 100       # 100% of balance deployed per trade
 _PROFIT_TARGET_PCT    = 10.0      # default fallback profit target (adaptive per trade)
 _last_rapport_t: float = 0.0
-_report_sent_at: dict[str, float] = {}  # slot -> timestamp of last send
+_last_combined_t: float = 0.0          # timestamp of last combined report send
+_REPORT_INTERVAL_SECS = 3 * 3600       # every 3 hours
 
 
 def _dynamic_profit_target(atr_pct: float) -> float:
@@ -161,8 +162,14 @@ def log(msg: str) -> None:
 
 
 def notify(msg: str) -> None:
-    """Silent during the trading day — all events logged, Telegram only at 9:30 AM + 4 PM."""
+    """Send trade/event notification to Telegram and log it."""
     log(f"  [event] {msg[:120].replace(chr(10), ' ')}")
+    try:
+        send_message(msg)
+    except TelegramConfigError:
+        pass
+    except Exception as exc:
+        log(f"  Telegram notify failed: {exc}")
 
 
 def _notify_report(msg: str) -> None:
@@ -2000,17 +2007,13 @@ def _send_rapport_live() -> None:
         log(f"  Rapport LIVE échoué: {exc}")
 
 
-def _combined_report(slot: str, target_hour: int, label: str) -> None:
-    """Send top picks then rapport live — fires once per slot per calendar day, at exact target_hour ET."""
-    n = now_et()
-    if n.weekday() >= 5 or n.hour != target_hour:
+def _combined_report() -> None:
+    """Send top picks then rapport live — fires every 3 hours."""
+    global _last_combined_t
+    if time.time() - _last_combined_t < _REPORT_INTERVAL_SECS:
         return
-    last = _report_sent_at.get(slot, 0.0)
-    if last > 0:
-        last_dt = datetime.fromtimestamp(last, tz=TZ)
-        if last_dt.date() == n.date():
-            return
-    _report_sent_at[slot] = time.time()
+    _last_combined_t = time.time()
+    label = now_et().strftime("%Hh%M ET")
     log(f"Rapport combiné — {label}...")
     _send_top_picks(label)
     _send_rapport_live()
@@ -3125,10 +3128,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
                 _scanned.add("5am")
                 _run_overnight_scan("5 AM Morning Scan", balance_approx, "5am")
 
-            _combined_report("6am_report", 6, "6h00 ET")
-            _combined_report("10am_report", 10, "10h00 ET")
-            _combined_report("12pm_report", 12, "12h00 ET")
-            _combined_report("4pm_report", 16, "16h00 ET")
+            _combined_report()
 
             # Pre-market buy (7:00-9:29 AM) — deploy cash into a position early
             if "pm" not in _scanned and cur.hour >= 7:
@@ -3312,10 +3312,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
         except Exception as exc:
             log(f"Price check error: {exc}")
 
-        _combined_report("6am_report", 6, "6h00 ET")
-        _combined_report("10am_report", 10, "10h00 ET")
-        _combined_report("12pm_report", 12, "12h00 ET")
-        _combined_report("4pm_report", 16, "16h00 ET")
+        _combined_report()
         time.sleep(60)
 
 
@@ -3394,11 +3391,8 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
             bias = _do_scan("5 AM Morning Scan")
             scans_done.add("5am")
 
-        # Scheduled combined reports (top picks + rapport) at 6 AM / 10 AM / 12 PM / 4 PM
-        _combined_report("6am_report", 6, "6h00 ET")
-        _combined_report("10am_report", 10, "10h00 ET")
-        _combined_report("12pm_report", 12, "12h00 ET")
-        _combined_report("4pm_report", 16, "16h00 ET")
+        # Scheduled combined report every 3 hours
+        _combined_report()
 
         # 5 PM next-day preview
         if _should_fire("5pm", 17, 0, scans_done):
@@ -3711,11 +3705,8 @@ def main() -> None:
             log("9:30 AM — rapport live actif, morning report ignoré.")
             scans_done.add("morning_report")
 
-        # Scheduled combined reports (main loop path — no position held)
-        _combined_report("6am_report", 6, "6h00 ET")
-        _combined_report("10am_report", 10, "10h00 ET")
-        _combined_report("12pm_report", 12, "12h00 ET")
-        _combined_report("4pm_report", 16, "16h00 ET")
+        # Scheduled combined report every 3 hours
+        _combined_report()
 
         if not POS_FILE.exists() and _is_afterhours_window() and _past_close:
             log("No position in AH window — scanning for after-hours buy.")
