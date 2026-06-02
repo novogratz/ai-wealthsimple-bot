@@ -78,8 +78,8 @@ _CACHED_SCAN_TTL   = 18 * 3600
 _MIN_COVERAGE_FOR_CACHE = 0.35
 _DEPLOY_PCT           = 100       # 100% of balance deployed per trade
 _PROFIT_TARGET_PCT    = 10.0      # default fallback profit target (adaptive per trade)
-_RAPPORT_INTERVAL    = 8 * 3600   # seconds between rapport live messages
 _last_rapport_t: float = 0.0
+_daily_sent: set[str] = set()    # tracks 6am/12pm/4pm combined reports (reset at midnight)
 
 
 def _dynamic_profit_target(atr_pct: float) -> float:
@@ -2000,10 +2000,14 @@ def _send_rapport_live() -> None:
         log(f"  Rapport LIVE échoué: {exc}")
 
 
-def _rapport_if_due() -> None:
-    if time.time() - _last_rapport_t >= _RAPPORT_INTERVAL:
-        log("8h écoulées — envoi du rapport live...")
-        _send_rapport_live()
+def _combined_report(slot: str, label: str) -> None:
+    """Send top picks then rapport live — fires once per slot per calendar day."""
+    if slot in _daily_sent:
+        return
+    _daily_sent.add(slot)
+    log(f"Rapport combiné — {label}...")
+    _send_top_picks(label)
+    _send_rapport_live()
 
 
 def build_top_picks_message(label: str) -> str | None:
@@ -3131,15 +3135,13 @@ def hold_and_sell(balance: float = 0.0) -> None:
                 _scanned.add("5am")
                 _run_overnight_scan("5 AM Morning Scan", balance_approx, "5am")
 
-            if "6am_picks" not in _scanned and cur.hour >= 6 and cur.weekday() < 5:
-                _scanned.add("6am_picks")
-                log("6:00 AM — envoi top picks du jour...")
-                _send_top_picks("6h00 ET")
-
-            if "4pm_picks" not in _scanned and cur.hour >= 16 and cur.weekday() < 5:
-                _scanned.add("4pm_picks")
-                log("4:00 PM — envoi top picks du soir...")
-                _send_top_picks("16h00 ET")
+            if cur.weekday() < 5:
+                if cur.hour >= 6:
+                    _combined_report("6am_report", "6h00 ET")
+                if cur.hour >= 12:
+                    _combined_report("12pm_report", "12h00 ET")
+                if cur.hour >= 16:
+                    _combined_report("4pm_report", "16h00 ET")
 
             # Pre-market buy (7:00-9:29 AM) — deploy cash into a position early
             if "pm" not in _scanned and cur.hour >= 7:
@@ -3204,7 +3206,6 @@ def hold_and_sell(balance: float = 0.0) -> None:
                 except Exception as exc:
                     log(f"30-min update error: {exc}")
 
-            _rapport_if_due()
             time.sleep(60)
 
         # ── Morning exit ───────────────────────────────────────────────────
@@ -3324,7 +3325,13 @@ def hold_and_sell(balance: float = 0.0) -> None:
         except Exception as exc:
             log(f"Price check error: {exc}")
 
-        _rapport_if_due()
+        if now.weekday() < 5:
+            if now.hour >= 6:
+                _combined_report("6am_report", "6h00 ET")
+            if now.hour >= 12:
+                _combined_report("12pm_report", "12h00 ET")
+            if now.hour >= 16:
+                _combined_report("4pm_report", "16h00 ET")
         time.sleep(60)
 
 
@@ -3403,17 +3410,14 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
             bias = _do_scan("5 AM Morning Scan")
             scans_done.add("5am")
 
-        # 6 AM top picks
-        if _should_fire("6am_picks", 6, 0, scans_done):
-            scans_done.add("6am_picks")
-            log("6:00 AM — envoi top picks du jour...")
-            _send_top_picks("6h00 ET")
-
-        # 4 PM top picks
-        if _should_fire("4pm_picks", 16, 0, scans_done):
-            scans_done.add("4pm_picks")
-            log("4:00 PM — envoi top picks du soir...")
-            _send_top_picks("16h00 ET")
+        # Scheduled combined reports (top picks + rapport) at 6 AM / 12 PM / 4 PM
+        if now.weekday() < 5:
+            if _passed_today(6):
+                _combined_report("6am_report", "6h00 ET")
+            if _passed_today(12):
+                _combined_report("12pm_report", "12h00 ET")
+            if _passed_today(16):
+                _combined_report("4pm_report", "16h00 ET")
 
         # 5 PM next-day preview
         if _should_fire("5pm", 17, 0, scans_done):
@@ -3458,8 +3462,9 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
             scans_done.discard("ah")
             scans_done.discard("daily_report")
             scans_done.discard("weekly_report")
-            scans_done.discard("6am_picks")
-            scans_done.discard("4pm_picks")
+            _daily_sent.discard("6am_report")
+            _daily_sent.discard("12pm_report")
+            _daily_sent.discard("4pm_report")
             failed_buys_today.clear()
 
         # Near buy window → exit sleep loop
@@ -3480,7 +3485,6 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
         if now.minute % 30 == 0 and now.second < 60:
             log(f"Overnight — waiting for next buy window.")
 
-        _rapport_if_due()
         time.sleep(60)
 
     return bias
@@ -3599,10 +3603,6 @@ def main() -> None:
             f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} USD</b>"
             f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
         )
-
-    # ── Startup rapport live ──────────────────────────────────────────────
-    log("Startup — envoi du rapport live...")
-    _send_rapport_live()
 
     # ── Resume open position ───────────────────────────────────────────────
     if POS_FILE.exists():
@@ -3733,11 +3733,14 @@ def main() -> None:
             log("9:30 AM — rapport live actif, morning report ignoré.")
             scans_done.add("morning_report")
 
-        # 4:00 PM top picks
-        if _now_main.hour >= 16 and _now_main.weekday() < 5 and "4pm_picks" not in scans_done:
-            log("4:00 PM — envoi top picks du soir.")
-            _send_top_picks("16h00 ET")
-            scans_done.add("4pm_picks")
+        # Scheduled combined reports (main loop path — no position held)
+        if _now_main.weekday() < 5:
+            if _now_main.hour >= 6:
+                _combined_report("6am_report", "6h00 ET")
+            if _now_main.hour >= 12:
+                _combined_report("12pm_report", "12h00 ET")
+            if _now_main.hour >= 16:
+                _combined_report("4pm_report", "16h00 ET")
 
         if not POS_FILE.exists() and _is_afterhours_window() and _past_close:
             log("No position in AH window — scanning for after-hours buy.")
