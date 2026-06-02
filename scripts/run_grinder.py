@@ -78,6 +78,8 @@ _CACHED_SCAN_TTL   = 18 * 3600
 _MIN_COVERAGE_FOR_CACHE = 0.35
 _DEPLOY_PCT           = 100       # 100% of balance deployed per trade
 _PROFIT_TARGET_PCT    = 10.0      # default fallback profit target (adaptive per trade)
+_RAPPORT_INTERVAL    = 8 * 3600   # seconds between rapport live messages
+_last_rapport_t: float = 0.0
 
 
 def _dynamic_profit_target(atr_pct: float) -> float:
@@ -1867,6 +1869,143 @@ def build_sell_message(
     )
 
 
+def build_rapport_live() -> str:
+    """Template-style rapport live — sent on startup and every 8h."""
+    now = now_et()
+    stats = _get_trade_stats()
+    ledger: list = []
+    if PNL_LEDGER.exists():
+        try:
+            ledger = json.loads(PNL_LEDGER.read_text())
+        except Exception:
+            pass
+
+    today_str    = now.strftime("%Y-%m-%d")
+    today_trades = [t for t in ledger if str(t.get("time", "")).startswith(today_str)]
+    daily_pnl    = sum(t.get("realizedPnl", 0) for t in today_trades)
+    daily_wins   = sum(1 for t in today_trades if t.get("realizedPnl", 0) > 0)
+    daily_loss   = sum(1 for t in today_trades if t.get("realizedPnl", 0) < 0)
+
+    live_bal = None
+    try:
+        live_bal = fetch_live_balance(retries=2)
+    except Exception:
+        pass
+
+    at_pnl  = stats["total_pnl"]
+    capital = live_bal if live_bal is not None else ((stats.get("starting_balance") or 0) + at_pnl)
+    initial = max(0.01, capital - at_pnl)
+    gain_pct  = at_pnl / initial * 100 if initial > 0 else 0.0
+    cap_color = "🟢" if at_pnl >= 0 else "🔴"
+    cap_line  = (
+        f"  {cap_color} Capital : <b>${capital:.2f}</b>"
+        f"  ({at_pnl:+.2f}$, {gain_pct:+.1f}% depuis le début)"
+    )
+
+    trade_lines = ""
+    for t in today_trades:
+        pnl     = t.get("realizedPnl", 0)
+        cost    = t.get("buyCost", 0) or 1
+        sell    = t.get("sellValue", 0)
+        qty     = t.get("quantity", 0) or 1
+        pct     = pnl / cost * 100
+        buy_px  = cost / qty
+        sell_px = sell / qty
+        ic      = "🟢" if pnl >= 0 else "🔴"
+        trade_lines += (
+            f"  {ic} {pnl:+.2f}$ ({pct:+.1f}%)"
+            f"  <code>{t['symbol']}</code>  ${buy_px:.2f} → ${sell_px:.2f}\n"
+        )
+    if not trade_lines:
+        trade_lines = "  <i>Aucun trade fermé aujourd'hui.</i>\n"
+
+    open_lines  = "  <i>Aucune position ouverte.</i>\n"
+    latent_line = ""
+    n_open      = 0
+    if POS_FILE.exists():
+        try:
+            pos  = json.loads(POS_FILE.read_text())
+            sym  = pos.get("symbol", "")
+            if sym:
+                entry  = float(pos.get("buyPrice", 0))
+                sh     = float(pos.get("shares", 0))
+                cost_p = float(pos.get("estimatedCost", 0)) or (entry * sh)
+                live_p = None
+                try:
+                    ticker = yf.Ticker(sym)
+                    fi     = ticker.fast_info
+                    live_p = float(fi.last_price or 0) or None
+                    # Prefer post/pre-market price when available (AH/PM sessions)
+                    try:
+                        info    = ticker.info
+                        pm_px   = float(info.get("postMarketPrice") or 0)
+                        pre_px  = float(info.get("preMarketPrice") or 0)
+                        ext_px  = pm_px or pre_px
+                        if ext_px > 0:
+                            live_p = ext_px
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                price   = live_p or entry
+                upnl    = (price - entry) * sh
+                upct    = (price - entry) / entry * 100 if entry else 0
+                cur_val = sh * price
+                n_open  = 1
+                open_lines  = (
+                    f"  ⚪ <b>{sym}</b> ({sh:.0f} sh) :"
+                    f" ${entry:.2f} → ${price:.2f}"
+                    f"  |  ${cost_p:.2f} → ${cur_val:.2f}"
+                    f"  ({upnl:+.2f}$, {upct:+.1f}%)\n"
+                )
+                latent_line = f"  Latent : {upnl:+.2f}$\n"
+        except Exception:
+            pass
+
+    _months_fr = [
+        "janv.", "févr.", "mars", "avr.", "mai", "juin",
+        "juill.", "août", "sept.", "oct.", "nov.", "déc.",
+    ]
+    date_str = f"{now.day} {_months_fr[now.month - 1]} {now.year} {now:%H:%M} ET"
+    d_sign   = "+" if daily_pnl >= 0 else ""
+
+    return (
+        f"RAPPORT LIVE — {date_str}\n"
+        f"Le Grinder · WEALTHSIMPLE BOT\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"PROFITS &amp; PERTES :\n"
+        f"{cap_line}\n\n"
+        f"TRADES DU JOUR"
+        f" (Total : {len(today_trades)}, Réussis : {daily_wins},"
+        f" Ratés : {daily_loss},"
+        f" Gains du jour : {d_sign}${abs(daily_pnl):.2f})\n"
+        f"{trade_lines}\n"
+        f"POSITIONS OUVERTES ({n_open}) :\n"
+        f"{open_lines}"
+        f"{latent_line}\n"
+        f"Le Grinder · WEALTHSIMPLE BOT"
+    )
+
+
+def _send_rapport_live() -> None:
+    global _last_rapport_t
+    try:
+        msg = build_rapport_live()
+        send_message(msg)
+        _last_rapport_t = time.time()
+        log("  → Rapport LIVE envoyé.")
+    except TelegramConfigError as exc:
+        log(f"  Telegram non configuré: {exc}")
+    except Exception as exc:
+        log(f"  Rapport LIVE échoué: {exc}")
+
+
+def _rapport_if_due() -> None:
+    if time.time() - _last_rapport_t >= _RAPPORT_INTERVAL:
+        log("8h écoulées — envoi du rapport live...")
+        _send_rapport_live()
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Timing helpers
 # ──────────────────────────────────────────────────────────────────────────────
@@ -2919,14 +3058,12 @@ def hold_and_sell(balance: float = 0.0) -> None:
             # 9:30 AM morning report (Mon–Fri only)
             if "morning_report" not in _scanned and cur.weekday() < 5 and (cur.hour > 9 or (cur.hour == 9 and cur.minute >= 30)):
                 _scanned.add("morning_report")
-                log("9:30 AM — sending morning report (overnight loop).")
-                _notify_report(build_morning_report())
+                log("9:30 AM — rapport live actif, morning report ignoré.")
 
             # 4 PM daily quant summary (Mon–Fri only)
             if "daily_report" not in _scanned and cur.hour >= 16 and cur.weekday() < 5:
                 _scanned.add("daily_report")
-                log("4:00 PM — sending daily quant summary (overnight loop).")
-                _notify_report(build_daily_report())
+                log("4:00 PM — rapport live actif, daily summary ignoré.")
 
             # Background scans — silent, no Telegram
             if "5pm" not in _scanned and cur.hour >= 17 and cur.weekday() < 5:
@@ -3005,6 +3142,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
                 except Exception as exc:
                     log(f"30-min update error: {exc}")
 
+            _rapport_if_due()
             time.sleep(60)
 
         # ── Morning exit ───────────────────────────────────────────────────
@@ -3124,6 +3262,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
         except Exception as exc:
             log(f"Price check error: {exc}")
 
+        _rapport_if_due()
         time.sleep(60)
 
 
@@ -3265,6 +3404,7 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
         if now.minute % 30 == 0 and now.second < 60:
             log(f"Overnight — waiting for next buy window.")
 
+        _rapport_if_due()
         time.sleep(60)
 
     return bias
@@ -3383,6 +3523,10 @@ def main() -> None:
             f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} USD</b>"
             f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
         )
+
+    # ── Startup rapport live ──────────────────────────────────────────────
+    log("Startup — envoi du rapport live...")
+    _send_rapport_live()
 
     # ── Resume open position ───────────────────────────────────────────────
     if POS_FILE.exists():
@@ -3510,14 +3654,12 @@ def main() -> None:
         if _now_main.weekday() < 5 and "morning_report" not in scans_done and (
             _now_main.hour > 9 or (_now_main.hour == 9 and _now_main.minute >= 30)
         ):
-            log("9:30 AM — sending morning report.")
-            _notify_report(build_morning_report())
+            log("9:30 AM — rapport live actif, morning report ignoré.")
             scans_done.add("morning_report")
 
         # 4:00 PM daily quant summary (Mon–Fri)
         if _now_main.hour >= 16 and _now_main.weekday() < 5 and "daily_report" not in scans_done:
-            log("4:00 PM — sending daily quant summary.")
-            _notify_report(build_daily_report())
+            log("4:00 PM — rapport live actif, daily summary ignoré.")
             scans_done.add("daily_report")
 
         if not POS_FILE.exists() and _is_afterhours_window() and _past_close:
