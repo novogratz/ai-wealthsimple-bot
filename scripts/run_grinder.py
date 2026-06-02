@@ -2006,6 +2006,58 @@ def _rapport_if_due() -> None:
         _send_rapport_live()
 
 
+def build_top_picks_message(label: str) -> str | None:
+    """French top-3 picks message — sent at 6 AM and 4 PM ET every weekday."""
+    state = _load_scan_state()
+    raw_picks = state.get("picks", [])
+    picks: list[GrinderPick] = []
+    for raw in (raw_picks if isinstance(raw_picks, list) else []):
+        p = _pick_from_dict(raw)
+        if p:
+            picks.append(p)
+
+    if not picks:
+        return None
+
+    try:
+        bias = FuturesBias(state.get("bias", "neutral"))
+    except Exception:
+        bias = FuturesBias.NEUTRAL
+
+    bias_emoji = {"green": "🟢 VERT", "red": "🔴 ROUGE", "neutral": "⚪ NEUTRE"}[bias.value]
+    medals = ["1️⃣", "2️⃣", "3️⃣"]
+    lines = []
+    for i, p in enumerate(picks[:3]):
+        conf = "🔥" if p.score >= 80 else ("⚡" if p.score >= 50 else "📊")
+        why  = _pick_why(p)
+        lines.append(
+            f"{medals[i]} {conf} <code>{p.symbol}</code>  <b>${p.last_close:.2f}</b>  [score {p.score:.0f}]\n"
+            f"   {why}"
+        )
+
+    return (
+        f"💸 <b>TOP 3 DU JOUR — {label}</b>\n\n"
+        f"Si j'avais du cash, j'investirais dans :\n\n"
+        + "\n\n".join(lines)
+        + f"\n\n📡 Futures : <b>{bias_emoji}</b>\n"
+        f"<i>Le Grinder · NYSE/NASDAQ</i>"
+    )
+
+
+def _send_top_picks(label: str) -> None:
+    try:
+        msg = build_top_picks_message(label)
+        if msg:
+            send_message(msg)
+            log(f"  → Top picks envoyés ({label}).")
+        else:
+            log(f"  Pas de picks disponibles pour {label}.")
+    except TelegramConfigError as exc:
+        log(f"  Telegram non configuré: {exc}")
+    except Exception as exc:
+        log(f"  Top picks échoué ({label}): {exc}")
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Timing helpers
 # ──────────────────────────────────────────────────────────────────────────────
@@ -3079,6 +3131,16 @@ def hold_and_sell(balance: float = 0.0) -> None:
                 _scanned.add("5am")
                 _run_overnight_scan("5 AM Morning Scan", balance_approx, "5am")
 
+            if "6am_picks" not in _scanned and cur.hour >= 6 and cur.weekday() < 5:
+                _scanned.add("6am_picks")
+                log("6:00 AM — envoi top picks du jour...")
+                _send_top_picks("6h00 ET")
+
+            if "4pm_picks" not in _scanned and cur.hour >= 16 and cur.weekday() < 5:
+                _scanned.add("4pm_picks")
+                log("4:00 PM — envoi top picks du soir...")
+                _send_top_picks("16h00 ET")
+
             # Pre-market buy (7:00-9:29 AM) — deploy cash into a position early
             if "pm" not in _scanned and cur.hour >= 7:
                 _scanned.add("pm")
@@ -3341,6 +3403,18 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
             bias = _do_scan("5 AM Morning Scan")
             scans_done.add("5am")
 
+        # 6 AM top picks
+        if _should_fire("6am_picks", 6, 0, scans_done):
+            scans_done.add("6am_picks")
+            log("6:00 AM — envoi top picks du jour...")
+            _send_top_picks("6h00 ET")
+
+        # 4 PM top picks
+        if _should_fire("4pm_picks", 16, 0, scans_done):
+            scans_done.add("4pm_picks")
+            log("4:00 PM — envoi top picks du soir...")
+            _send_top_picks("16h00 ET")
+
         # 5 PM next-day preview
         if _should_fire("5pm", 17, 0, scans_done):
             _do_scan("5 PM Tomorrow's Preview")
@@ -3384,6 +3458,8 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
             scans_done.discard("ah")
             scans_done.discard("daily_report")
             scans_done.discard("weekly_report")
+            scans_done.discard("6am_picks")
+            scans_done.discard("4pm_picks")
             failed_buys_today.clear()
 
         # Near buy window → exit sleep loop
@@ -3657,10 +3733,11 @@ def main() -> None:
             log("9:30 AM — rapport live actif, morning report ignoré.")
             scans_done.add("morning_report")
 
-        # 4:00 PM daily quant summary (Mon–Fri)
-        if _now_main.hour >= 16 and _now_main.weekday() < 5 and "daily_report" not in scans_done:
-            log("4:00 PM — rapport live actif, daily summary ignoré.")
-            scans_done.add("daily_report")
+        # 4:00 PM top picks
+        if _now_main.hour >= 16 and _now_main.weekday() < 5 and "4pm_picks" not in scans_done:
+            log("4:00 PM — envoi top picks du soir.")
+            _send_top_picks("16h00 ET")
+            scans_done.add("4pm_picks")
 
         if not POS_FILE.exists() and _is_afterhours_window() and _past_close:
             log("No position in AH window — scanning for after-hours buy.")
