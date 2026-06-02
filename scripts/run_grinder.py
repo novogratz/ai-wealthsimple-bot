@@ -80,6 +80,7 @@ _DEPLOY_PCT           = 100       # 100% of balance deployed per trade
 _PROFIT_TARGET_PCT    = 5.0       # default fallback profit target (adaptive per trade)
 _last_rapport_t: float = 0.0
 _last_combined_t: float = 0.0          # timestamp of last combined report send
+_last_picks_t: float = 0.0             # timestamp of last 6 AM top-3 send
 _REPORT_INTERVAL_SECS = 3 * 3600       # every 3 hours
 
 
@@ -2026,8 +2027,6 @@ def build_rapport_live() -> str:
         f"POSITIONS OUVERTES ({n_open}) :\n"
         f"{open_lines}"
         f"{latent_line}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"{_build_top3_section()}\n"
         f"Le Grinder · WEALTHSIMPLE BOT"
     )
 
@@ -2046,13 +2045,52 @@ def _send_rapport_live() -> None:
 
 
 def _combined_report() -> None:
-    """Send rapport live (with top 3 picks inline) — fires every 3 hours."""
+    """Send rapport live — fires every 3 hours."""
     global _last_combined_t
     if time.time() - _last_combined_t < _REPORT_INTERVAL_SECS:
         return
     _last_combined_t = time.time()
     log(f"Rapport combiné — {now_et().strftime('%Hh%M ET')}...")
     _send_rapport_live()
+
+
+def _morning_picks() -> None:
+    """Scan pre-market at 6 AM ET and send top 3 movers to Telegram (weekdays only)."""
+    global _last_picks_t
+    n = now_et()
+    if n.weekday() >= 5 or n.hour != 6:
+        return
+    last = _last_picks_t
+    if last > 0 and datetime.fromtimestamp(last, tz=TZ).date() == n.date():
+        return
+    _last_picks_t = time.time()
+    log("6 AM — scanning pre-market for morning picks...")
+    try:
+        scan_symbols, _ = _choose_scan_symbols()
+        picks = _scan_premarket(scan_symbols)
+        if not picks:
+            picks = _scan_premarket(scan_symbols, min_pct=0.0)
+        if not picks:
+            log("  No pre-market movers found at 6 AM.")
+            return
+        medals = ["1️⃣", "2️⃣", "3️⃣"]
+        lines = []
+        for i, p in enumerate(picks[:3]):
+            lines.append(
+                f"{medals[i]} <code>{p['symbol']}</code>  <b>${p['pm_price']:.2f}</b>"
+                f"  <b>{p['pm_pct']:+.2f}%</b> PM  |  vol {p.get('vol_ratio', 1.0):.1f}x"
+            )
+        msg = (
+            f"🌅 <b>TOP 3 PRÉ-MARCHÉ — 6h00 ET</b>\n\n"
+            + "\n".join(lines)
+            + f"\n\n<i>Le Grinder · NYSE/NASDAQ</i>"
+        )
+        send_message(msg)
+        log("  → Top 3 pré-marché envoyés.")
+    except TelegramConfigError as exc:
+        log(f"  Telegram non configuré: {exc}")
+    except Exception as exc:
+        log(f"  Morning picks échoué: {exc}")
 
 
 def build_top_picks_message(label: str) -> str | None:
@@ -3201,6 +3239,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
                 _run_overnight_scan("5 AM Morning Scan", balance_approx, "5am")
 
             _combined_report()
+            _morning_picks()
 
             # Pre-market buy (7:00-9:29 AM) — deploy cash into a position early
             if "pm" not in _scanned and cur.hour >= 7:
@@ -3385,6 +3424,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
             log(f"Price check error: {exc}")
 
         _combined_report()
+        _morning_picks()
         time.sleep(60)
 
 
@@ -3465,6 +3505,7 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
 
         # Scheduled combined report every 3 hours
         _combined_report()
+        _morning_picks()
 
         # 4-8 PM after-hours buy — Rule: no idle cash in AH window
         if "ah" not in scans_done and _is_afterhours_window() and not POS_FILE.exists():
@@ -3774,6 +3815,7 @@ def main() -> None:
 
         # Scheduled combined report every 3 hours
         _combined_report()
+        _morning_picks()
 
         if not POS_FILE.exists() and _is_afterhours_window() and _past_close:
             log("No position in AH window — scanning for after-hours buy.")
