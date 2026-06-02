@@ -1939,21 +1939,18 @@ def build_rapport_live() -> str:
                 cost_p = float(pos.get("estimatedCost", 0)) or (entry * sh)
                 live_p = None
                 try:
-                    ticker = yf.Ticker(sym)
-                    fi     = ticker.fast_info
-                    live_p = float(fi.last_price or 0) or None
-                    # Prefer post/pre-market price when available (AH/PM sessions)
-                    try:
-                        info    = ticker.info
-                        pm_px   = float(info.get("postMarketPrice") or 0)
-                        pre_px  = float(info.get("preMarketPrice") or 0)
-                        ext_px  = pm_px or pre_px
-                        if ext_px > 0:
-                            live_p = ext_px
-                    except Exception:
-                        pass
+                    # 1-min bars with prepost=True gives the actual current price
+                    # in all sessions (regular, AH, PM) — more reliable than fast_info
+                    hist = yf.Ticker(sym).history(period="1d", interval="1m", prepost=True)
+                    if not hist.empty:
+                        live_p = float(hist["Close"].iloc[-1])
                 except Exception:
                     pass
+                if not live_p:
+                    try:
+                        live_p = float(yf.Ticker(sym).fast_info.last_price or 0) or None
+                    except Exception:
+                        pass
                 price   = live_p or entry
                 upnl    = (price - entry) * sh
                 upct    = (price - entry) / entry * 100 if entry else 0
