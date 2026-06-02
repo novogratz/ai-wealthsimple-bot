@@ -1973,8 +1973,9 @@ def build_rapport_live() -> str:
         "janv.", "févr.", "mars", "avr.", "mai", "juin",
         "juill.", "août", "sept.", "oct.", "nov.", "déc.",
     ]
-    date_str = f"{now.day} {_months_fr[now.month - 1]} {now.year} {now:%H:%M} ET"
-    d_sign   = "+" if daily_pnl >= 0 else ""
+    date_str      = f"{now.day} {_months_fr[now.month - 1]} {now.year} {now:%H:%M} ET"
+    d_sign        = "+" if daily_pnl >= 0 else ""
+    daily_pnl_pct = daily_pnl / capital * 100 if capital > 0 else 0.0
 
     return (
         f"RAPPORT LIVE — {date_str}\n"
@@ -1985,7 +1986,7 @@ def build_rapport_live() -> str:
         f"TRADES DU JOUR"
         f" (Total : {len(today_trades)}, Réussis : {daily_wins},"
         f" Ratés : {daily_loss},"
-        f" Gains du jour : {d_sign}${abs(daily_pnl):.2f})\n"
+        f" Gains du jour : {d_sign}${abs(daily_pnl):.2f} ({daily_pnl_pct:+.1f}% du compte))\n"
         f"{trade_lines}\n"
         f"POSITIONS OUVERTES ({n_open}) :\n"
         f"{open_lines}"
