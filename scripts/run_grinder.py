@@ -2369,16 +2369,8 @@ def _afterhours_buy(pick: dict, balance: float) -> bool:
         actual_shares  = float(order_data.get("fill_quantity", shares_est))
         actual_value   = float(order_data.get("fill_value", actual_shares * actual_price))
     else:
-        # Try yfinance current price — limit order may have filled below limit
-        try:
-            fi     = yf.Ticker(sym).fast_info
-            _cur   = fi.last_price
-            if _cur and 0 < _cur < limit_price * 1.5:
-                actual_price = round(_cur, 4)
-            else:
-                actual_price = limit_price
-        except Exception:
-            actual_price = limit_price
+        # Use the AH price from the scan — fi.last_price returns regular session close in extended hours
+        actual_price  = ah_price
         actual_shares = float(shares_est)
         actual_value  = actual_shares * actual_price
 
@@ -2625,16 +2617,8 @@ def _premarket_buy(pick: dict, balance: float) -> bool:
         actual_shares  = float(order_data.get("fill_quantity", shares_est))
         actual_value   = float(order_data.get("fill_value", actual_shares * actual_price))
     else:
-        # Try yfinance current price — limit order may have filled below limit
-        try:
-            fi     = yf.Ticker(sym).fast_info
-            _cur   = fi.last_price
-            if _cur and 0 < _cur < limit_price * 1.5:
-                actual_price = round(_cur, 4)
-            else:
-                actual_price = limit_price
-        except Exception:
-            actual_price = limit_price
+        # Use the PM price from the scan — fi.last_price returns regular session close in extended hours
+        actual_price  = pm_price
         actual_shares = float(shares_est)
         actual_value  = actual_shares * actual_price
 
@@ -3142,6 +3126,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
                 _run_overnight_scan("5 AM Morning Scan", balance_approx, "5am")
 
             _combined_report("6am_report", 6, "6h00 ET")
+            _combined_report("10am_report", 10, "10h00 ET")
             _combined_report("12pm_report", 12, "12h00 ET")
             _combined_report("4pm_report", 16, "16h00 ET")
 
@@ -3328,6 +3313,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
             log(f"Price check error: {exc}")
 
         _combined_report("6am_report", 6, "6h00 ET")
+        _combined_report("10am_report", 10, "10h00 ET")
         _combined_report("12pm_report", 12, "12h00 ET")
         _combined_report("4pm_report", 16, "16h00 ET")
         time.sleep(60)
@@ -3408,8 +3394,9 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
             bias = _do_scan("5 AM Morning Scan")
             scans_done.add("5am")
 
-        # Scheduled combined reports (top picks + rapport) at 6 AM / 12 PM / 4 PM
+        # Scheduled combined reports (top picks + rapport) at 6 AM / 10 AM / 12 PM / 4 PM
         _combined_report("6am_report", 6, "6h00 ET")
+        _combined_report("10am_report", 10, "10h00 ET")
         _combined_report("12pm_report", 12, "12h00 ET")
         _combined_report("4pm_report", 16, "16h00 ET")
 
@@ -3726,6 +3713,7 @@ def main() -> None:
 
         # Scheduled combined reports (main loop path — no position held)
         _combined_report("6am_report", 6, "6h00 ET")
+        _combined_report("10am_report", 10, "10h00 ET")
         _combined_report("12pm_report", 12, "12h00 ET")
         _combined_report("4pm_report", 16, "16h00 ET")
 
