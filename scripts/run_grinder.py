@@ -80,7 +80,7 @@ _DEPLOY_PCT           = 100       # 100% of balance deployed per trade
 _PROFIT_TARGET_PCT    = 5.0       # default fallback profit target (adaptive per trade)
 _last_rapport_t: float = 0.0
 _last_combined_t: float = 0.0          # timestamp of last combined report send
-_REPORT_INTERVAL_SECS = 4 * 3600       # every 4 hours
+_REPORT_INTERVAL_SECS = 2 * 3600       # every 2 hours
 
 
 def _dynamic_profit_target(atr_pct: float) -> float:
