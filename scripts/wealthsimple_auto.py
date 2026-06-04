@@ -702,9 +702,27 @@ def navigate_to_stock(page, ws_symbol: str):
     page.goto(trade_url, wait_until="domcontentloaded", timeout=30_000)
     page.wait_for_timeout(3000)
 
-    # If WS redirected away (e.g. to home or search), fall back to search UI
-    if ws_symbol.upper() not in page.url.upper():
-        safe_print(f"  Direct URL redirected to {page.url} — trying search...")
+    # Check if we landed on a CAD/TSX listing even when the URL looks right.
+    # WS may serve the Canadian listing by default for dual-listed tickers (e.g. KEEL → KEEL.TO).
+    def _page_is_cad(pg) -> bool:
+        try:
+            txt = pg.locator("body").inner_text(timeout=3000).lower()
+            # "cad" present AND no clear USD/NASDAQ/NYSE signal
+            has_cad = " cad" in txt or "\ncad" in txt or "tsx" in txt or "neo exchange" in txt
+            has_usd = " usd" in txt or "\nusd" in txt or "nasdaq" in txt or "nyse" in txt or "new york" in txt
+            return has_cad and not has_usd
+        except Exception:
+            return False
+
+    # Fall back to search if: redirect away from symbol URL, OR page loaded a CAD listing
+    need_search = ws_symbol.upper() not in page.url.upper()
+    if not need_search and _page_is_cad(page):
+        safe_print(f"  Direct URL loaded CAD/TSX listing for {ws_symbol} — switching to USD search...")
+        need_search = True
+
+    if need_search:
+        if ws_symbol.upper() not in page.url.upper():
+            safe_print(f"  Direct URL redirected to {page.url} — trying search...")
         page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
         page.wait_for_timeout(2000)
 
@@ -741,7 +759,7 @@ def navigate_to_stock(page, ws_symbol: str):
                 items = page.locator(sel).all()
                 if not items:
                     continue
-                # First pass: find a result whose text mentions a US exchange
+                # Prefer result whose text mentions a US exchange
                 us_hit = None
                 for item in items:
                     try:
