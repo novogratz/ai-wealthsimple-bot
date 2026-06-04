@@ -2463,6 +2463,7 @@ def _afterhours_buy(pick: dict, balance: float) -> bool:
         f"💰 Total déployé : ${actual_value:.2f}\n"
         f"🎯 Cible : +{_AH_PROFIT_PCT:.0f}%  |  Vente au marché à 9:35 AM si non atteinte"
     )
+    _send_rapport_live()
     return True
 
 
@@ -2734,6 +2735,7 @@ def _premarket_buy(pick: dict, balance: float) -> bool:
         f"💰 Total déployé : ${actual_value:.2f}\n"
         f"🎯 Cible : +{_PM_PROFIT_PCT:.0f}%  |  Vente au marché à 9:31 AM si non atteinte"
     )
+    _send_rapport_live()
     return True
 
 
@@ -2985,6 +2987,7 @@ def _execute_sell_order(
 
     _notify_trade(build_sell_message(symbol, entry, actual_price, actual_qty, cost, trade_pnl, at_pnl, sell_label=label))
     log(f"Closed. Trade P&L: ${trade_pnl:+.2f}  All-time: ${at_pnl:+.2f}")
+    _send_rapport_live()
 
 
 def _run_overnight_scan(label: str, balance: float, scan_type: str) -> None:
