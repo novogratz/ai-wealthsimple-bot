@@ -173,6 +173,15 @@ def _notify_report(msg: str) -> None:
         log("  → Telegram report sent.")
     except TelegramConfigError as exc:
         log(f"  Telegram not configured: {exc}")
+
+
+def _notify_trade(msg: str) -> None:
+    """Send a buy/sell trade alert to Telegram immediately."""
+    try:
+        send_message(msg)
+        log(f"  [trade] {msg[:120].replace(chr(10), ' ')}")
+    except TelegramConfigError as exc:
+        log(f"  Telegram not configured: {exc}")
     except Exception as exc:
         log(f"  Telegram report failed: {exc}")
 
@@ -2246,6 +2255,13 @@ def execute_buy(pick: GrinderPick, balance: float, bias: FuturesBias,
                           actual_cost, 0.0, pick.strategy_name)
     log(f"Buy confirmed: {actual_qty:.4f} sh @ ${actual_buy_price:.2f}  cost ${actual_cost:.2f}  target +{profit_target:.1f}%")
 
+    _notify_trade(
+        f"🟢 <b>BUY — <code>{pick.symbol}</code></b>\n\n"
+        f"💵 <b>{actual_qty:.4f} sh @ ${actual_buy_price:.2f} USD</b>\n"
+        f"💰 Total déployé : ${actual_cost:.2f}\n"
+        f"🎯 Cible : +{profit_target:.1f}%  (→ ${actual_buy_price * (1 + profit_target/100):.2f})\n"
+        f"📋 Stratégie : {pick.strategy_name}"
+    )
     # Send rapport live right after buy (~9:36 AM) so user sees real position
     _send_rapport_live()
     return True
@@ -2463,10 +2479,11 @@ def _afterhours_buy(pick: dict, balance: float) -> bool:
     _append_trade_history(sym, "BUY", actual_price, actual_shares, actual_value, 0.0, "After-Hours Limit")
 
     log(f"AH buy confirmed: {actual_shares:.4f} sh {sym} @ ${actual_price:.4f}  cost ${actual_value:.2f}")
-    notify(
-        f"✅ <b>AH buy confirmed — <code>{sym}</code></b>\n\n"
-        f"💰 {actual_shares:.4f} sh @ ${actual_price:.2f}  (cost ${actual_value:.2f})\n"
-        f"🎯 Profit target: +{_AH_PROFIT_PCT:.0f}%  |  Exits at 9:35 AM if not hit"
+    _notify_trade(
+        f"🟢 <b>BUY after-hours — <code>{sym}</code></b>\n\n"
+        f"💵 <b>{actual_shares:.4f} sh @ ${actual_price:.2f} USD</b>\n"
+        f"💰 Total déployé : ${actual_value:.2f}\n"
+        f"🎯 Cible : +{_AH_PROFIT_PCT:.0f}%  |  Vente au marché à 9:35 AM si non atteinte"
     )
     return True
 
@@ -2733,10 +2750,11 @@ def _premarket_buy(pick: dict, balance: float) -> bool:
     _append_trade_history(sym, "BUY", actual_price, actual_shares, actual_value, 0.0, "Pre-Market Limit")
 
     log(f"PM buy confirmed: {actual_shares:.4f} sh {sym} @ ${actual_price:.4f}  cost ${actual_value:.2f}")
-    notify(
-        f"✅ <b>PM buy confirmed — <code>{sym}</code></b>\n\n"
-        f"💰 {actual_shares:.4f} sh @ ${actual_price:.2f}  (cost ${actual_value:.2f})\n"
-        f"🎯 Profit target: +{_PM_PROFIT_PCT:.0f}%  |  Exits at 9:31 AM if not hit"
+    _notify_trade(
+        f"🟢 <b>BUY pré-marché — <code>{sym}</code></b>\n\n"
+        f"💵 <b>{actual_shares:.4f} sh @ ${actual_price:.2f} USD</b>\n"
+        f"💰 Total déployé : ${actual_value:.2f}\n"
+        f"🎯 Cible : +{_PM_PROFIT_PCT:.0f}%  |  Vente au marché à 9:31 AM si non atteinte"
     )
     return True
 
@@ -2987,7 +3005,7 @@ def _execute_sell_order(
     _append_trade_history(symbol, "SELL", actual_price, actual_qty, cost, trade_pnl, strat)
     POS_FILE.unlink(missing_ok=True)
 
-    notify(build_sell_message(symbol, entry, actual_price, actual_qty, cost, trade_pnl, at_pnl, sell_label=label))
+    _notify_trade(build_sell_message(symbol, entry, actual_price, actual_qty, cost, trade_pnl, at_pnl, sell_label=label))
     log(f"Closed. Trade P&L: ${trade_pnl:+.2f}  All-time: ${at_pnl:+.2f}")
 
 
@@ -3295,6 +3313,25 @@ def hold_and_sell(balance: float = 0.0) -> None:
             # AH/PM positions: always market sell at 9:35 AM, then rotate — no hold decision
             _sleep_until(next_sell, "9:35 AM AH/PM sell + rotation")
             log(f"9:35 AM — market selling AH/PM position {symbol}, rotating to next pick.")
+
+            # Refresh actual fill price now that market has been open ~5 min
+            try:
+                fill = fetch_position_details(symbol, retries=2)
+                if fill and fill.get("fill_price") and POS_FILE.exists():
+                    real_entry = float(fill["fill_price"])
+                    real_shares = float(fill.get("fill_quantity", shares))
+                    real_cost   = float(fill.get("fill_value", real_entry * real_shares))
+                    if abs(real_entry - entry) > 0.001:
+                        log(f"  Fill price refreshed: ${entry:.4f} → ${real_entry:.4f}")
+                    entry, shares, cost = real_entry, real_shares, real_cost
+                    pos = json.loads(POS_FILE.read_text())
+                    pos["buyPrice"]      = round(real_entry, 4)
+                    pos["shares"]        = real_shares
+                    pos["estimatedCost"] = real_cost
+                    POS_FILE.write_text(json.dumps(pos, indent=2))
+            except Exception as _exc:
+                log(f"  Fill price refresh failed: {_exc}")
+
             notify(
                 f"🔔 <b>9:35 AM — Selling AH/PM position</b>\n\n"
                 f"🎫 <code>{symbol}</code>  {shares:.4f} sh @ ${entry:.2f}\n"
