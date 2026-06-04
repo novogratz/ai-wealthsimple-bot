@@ -270,16 +270,16 @@ def parse_money(value: str) -> float | None:
 
 def read_position_from_trade_page(page, symbol: str) -> dict | None:
     """
-    After a buy order is placed, navigate to the stock's trade page
-    and read the actual position details (average cost, shares, total value).
-    Returns dict with fill_price, fill_quantity, fill_value if position found.
+    Navigate to the stock's trade page and read the actual position details.
+    Uses navigate_to_stock to ensure we land on the USD/NASDAQ page, not TSX.
+    Returns dict with fill_price (average cost), fill_quantity, fill_value.
     """
-    trade_url = f"https://my.wealthsimple.com/app/trade/{symbol}"
     try:
-        page.goto(trade_url, wait_until="domcontentloaded", timeout=15_000)
-        page.wait_for_timeout(3000)
+        page = navigate_to_stock(page, symbol)
+        page.wait_for_timeout(1500)
         text = page.locator("body").inner_text(timeout=5000)
 
+        # Must find share count first
         own_match = re.search(
             r"You\s+(?:own|have)\s+([0-9,.]+)\s+shares?",
             text, flags=re.IGNORECASE
@@ -291,25 +291,25 @@ def read_position_from_trade_page(page, symbol: str) -> dict | None:
         if not qty or qty <= 0:
             return None
 
-        avg_match = re.search(
-            r"(?:Average|Avg\.?)\s*cost\s+\$?([0-9,.]+)",
-            text, flags=re.IGNORECASE
-        )
-        if avg_match:
-            price = parse_money(avg_match.group(1))
-        else:
-            val_match = re.search(
-                r"(?:Total|Market)\s*value\s+\$?([0-9,.]+)",
-                text, flags=re.IGNORECASE
-            )
-            if val_match:
-                total_val = parse_money(val_match.group(1))
-                if total_val and qty > 0:
-                    price = total_val / qty
-                else:
-                    return None
-            else:
-                return None
+        # Average cost = actual fill price (what we paid per share).
+        # Do NOT fall back to Market/Total value — those change with the price
+        # and would give a wrong, drifting entry that looks like $4.98 one minute
+        # and $4.65 the next. Book value / average cost is the only reliable anchor.
+        price = None
+        for pat in [
+            r"(?:Average|Avg\.?)\s*cost\s*\$?\s*([0-9,.]+)",
+            r"Book\s*value\s*\$?\s*([0-9,.]+)",          # book value ÷ shares
+        ]:
+            m = re.search(pat, text, flags=re.IGNORECASE)
+            if m:
+                val = parse_money(m.group(1))
+                if val and val > 0:
+                    # Book value is total cost, not per-share — divide if > 3× price clue
+                    if "book" in pat.lower() and val > qty * 0.5:
+                        price = round(val / qty, 4)
+                    else:
+                        price = val
+                    break
 
         if not price or price <= 0:
             return None

@@ -1972,6 +1972,27 @@ def build_rapport_live() -> str:
                 entry  = float(pos.get("buyPrice", 0))
                 sh     = float(pos.get("shares", 0))
                 cost_p = float(pos.get("estimatedCost", 0)) or (entry * sh)
+
+                # Refresh average cost + live price from WS stock page
+                try:
+                    ws_fill = fetch_position_details(sym, retries=1)
+                    if ws_fill and ws_fill.get("fill_price") and ws_fill["fill_price"] > 0:
+                        real_entry = float(ws_fill["fill_price"])
+                        real_sh    = float(ws_fill.get("fill_quantity", sh))
+                        real_cost  = float(ws_fill.get("fill_value", real_entry * real_sh))
+                        if abs(real_entry - entry) > 0.005:
+                            log(f"  Entry refreshed for rapport: ${entry:.4f} → ${real_entry:.4f}")
+                            # Persist the corrected entry so all future reads are right
+                            pos["buyPrice"]      = round(real_entry, 4)
+                            pos["shares"]        = real_sh
+                            pos["estimatedCost"] = real_cost
+                            POS_FILE.write_text(json.dumps(pos, indent=2))
+                        entry  = real_entry
+                        sh     = real_sh
+                        cost_p = real_cost
+                except Exception:
+                    pass
+
                 live_p = None
                 # WS browser quote — most accurate, covers AH/PM/overnight sessions
                 try:
