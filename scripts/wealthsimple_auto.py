@@ -726,14 +726,42 @@ def navigate_to_stock(page, ws_symbol: str):
         page.wait_for_timeout(2200)
         snap(page, "search_results")
 
-        clicked = click_first(page, [
+        # Prefer US exchange (NYSE/NASDAQ/USD) result over TSX/CAD listing
+        clicked = False
+        us_keywords = ["nasdaq", "nyse", "usd", "new york"]
+        for sel in [
             '[data-testid*="search-result"]',
             '[data-testid*="result"]',
             f'a[href*="{ws_symbol}"]',
             'a[href*="/app/trade"]',
             '[class*="SearchResult"]',
             '[class*="search-result"]',
-        ])
+        ]:
+            try:
+                items = page.locator(sel).all()
+                if not items:
+                    continue
+                # First pass: find a result whose text mentions a US exchange
+                us_hit = None
+                for item in items:
+                    try:
+                        txt = item.inner_text(timeout=500).lower()
+                        if any(kw in txt for kw in us_keywords):
+                            us_hit = item
+                            break
+                    except Exception:
+                        continue
+                target = us_hit if us_hit else items[0]
+                if target.is_visible(timeout=500):
+                    target.click()
+                    clicked = True
+                    if us_hit:
+                        safe_print(f"  Selected US-exchange result for {ws_symbol}")
+                    else:
+                        safe_print(f"  No US-exchange result found for {ws_symbol} — clicked first result")
+                    break
+            except Exception:
+                continue
         if not clicked:
             page.keyboard.press("Enter")
 
