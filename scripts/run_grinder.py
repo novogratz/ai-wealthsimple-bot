@@ -2882,30 +2882,39 @@ def _run_premarket_strategy(balance: float) -> None:
     pm_balance = balance
     if POS_FILE.exists():
         try:
-            pos    = json.loads(POS_FILE.read_text())
-            sym    = pos["symbol"]
-            entry  = float(pos.get("buyPrice", 0))
-            shares = float(pos.get("shares", 0))
-            cost   = float(pos.get("estimatedCost", shares * entry))
-            strat  = pos.get("strategyName", "overnight")
-            _save_legacy_position(sym, entry, shares, cost, strat)
-            log(f"Saved {sym} as legacy — will sell at 9:31 AM")
-            # Subtract locked position value so PM buy uses only free cash
-            pm_balance = max(10.0, balance - cost)
-            log(f"PM buy budget: ${pm_balance:.2f} (total ${balance:.2f} minus locked ${cost:.2f})")
+            pos = json.loads(POS_FILE.read_text())
+            sym = pos.get("symbol")
+            if sym:
+                entry  = float(pos.get("buyPrice", 0))
+                shares = float(pos.get("shares", 0))
+                cost   = float(pos.get("estimatedCost", shares * entry))
+                strat  = pos.get("strategyName", "overnight")
+                _save_legacy_position(sym, entry, shares, cost, strat)
+                log(f"Saved {sym} as legacy — will sell at 9:31 AM")
+                # Subtract locked position value so PM buy uses only free cash
+                pm_balance = max(10.0, balance - cost)
+                log(f"PM buy budget: ${pm_balance:.2f} (total ${balance:.2f} minus locked ${cost:.2f})")
         except Exception as exc:
             log(f"Could not save legacy position: {exc}")
 
-    bought = _premarket_buy(top[0], pm_balance)
-    if bought:
+    bought = False
+    chosen = None
+    for candidate in top:
+        bought = _premarket_buy(candidate, pm_balance)
+        if bought:
+            chosen = candidate
+            break
+        log(f"PM buy failed for {candidate['symbol']} — trying next pick...")
+
+    if bought and chosen:
         # monitor the PM position
         pos    = json.loads(POS_FILE.read_text())
-        entry  = float(pos.get("buyPrice", top[0]["pm_price"]))
+        entry  = float(pos.get("buyPrice", chosen["pm_price"]))
         shares = float(pos.get("shares", 1))
         cost   = float(pos.get("estimatedCost", balance))
-        _premarket_hold_loop(top[0]["symbol"], entry, shares, cost, "Pre-Market Limit")
+        _premarket_hold_loop(chosen["symbol"], entry, shares, cost, "Pre-Market Limit")
     if not bought:
-        log("PM buy failed — restoring position.")
+        log("PM buy failed — all candidates exhausted. Restoring position.")
         # Remove phantom legacy if buy failed
         LEGACY_FILE.unlink(missing_ok=True)
         return
@@ -2913,7 +2922,7 @@ def _run_premarket_strategy(balance: float) -> None:
     log(f"Pre-market position active. Legacy will sell at 9:31 AM.")
     notify(
         f"🌅 <b>Pre-market position active</b>\n\n"
-        f"🎫 <code>{top[0]['symbol']}</code> deployed with ${balance:.0f}\n"
+        f"🎫 <code>{chosen['symbol']}</code> deployed with ${balance:.0f}\n"
         f"📋 Legacy position queued for 9:31 AM sell\n"
         f"🎯 +{_PM_PROFIT_PCT:.0f}% target during pre-market"
     )
@@ -3665,7 +3674,7 @@ def main() -> None:
             pos = {}
         if not pos.get("symbol"):
             log("Position file exists but has no symbol — clearing stale state.")
-            POS_FILE.write_text("{}")
+            POS_FILE.unlink(missing_ok=True)
             pos = {}
         if pos.get("symbol"):
             _now = now_et()
