@@ -273,47 +273,70 @@ def read_position_from_trade_page(page, symbol: str) -> dict | None:
     Navigate to the stock's trade page and read the actual position details.
     Uses navigate_to_stock to ensure we land on the USD/NASDAQ page, not TSX.
     Returns dict with fill_price (average cost), fill_quantity, fill_value.
+    Handles both English and French WS UI labels.
     """
     try:
         page = navigate_to_stock(page, symbol)
         page.wait_for_timeout(1500)
         text = page.locator("body").inner_text(timeout=5000)
 
-        # Must find share count first
-        own_match = re.search(
+        # Log a snippet so we can debug pattern mismatches
+        safe_print(f"  [position_read] page snippet: {text[200:600].replace(chr(10), ' ')}")
+
+        # ── Share count ───────────────────────────────────────────────────────
+        qty = None
+        qty_patterns = [
+            # English
             r"You\s+(?:own|have)\s+([0-9,.]+)\s+shares?",
-            text, flags=re.IGNORECASE
-        )
-        if not own_match:
-            return None
-
-        qty = parse_money(own_match.group(1))
-        if not qty or qty <= 0:
-            return None
-
-        # Average cost = actual fill price (what we paid per share).
-        # Do NOT fall back to Market/Total value — those change with the price
-        # and would give a wrong, drifting entry that looks like $4.98 one minute
-        # and $4.65 the next. Book value / average cost is the only reliable anchor.
-        price = None
-        for pat in [
-            r"(?:Average|Avg\.?)\s*cost\s*\$?\s*([0-9,.]+)",
-            r"Book\s*value\s*\$?\s*([0-9,.]+)",          # book value ÷ shares
-        ]:
+            r"([0-9,.]+)\s+shares?\s+(?:owned|held|in\s+your\s+account)",
+            # French WS labels
+            r"Vous\s+(?:poss[eé]dez|avez|d[eé]tenez)\s+([0-9,.]+)\s+(?:action|titre|part)",
+            r"([0-9,.]+)\s+actions?\s+(?:d[eé]tenues|en\s+portefeuille)",
+            # Generic: a number followed by "share(s)" / "action(s)" near cost info
+            r"\b([0-9]+(?:\.[0-9]+)?)\s+(?:shares?|actions?)\b",
+        ]
+        for pat in qty_patterns:
             m = re.search(pat, text, flags=re.IGNORECASE)
             if m:
                 val = parse_money(m.group(1))
                 if val and val > 0:
-                    # Book value is total cost, not per-share — divide if > 3× price clue
-                    if "book" in pat.lower() and val > qty * 0.5:
+                    qty = val
+                    break
+
+        if not qty or qty <= 0:
+            safe_print(f"  [position_read] share count not found for {symbol}")
+            return None
+
+        # ── Average cost per share (the only reliable entry price anchor) ─────
+        # DO NOT use Market value / Valeur marchande — those drift with the price.
+        price = None
+        cost_patterns = [
+            # English: "Average cost $4.65" / "Avg. cost $4.65"
+            r"(?:Average|Avg\.?)\s*(?:cost|price)\s*[:\s]*\$?\s*([0-9,.]+)",
+            # French: "Coût moyen $4.65" / "Prix moyen $4.65"
+            r"(?:Co[uû]t|Prix)\s+moyen\s*[:\s]*\$?\s*([0-9,.]+)",
+            # Book value (total) — divide by qty
+            r"(?:Book\s*value|Valeur\s*comptable)\s*[:\s]*\$?\s*([0-9,.]+)",
+            # Cost basis / base de coût
+            r"(?:Cost\s*basis|Base\s*de\s*co[uû]t)\s*[:\s]*\$?\s*([0-9,.]+)",
+        ]
+        for pat in cost_patterns:
+            m = re.search(pat, text, flags=re.IGNORECASE)
+            if m:
+                val = parse_money(m.group(1))
+                if val and val > 0:
+                    is_total = any(k in pat.lower() for k in ["book", "comptable", "basis", "base de"])
+                    if is_total and val > qty * 2:
                         price = round(val / qty, 4)
                     else:
                         price = val
                     break
 
         if not price or price <= 0:
+            safe_print(f"  [position_read] avg cost not found for {symbol} (qty={qty})")
             return None
 
+        safe_print(f"  [position_read] {symbol}: {qty} sh @ ${price:.4f}")
         return {
             "fill_price": round(price, 4),
             "fill_quantity": qty,
