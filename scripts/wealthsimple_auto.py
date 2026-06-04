@@ -147,10 +147,24 @@ def use_max_dollars(page) -> None:
         btn.wait_for(state="visible", timeout=4000)
         btn.click()
         page.wait_for_timeout(800)
-        return
+    except Exception:
+        raise RuntimeError("Max button not found — account may not be selected yet")
+    # Verify the estimated cost updated to something non-zero — if it's still $0 the
+    # account has no available cash (pending orders may be locking funds).
+    try:
+        cost_text = page.locator("body").inner_text(timeout=2000)
+        if "Estimated cost" in cost_text:
+            import re as _re
+            m = _re.search(r"Estimated cost\s*\$([0-9,.]+)", cost_text)
+            if m and float(m.group(1).replace(",", "")) < 0.01:
+                raise RuntimeError(
+                    "Estimated cost is $0 after Max — account has no available cash. "
+                    "Cancel pending orders on Wealthsimple and retry."
+                )
+    except RuntimeError:
+        raise
     except Exception:
         pass
-    raise RuntimeError("Max button not found — account may not be selected yet")
 
 
 def use_max_shares(page) -> None:
