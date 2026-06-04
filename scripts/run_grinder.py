@@ -798,43 +798,6 @@ def fetch_position_details(symbol: str, retries: int = 3) -> dict | None:
     return None
 
 
-def _refresh_position_cost_from_yf(symbol: str, pos: dict) -> dict | None:
-    """
-    Fallback: estimate actual fill price/cost from yfinance daily data.
-    Uses the day's open price as the fill price (closest to 9:30 AM market open).
-    Returns updated position dict if successful, None otherwise.
-    """
-    try:
-        hist = yf.download(symbol, period="1d", progress=False, auto_adjust=True)
-        if hist is not None and not hist.empty:
-            open_price = float(hist["Open"].iloc[-1])
-            if open_price > 0:
-                old_shares = float(pos.get("shares", 0))
-                old_cost = float(pos.get("estimatedCost", 0))
-                new_shares = old_shares if old_shares > 0 else (old_cost / open_price if open_price > 0 else 0)
-                new_cost = new_shares * open_price
-                pos["buyPrice"] = round(open_price, 4)
-                if new_shares > 0:
-                    pos["shares"] = round(new_shares, 4)
-                pos["estimatedCost"] = round(new_cost, 2)
-                log(f"  Refreshed cost from yfinance open=${open_price:.4f}  ({old_shares:.4f} sh @ ${open_price:.4f})")
-                return pos
-        fi = yf.Ticker(symbol).fast_info
-        last_price = fi.last_price
-        if last_price and last_price > 0:
-            old_shares = float(pos.get("shares", 0))
-            old_cost = float(pos.get("estimatedCost", 0))
-            new_shares = old_shares if old_shares > 0 else (old_cost / last_price if last_price > 0 else 0)
-            new_cost = new_shares * last_price
-            pos["buyPrice"] = round(last_price, 4)
-            if new_shares > 0:
-                pos["shares"] = round(new_shares, 4)
-            pos["estimatedCost"] = round(new_cost, 2)
-            log(f"  Refreshed cost from yfinance last=${last_price:.4f}")
-            return pos
-    except Exception as exc:
-        log(f"  Yfinance cost refresh failed: {exc}")
-    return None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -2313,13 +2276,7 @@ def wait_for_fill_confirm(symbol: str) -> None:
         except Exception as exc:
             log(f"  Could not update position cost: {exc}")
     elif POS_FILE.exists():
-        pos = json.loads(POS_FILE.read_text())
-        yf_result = _refresh_position_cost_from_yf(symbol, pos)
-        if yf_result is not None:
-            pos.update(yf_result)
-            pos["_costRefreshed"] = True
-            POS_FILE.write_text(json.dumps(pos, indent=2, default=str))
-            log(f"  Cost refreshed via yfinance fallback")
+        log("  WS position not found yet — keeping original estimate until 9:35 AM fill refresh")
 
     balance = fetch_live_balance(retries=2)
     bal_str = f"${balance:.2f} USD" if balance else "N/A"
@@ -3165,16 +3122,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
             except Exception as exc:
                 log(f"  Cost refresh failed: {exc}")
         else:
-            # Fallback: try yfinance if WS position fetch failed
-            yf_result = _refresh_position_cost_from_yf(symbol, pos)
-            if yf_result is not None:
-                pos.update(yf_result)
-                pos["_costRefreshed"] = True
-                POS_FILE.write_text(json.dumps(pos, indent=2, default=str))
-                entry = float(pos.get("buyPrice", entry))
-                shares = float(pos.get("shares", shares))
-                cost = float(pos.get("estimatedCost", cost))
-                log(f"  Cost refreshed via yfinance fallback")
+            log("  WS position not found yet — keeping original estimate until 9:35 AM fill refresh")
 
     now = now_et()
 
