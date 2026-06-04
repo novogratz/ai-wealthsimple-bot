@@ -2221,20 +2221,33 @@ def execute_buy(pick: GrinderPick, balance: float, bias: FuturesBias,
         "atrPct": round(pick.atr_pct, 2),
     }
     POS_FILE.write_text(json.dumps(pos))
+
+    # Wait ~60s then confirm actual fill price from WS trade page
+    log(f"  Waiting 60s for fill confirmation...")
+    time.sleep(60)
+    try:
+        fill = fetch_position_details(pick.symbol)
+        if fill and fill.get("fill_price") and POS_FILE.exists():
+            pos = json.loads(POS_FILE.read_text())
+            old_p = float(pos.get("buyPrice", actual_buy_price))
+            pos["buyPrice"]      = round(fill["fill_price"], 4)
+            pos["shares"]        = fill.get("fill_quantity", actual_qty)
+            pos["estimatedCost"] = fill.get("fill_value", actual_cost)
+            pos["_costRefreshed"] = True
+            POS_FILE.write_text(json.dumps(pos, indent=2))
+            actual_buy_price = fill["fill_price"]
+            actual_qty       = pos["shares"]
+            actual_cost      = pos["estimatedCost"]
+            log(f"  Fill confirmed: ${old_p:.4f} → ${actual_buy_price:.4f}")
+    except Exception as exc:
+        log(f"  Fill confirm failed: {exc}")
+
     _append_trade_history(pick.symbol, "BUY", actual_buy_price, actual_qty,
                           actual_cost, 0.0, pick.strategy_name)
-
-    at_pnl  = _get_total_pnl()
-    at_color = _pnl_color(at_pnl)
-    notify(
-        f"✅ <b>Buy order submitted</b>\n\n"
-        f"🎫 <code>{pick.symbol}</code>\n"
-        f"🔢 Shares: <b>{actual_qty:.4f}</b>  |  💵 Entry: <b>${actual_buy_price:.2f} USD</b>\n"
-        f"💰 Invested: <b>${actual_cost:.2f} USD</b>\n"
-        f"🎯 Target: <b>+{profit_target:.1f}%</b>  (ATR {pick.atr_pct:.1f}%)  |  No stop loss\n\n"
-        f"{at_color} All-time PnL: <b>${at_pnl:+.2f} USD</b>"
-    )
     log(f"Buy confirmed: {actual_qty:.4f} sh @ ${actual_buy_price:.2f}  cost ${actual_cost:.2f}  target +{profit_target:.1f}%")
+
+    # Send rapport live right after buy (~9:36 AM) so user sees real position
+    _send_rapport_live()
     return True
 
 
