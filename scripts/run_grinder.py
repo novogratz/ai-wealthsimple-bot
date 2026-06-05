@@ -2038,20 +2038,23 @@ def _send_rapport_live() -> None:
 
 
 def _combined_report() -> None:
-    """Send top 3 picks then rapport live — fires every 4 hours."""
+    """Every 2 hours: top 3 picks (+ penny rockets if any) then rapport live."""
     global _last_combined_t
     if time.time() - _last_combined_t < _REPORT_INTERVAL_SECS:
         return
     _last_combined_t = time.time()
     label = now_et().strftime("%Hh%M ET")
     log(f"Rapport combiné — {label}...")
-    _send_top_picks(label)
+    _send_top_picks_with_rockets(label)
     _send_rapport_live()
 
 
 
-def build_top_picks_message(label: str) -> str | None:
-    """French top-3 picks message — sent at 6 AM and 4 PM ET every weekday."""
+def build_top_picks_message(label: str, rockets: list[dict] | None = None) -> str | None:
+    """
+    Combined message: top 3 momentum picks + optional penny rockets section.
+    Sent every 2h via _combined_report().
+    """
     state = _load_scan_state()
     raw_picks = state.get("picks", [])
     picks: list[GrinderPick] = []
@@ -2060,30 +2063,57 @@ def build_top_picks_message(label: str) -> str | None:
         if p:
             picks.append(p)
 
-    if not picks:
-        return None
-
     try:
         bias = FuturesBias(state.get("bias", "neutral"))
     except Exception:
         bias = FuturesBias.NEUTRAL
 
-    bias_emoji = {"green": "🟢 VERT", "red": "🔴 ROUGE", "neutral": "⚪ NEUTRE"}[bias.value]
+    bias_emoji = {"green": "🟢 GREEN", "red": "🔴 RED", "neutral": "⚪ NEUTRAL"}[bias.value]
+
+    # ── Top 3 momentum picks ──────────────────────────────────────────────────
     medals = ["1️⃣", "2️⃣", "3️⃣"]
-    lines = []
+    pick_lines = []
     for i, p in enumerate(picks[:3]):
         conf = "🔥" if p.score >= 80 else ("⚡" if p.score >= 50 else "📊")
         why  = _pick_why(p)
-        lines.append(
+        pick_lines.append(
             f"{medals[i]} {conf} <code>{p.symbol}</code>  <b>${p.last_close:.2f}</b>  [score {p.score:.0f}]\n"
             f"   {why}"
         )
 
+    picks_section = (
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📈 <b>TOP 3 MOMENTUM PICKS</b>\n\n"
+        + ("\n\n".join(pick_lines) if pick_lines else "<i>No scan available yet.</i>")
+    )
+
+    # ── Penny rockets section (100%+ gainers) ─────────────────────────────────
+    rocket_section = ""
+    if rockets:
+        r_medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+        r_lines = []
+        for i, r in enumerate(rockets[:5]):
+            vol_str   = f"  🔥 {r['vol_ratio']:.1f}x vol" if r.get("vol_ratio", 0) >= 2 else ""
+            score_str = f"  score {r['score']:.0f}" if r.get("score", 0) > 10 else ""
+            r_lines.append(
+                f"{r_medals[i]} <code>{r['symbol']}</code>  <b>${r['last_close']:.2f}</b>"
+                f"  🚀 <b>+{r['pct_gain']:.0f}%</b>{vol_str}{score_str}"
+            )
+        rocket_section = (
+            "\n\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💥 <b>PENNY ROCKETS</b>  <i>(100%+ yesterday, &lt;$10)</i>\n\n"
+            + "\n".join(r_lines)
+            + "\n<i>⚠️ Manual review — bot will NOT auto-buy these</i>"
+        )
+
+    if not picks and not rockets:
+        return None
+
     return (
-        f"💸 <b>TOP 3 DU JOUR — {label}</b>\n\n"
-        f"Si j'avais du cash, j'investirais dans :\n\n"
-        + "\n\n".join(lines)
-        + f"\n\n📡 Futures : <b>{bias_emoji}</b>\n"
+        f"📊 <b>LE GRINDER — {label}</b>\n\n"
+        f"{picks_section}"
+        f"{rocket_section}\n\n"
+        f"📡 Futures : <b>{bias_emoji}</b>\n"
         f"<i>Le Grinder · NYSE/NASDAQ</i>"
     )
 
@@ -2100,6 +2130,32 @@ def _send_top_picks(label: str) -> None:
         log(f"  Telegram non configuré: {exc}")
     except Exception as exc:
         log(f"  Top picks échoué ({label}): {exc}")
+
+
+def _send_top_picks_with_rockets(label: str) -> None:
+    """Send combined top-3 + penny rockets in one Telegram message."""
+    try:
+        # Fetch cached rockets (don't re-scan — use last scan_state or rocket file)
+        rockets: list[dict] = []
+        try:
+            if PENNY_ROCKET_FILE.exists():
+                data = json.loads(PENNY_ROCKET_FILE.read_text())
+                today = now_et().strftime("%Y-%m-%d")
+                if data.get("date") == today and isinstance(data.get("rockets"), list):
+                    rockets = data["rockets"]
+        except Exception:
+            pass
+
+        msg = build_top_picks_message(label, rockets=rockets if rockets else None)
+        if msg:
+            send_message(msg)
+            log(f"  → Combined picks+rockets envoyés ({label}).")
+        else:
+            log(f"  Pas de picks disponibles pour {label}.")
+    except TelegramConfigError as exc:
+        log(f"  Telegram non configuré: {exc}")
+    except Exception as exc:
+        log(f"  Combined report échoué ({label}): {exc}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -2209,7 +2265,10 @@ def _build_penny_rocket_message(rockets: list[dict]) -> str:
 
 
 def _maybe_send_penny_rockets(scans_done: set[str]) -> None:
-    """Once daily at 7–8 AM ET on weekdays: send 100%+ penny gainers from yesterday."""
+    """
+    Once daily at 7–8 AM ET: scan for 100%+ penny gainers and cache results.
+    The rockets are displayed in the every-2h combined report, NOT as a separate message.
+    """
     if "penny_rockets" in scans_done:
         return
     n = now_et()
@@ -2221,9 +2280,9 @@ def _maybe_send_penny_rockets(scans_done: set[str]) -> None:
 
     today = n.strftime("%Y-%m-%d")
     try:
-        sent = json.loads(PENNY_ROCKET_FILE.read_text()) if PENNY_ROCKET_FILE.exists() else {}
-        if sent.get("date") == today:
-            return
+        existing = json.loads(PENNY_ROCKET_FILE.read_text()) if PENNY_ROCKET_FILE.exists() else {}
+        if existing.get("date") == today:
+            return  # already scanned today
     except Exception:
         pass
 
@@ -2232,13 +2291,16 @@ def _maybe_send_penny_rockets(scans_done: set[str]) -> None:
     rockets = _scan_penny_rockets(watchlist_syms)
     if rockets:
         rockets = _score_penny_rockets(rockets)
-        _notify_trade(_build_penny_rocket_message(rockets))
-        log(f"  Penny rockets sent: {len(rockets)} found.")
+        log(f"  Penny rockets cached: {len(rockets)} found — will appear in next 2h combined report.")
     else:
         log("  No 100%+ penny rockets found yesterday.")
 
     try:
-        PENNY_ROCKET_FILE.write_text(json.dumps({"date": today, "count": len(rockets)}))
+        PENNY_ROCKET_FILE.write_text(json.dumps({
+            "date": today,
+            "count": len(rockets),
+            "rockets": rockets,
+        }))
     except Exception:
         pass
 
