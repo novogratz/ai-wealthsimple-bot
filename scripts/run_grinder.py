@@ -55,7 +55,8 @@ PNL_LEDGER   = DATA / "pnl_ledger.json"
 SESSION_FILE = DATA / "session_info.json"
 LOG_FILE     = DATA / "grinder.log"
 PROFILE_FILE  = DATA / "company_profiles.json"
-SCAN_STATE_FILE = DATA / "scan_state.json"
+SCAN_STATE_FILE    = DATA / "scan_state.json"
+PENNY_ROCKET_FILE  = DATA / "penny_rocket.json"
 PYTHON       = sys.executable
 TZ           = ZoneInfo("America/Toronto")
 
@@ -2102,6 +2103,147 @@ def _send_top_picks(label: str) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Penny rocket scanner — once daily at 7 AM ET
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _scan_penny_rockets(watchlist: list[str]) -> list[dict]:
+    """
+    Find penny stocks (price < $10) that gained 100%+ from the prior session.
+    Uses a batch yfinance 5d download for efficiency.
+    Returns top 20 sorted by pct_gain descending.
+    """
+    cap = min(len(watchlist), 800)
+    subset = watchlist[:cap]
+    log(f"Penny rocket scan: {cap} tickers for 100%+ yesterday...")
+    try:
+        raw = yf.download(
+            subset,
+            period="5d",
+            interval="1d",
+            group_by="ticker",
+            auto_adjust=True,
+            progress=False,
+            threads=True,
+        )
+    except Exception as exc:
+        log(f"  Penny rocket download failed: {exc}")
+        return []
+
+    multi = len(subset) > 1
+    results: list[dict] = []
+    for sym in subset:
+        try:
+            closes = raw["Close"][sym] if multi else raw["Close"]
+            closes = closes.dropna()
+            if len(closes) < 2:
+                continue
+            prev = float(closes.iloc[-2])
+            last = float(closes.iloc[-1])
+            if prev <= 0 or last <= 0 or last >= 10.0:
+                continue
+            pct = (last / prev - 1) * 100
+            if pct < 100.0:
+                continue
+            vols = raw["Volume"][sym] if multi else raw["Volume"]
+            vols = vols.dropna()
+            avg_vol = float(vols.iloc[:-1].mean()) if len(vols) >= 2 else 0
+            yesterday_vol = float(vols.iloc[-1]) if len(vols) >= 1 else 0
+            results.append({
+                "symbol":       sym,
+                "prev_close":   round(prev, 4),
+                "last_close":   round(last, 4),
+                "pct_gain":     round(pct, 1),
+                "avg_vol":      int(avg_vol),
+                "yesterday_vol": int(yesterday_vol),
+                "vol_ratio":    round(yesterday_vol / avg_vol, 1) if avg_vol > 0 else 0.0,
+                "score":        0.0,
+            })
+        except Exception:
+            continue
+
+    results.sort(key=lambda x: x["pct_gain"], reverse=True)
+    log(f"  Found {len(results)} penny rockets (100%+ gain, price < $10)")
+    return results[:20]
+
+
+def _score_penny_rockets(rockets: list[dict]) -> list[dict]:
+    """Run SmartGrinderStrategy on the rockets to add composite scores."""
+    if not rockets:
+        return rockets
+    syms = [r["symbol"] for r in rockets]
+    try:
+        md = GrinderMarketData()
+        md.prefetch(syms)
+        ctx = SmartMarketContext.load_or_fetch()
+        picks = SmartGrinderStrategy(md, ctx).scan(syms)
+        score_map = {p.symbol: p.score for p in picks}
+        for r in rockets:
+            r["score"] = score_map.get(r["symbol"], 0.0)
+    except Exception as exc:
+        log(f"  Penny rocket scoring failed: {exc}")
+    return sorted(rockets, key=lambda x: (x["score"], x["pct_gain"]), reverse=True)
+
+
+def _build_penny_rocket_message(rockets: list[dict]) -> str:
+    top = rockets[:5]
+    medals = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+    lines = []
+    for i, r in enumerate(top):
+        vol_str   = f"  🔥 {r['vol_ratio']:.1f}x vol" if r.get("vol_ratio", 0) >= 2 else ""
+        score_str = f"  score {r['score']:.0f}" if r.get("score", 0) > 10 else ""
+        lines.append(
+            f"{medals[i]} <code>{r['symbol']}</code>  <b>${r['last_close']:.2f}</b>"
+            f"  🚀 <b>+{r['pct_gain']:.0f}%</b>{vol_str}{score_str}\n"
+            f"   prev ${r['prev_close']:.2f}  →  ${r['last_close']:.2f}"
+        )
+    total = len(rockets)
+    return (
+        f"💥 <b>PENNY ROCKETS — 100%+ GAINERS YESTERDAY</b>\n"
+        f"<i>{now_et():%a %b %d}  ·  {total} stock{'s' if total != 1 else ''} found</i>\n\n"
+        f"Stocks under $10 that doubled or more yesterday:\n\n"
+        + "\n\n".join(lines)
+        + f"\n\n⚠️ <i>These often gap then fade hard. Check news catalyst + dilution risk before entry.\n"
+        f"Bot will NOT auto-buy these — manual review required.</i>\n"
+        f"<i>🤖 Le Grinder · NYSE/NASDAQ</i>"
+    )
+
+
+def _maybe_send_penny_rockets(scans_done: set[str]) -> None:
+    """Once daily at 7–8 AM ET on weekdays: send 100%+ penny gainers from yesterday."""
+    if "penny_rockets" in scans_done:
+        return
+    n = now_et()
+    if n.weekday() >= 5:
+        return
+    if not (7 <= n.hour < 8):
+        return
+    scans_done.add("penny_rockets")
+
+    today = n.strftime("%Y-%m-%d")
+    try:
+        sent = json.loads(PENNY_ROCKET_FILE.read_text()) if PENNY_ROCKET_FILE.exists() else {}
+        if sent.get("date") == today:
+            return
+    except Exception:
+        pass
+
+    log("Daily penny rocket scan (100%+ gainers from yesterday)...")
+    watchlist_syms, _ = _choose_scan_symbols()
+    rockets = _scan_penny_rockets(watchlist_syms)
+    if rockets:
+        rockets = _score_penny_rockets(rockets)
+        _notify_trade(_build_penny_rocket_message(rockets))
+        log(f"  Penny rockets sent: {len(rockets)} found.")
+    else:
+        log("  No 100%+ penny rockets found yesterday.")
+
+    try:
+        PENNY_ROCKET_FILE.write_text(json.dumps({"date": today, "count": len(rockets)}))
+    except Exception:
+        pass
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Timing helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -3495,8 +3637,11 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
             bias = _do_scan("5 AM Morning Scan")
             scans_done.add("5am")
 
-        # Scheduled combined report every 3 hours
+        # Scheduled combined report every 2 hours (top 3 picks + rapport live)
         _combined_report()
+
+        # Once-daily penny rocket alert at 7 AM
+        _maybe_send_penny_rockets(scans_done)
 
         # 4-8 PM after-hours buy — Rule: no idle cash in AH window
         if "ah" not in scans_done and _is_afterhours_window() and not POS_FILE.exists():
@@ -3536,6 +3681,7 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
             scans_done.discard("ah")
             scans_done.discard("daily_report")
             scans_done.discard("weekly_report")
+            scans_done.discard("penny_rockets")
             failed_buys_today.clear()
 
         # Near buy window → exit sleep loop
@@ -3804,8 +3950,11 @@ def main() -> None:
             log("9:30 AM — rapport live actif, morning report ignoré.")
             scans_done.add("morning_report")
 
-        # Scheduled combined report every 3 hours
+        # Scheduled combined report every 2 hours (top 3 picks + rapport live)
         _combined_report()
+
+        # Once-daily penny rocket alert at 7 AM
+        _maybe_send_penny_rockets(scans_done)
 
         if not POS_FILE.exists() and _is_afterhours_window() and _past_close:
             log("No position in AH window — scanning for after-hours buy.")
