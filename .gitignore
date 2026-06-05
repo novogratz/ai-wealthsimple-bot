@@ -25,6 +25,7 @@ bin/claude.cmd
 # Wealthsimple local session/state. Never commit browser auth.
 data/*
 !data/.gitkeep
+!data/us_universe.json
 
 # Logs and local run output
 *.log
