@@ -57,7 +57,7 @@ def main():
         "ON","MCHP","WOLF","SMCI","ARM","SLAB","MPWR","NXPI","SWKS","QRVO",
         "CEVA","SYNA","CCMP","PDFS","AXTI","MTSI","AOSL","POWI","SITM",
         "ALGM","AEHR","FORM","UCTT","ACMR","LSCC","AMBA","PLAB","COHU",
-        "ONTO","ICHR","AEIS","MKSI","DIOD","CRUS","RMBS","IXYS","POWER",
+        "ONTO","ICHR","AEIS","MKSI","DIOD","CRUS","RMBS",
         # Cloud / SaaS
         "CRM","NOW","SNOW","PLTR","ORCL","ADBE","WDAY","TEAM","DDOG","NET",
         "ZS","PANW","CRWD","FTNT","CYBR","S","OKTA","HUBS","MDB","CFLT",
@@ -66,7 +66,7 @@ def main():
         # Fintech / crypto-adjacent
         "V","MA","PYPL","SQ","COIN","HOOD","SOFI","AFRM","NU","UPST",
         "MARA","RIOT","CLSK","HUT","CIFR","BTBT","IREN","WULF","CORZ",
-        "SDIG","MIGI","BTDR","BSRT","HIVE","BITF",
+        "SDIG","MIGI","BTDR","HIVE","BITF",
         # Banks / finance
         "JPM","BAC","GS","MS","C","WFC","BX","BLK","SCHW","IBKR","RJF",
         "AXP","COF","DFS","SYF","ALLY","LC","OMF","CURO","NAVI","SLM",
@@ -86,14 +86,14 @@ def main():
         "XNCR","NKTR","IOVA","FOLD","IDYA","ITOS","JANX","KALA","LQDA",
         # Consumer / retail
         "WMT","COST","TGT","HD","LOW","NKE","DIS","NFLX","UBER","LYFT",
-        "DASH","BKNG","ABNB","EXPE","TRIP","YELP","GRUB","CART","DKNG",
+        "DASH","BKNG","ABNB","EXPE","TRIP","YELP","CART","DKNG",
         "PENN","CZR","MGM","LVS","WYNN","RCL","CCL","NCLH","DAL","UAL","AAL","LUV",
         "BOOT","BYND","EAT","ELF","GOLF","HBI","JACK","JWN","LOVE","PRPL",
         # AI / quantum / space
         "DELL","HPE","IONQ","RGTI","QUBT","LUNR","RKLB","SPCE","ASTS",
-        "BBAI","SOUN","AISP","GFAI","BTAI","NLSP","BFLY","JOBY","ACHR",
-        "EVTL","LILM","ARCHER","BLADE","KTTA","AIRO","SATL","MNTS","VORB",
-        "VACQ","ASTR","SPIR","NAUT","DMTK","SABS","ATIP","SIEVERT",
+        "BBAI","SOUN","AISP","GFAI","BTAI","BFLY","JOBY","ACHR",
+        "EVTL","BLADE","KTTA","AIRO","SATL","MNTS",
+        "SPIR","NAUT","SABS",
         # EVs / clean energy
         "RIVN","LCID","NIO","LI","XPEV","ENPH","FSLR","RUN","NOVA",
         "F","GM","PLUG","BE","CHPT","BLNK","EVGO","PTRA","NKLA","WKHS",
@@ -109,12 +109,12 @@ def main():
         "GRVY","SLGG","MAPS","MSGM","DKNG","PENN","RSI","EBET","GENI",
         # Meme / WSB / high short interest
         "GME","AMC","BBBY","CLOV","SNDL","NKLA","WKHS","RIDE","HYLN",
-        "PROG","SPRT","BBIG","EXPR","KOSS","NAKD","NNDM","CTRM","SHIP",
+        "PROG","SPRT","BBIG","EXPR","KOSS","NNDM","CTRM","SHIP",
         "MVIS","ABST","TPVG","WISH","PAYA","LMND","ROOT","ASAN","BASE",
         # Small/mid cap momentum (semiconductors + tech)
         "SMTC","IIVI","COHU","FORM","MXL","AMBA","PLAB","ICHR","MKSI",
         "DIOD","CRUS","RMBS","PDFS","AXTI","MTSI","AOSL","POWI","SITM",
-        "ALGM","AEHR","UCTT","ACMR","LSCC","ONTO","AEIS","IXYS",
+        "ALGM","AEHR","UCTT","ACMR","LSCC","ONTO","AEIS",
         # REITs
         "O","AMT","PLD","WELL","SPG","EQR","AVB","PSA","EXR","DLR",
         "IRM","SBAC","CCI","VICI","GLPI","STAG","COLD","IIPR",
@@ -123,13 +123,13 @@ def main():
         "BBAI","SOUN","OPEN","ACHR","PLUG","MARA","RIOT","CLSK","HOOD",
         "SOFI","CLOV","SPCE","WKHS","NKLA","SNDL","NIO","XPEV","LCID",
         "RIVN","IONQ","RGTI","QUBT","LUNR","ASTS","RKLB","BTBT","IREN",
-        "CIFR","HUT","BBBY","NWL","OPK","KEEL","ACMR","BKSY","MULN",
-        "VINC","INDO","SMFL","PHIO","SHOT","IDT","EVTL","JOBY","LILM",
-        "VOXX","COVA","PSHG","AEYE","MNMD","HCMC","MMAT","TRCH","CTRM",
+        "CIFR","HUT","BBBY","NWL","OPK","KEEL","ACMR","BKSY",
+        "VINC","INDO","SMFL","PHIO","SHOT","IDT","EVTL","JOBY",
+        "PSHG","AEYE","MNMD","HCMC","CTRM",
         "GFAI","NXTP","AUVI","ILUS","BFRI","HYMC","TPVG","SVNA","OPAD",
-        "EBON","BTCM","BTOG","PDSB","HCTI","CODA","LAKE","FGEN","NUVB",
-        "TLGA","GXII","GETY","BRPM","SLGN","NKGN","SIGA","MNKD","PRTK",
-        "CTXR","PIXY","BFIN","CLFD","CVLY","EDTX","ELEV","FFIE","FWBI",
+        "EBON","BTOG","PDSB","HCTI","CODA","LAKE","FGEN","NUVB",
+        "TLGA","GETY","BRPM","SLGN","NKGN","SIGA","MNKD","PRTK",
+        "CTXR","PIXY","BFIN","CLFD","CVLY","EDTX","ELEV","FWBI",
         # S&P 500 high-liquidity (full complement)
         "AAON","ACM","AES","AIG","AIZ","AJG","AKAM","ALB","ALGN","ALK",
         "ALL","ALLE","ANET","AON","APA","APD","APH","APTV","ARE","ATO",
@@ -163,11 +163,11 @@ def main():
         "WHR","WM","WMB","WRB","WRK","WST","WTW","WY","XEL","XYL",
         "YUM","ZBH","ZBRA","ZION","ZTS",
         # Recent hot tickers / Reddit momentum
-        "FFIE","MVIS","CODI","GOEV","NNDM","PRTY","ZAPP","RCAT","SEAT",
-        "SKYH","MGRM","LGVN","MNTK","NVTS","NXT","COCO","REAX","BKFC",
+        "MVIS","CODI","GOEV","NNDM","PRTY","ZAPP","RCAT","SEAT",
+        "SKYH","MGRM","LGVN","MNTK","NVTS","NXT","COCO","REAX",
         "ACXP","SXTP","LIQT","ZFOX","AEAC","FWAC","AHCO","DNUT","TASK",
         "XPOF","BARK","PAYO","BRLT","MNTV","KARO","GLBE","FIGS","RENT",
-        "AMPL","WEJO","OUST","LSEA","GETY","HPNN","DPSI","FLGC","DRUG",
+        "AMPL","WEJO","OUST","LSEA","GETY","HPNN","DRUG",
         "FRST","HIMS","EVER","LPSN","PTON","BMBL","DUOL","COUR","UDMY",
         "PWSC","PAYO","ALKT","NRDS","MNDY","KVYO","INSTC","KLAR","RDDT",
     ]

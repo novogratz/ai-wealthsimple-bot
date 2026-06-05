@@ -26,6 +26,40 @@ UNIVERSE_FILE       = ROOT / "data" / "universe.json"
 SMART_CONTEXT_CACHE = ROOT / "data" / "smart_context_cache.json"
 EARNINGS_CACHE      = ROOT / "data" / "earnings_cache.json"
 SHORT_CACHE         = ROOT / "data" / "short_interest_cache.json"
+DELIST_CACHE        = ROOT / "data" / "delist_cache.json"
+
+_DELIST_TTL_DAYS = 30   # re-check delisted symbols after 30 days
+
+
+def _load_delist_cache() -> set[str]:
+    """Return set of symbols that have consistently returned no yfinance data."""
+    try:
+        if not DELIST_CACHE.exists():
+            return set()
+        from datetime import datetime, timedelta
+        data = json.loads(DELIST_CACHE.read_text())
+        cutoff = (datetime.now() - timedelta(days=_DELIST_TTL_DAYS)).date().isoformat()
+        return {sym for sym, added in data.items() if added >= cutoff}
+    except Exception:
+        return set()
+
+
+def _mark_delist(symbols: list[str]) -> None:
+    """Record symbols that returned no data so future scans skip them."""
+    if not symbols:
+        return
+    try:
+        from datetime import datetime
+        today = datetime.now().date().isoformat()
+        existing: dict[str, str] = {}
+        if DELIST_CACHE.exists():
+            existing = json.loads(DELIST_CACHE.read_text())
+        for sym in symbols:
+            if sym not in existing:
+                existing[sym] = today
+        DELIST_CACHE.write_text(json.dumps(existing, indent=2))
+    except Exception:
+        pass
 
 _SECTOR_ETFS = ["XLK", "XLV", "XLE", "XLF", "XLI", "XLY"]
 YF_CACHE.mkdir(parents=True, exist_ok=True)
@@ -382,6 +416,9 @@ class GrinderMarketData:
         progress_cb(done, total) called after each batch if provided.
         """
         self._load_disk_cache()
+        # Skip symbols that have persistently returned no data (delisted / bad tickers)
+        delist = _load_delist_cache()
+        symbols = [s for s in symbols if s not in delist]
         # Also re-fetch symbols whose frames are missing (needed by SmartGrinderStrategy)
         to_fetch = [s for s in symbols if s not in self._cache or s not in self._frames]
         total    = len(to_fetch)
@@ -437,6 +474,11 @@ class GrinderMarketData:
             done += len(batch)
             if progress_cb:
                 progress_cb(done, total)
+
+        # Mark any symbol that still has no data as persistently failing
+        newly_failed = [s for s in to_fetch if self._cache.get(s) is None]
+        if newly_failed:
+            _mark_delist(newly_failed)
 
         self._persist_cache()
 
