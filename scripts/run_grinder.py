@@ -2834,6 +2834,7 @@ def _afterhours_hold_loop(symbol: str, entry: float, shares: float,
         except Exception as exc:
             log(f"AH price check error: {exc}")
 
+        _combined_report()
         time.sleep(60)  # check every 60s — was 600s
 
 
