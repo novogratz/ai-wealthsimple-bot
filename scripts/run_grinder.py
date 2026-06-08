@@ -2040,9 +2040,12 @@ def _send_rapport_live() -> None:
 
 
 def _combined_report() -> None:
-    """Every 30 min (24/7): fresh scan → top 3 momentum + top 1 penny explosive + top 1 swing trade + rapport live."""
+    """Clock-aligned 30-min report (24/7): fires immediately on start, then at :00 and :30 of each hour."""
     global _last_combined_t
-    if time.time() - _last_combined_t < _REPORT_INTERVAL_SECS:
+    now = now_et()
+    slot_minute = 0 if now.minute < 30 else 30
+    slot_start_ts = now.replace(minute=slot_minute, second=0, microsecond=0).timestamp()
+    if _last_combined_t > 0 and _last_combined_t >= slot_start_ts:
         return
     _last_combined_t = time.time()
     label = now_et().strftime("%Hh%M ET")
