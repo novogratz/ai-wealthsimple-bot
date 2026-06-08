@@ -43,7 +43,6 @@ from kzer_bot.grinder_strategy import (
     PennyExplosiveStrategy,
     SmartGrinderStrategy,
     SmartMarketContext,
-    SwingTradeStrategy,
     WATCHLIST,
     get_futures_bias,
 )
@@ -2053,7 +2052,6 @@ def _combined_report() -> None:
 
     fresh_picks: list[GrinderPick] = []
     penny_pick: "dict | None" = None
-    swing_pick: "dict | None" = None
     try:
         scan_symbols, _ = _choose_scan_symbols()
         symbols = scan_symbols[:200]
@@ -2072,16 +2070,11 @@ def _combined_report() -> None:
                 current_sym = json.loads(POS_FILE.read_text()).get("symbol")
         except Exception:
             pass
-        # Sophisticated specialist strategies (FYI only)
         penny_symbols = [s for s in symbols if s != current_sym]
         penny_pick = PennyExplosiveStrategy(md, ctx).scan(penny_symbols)
-        swing_pick = SwingTradeStrategy(md, ctx).scan(
-            [s for s in symbols if s != current_sym]
-        )
         log(
             f"  Scan done: {len(fresh_picks)} picks  "
-            f"penny={penny_pick['symbol'] if penny_pick else 'none'}  "
-            f"swing={swing_pick['symbol'] if swing_pick else 'none'}"
+            f"penny={penny_pick['symbol'] if penny_pick else 'none'}"
         )
     except Exception as exc:
         log(f"  Fresh scan failed: {exc} — using cached picks")
@@ -2090,7 +2083,6 @@ def _combined_report() -> None:
         label,
         fresh_picks=fresh_picks or [],
         penny_pick=penny_pick,
-        swing_pick=swing_pick,
     )
     _send_rapport_live()
 
@@ -2101,10 +2093,9 @@ def build_top_picks_message(
     rockets: "list[dict] | None" = None,
     fresh_picks: "list[GrinderPick] | None" = None,
     penny_pick: "dict | None" = None,
-    swing_pick: "dict | None" = None,
 ) -> "str | None":
     """
-    Combined message: top 3 momentum picks + penny explosive + swing trade + optional penny rockets.
+    Combined message: top 3 momentum picks + explosive penny pick + optional penny rockets.
     Sent every 30 min via _combined_report().
     """
     state = _load_scan_state()
@@ -2144,41 +2135,26 @@ def build_top_picks_message(
         + ("\n\n".join(pick_lines) if pick_lines else "<i>No scan available yet.</i>")
     )
 
-    # ── Top 1 penny explosive ─────────────────────────────────────────────────
+    # ── Top 1 explosive pick (penny / small cap) ─────────────────────────────
     penny_section = ""
     if penny_pick:
         pp = penny_pick
+        rsi_str  = f"RSI {pp['rsi14']:.0f}" if pp.get("rsi14") else ""
+        macd_str = "MACD ✅" if pp.get("macd_crossed") else ""
+        green_str = f"{pp['consec_green']}🟢" if pp.get("consec_green", 0) >= 2 else ""
+        meta = "  ·  ".join(filter(None, [rsi_str, macd_str, green_str]))
         penny_section = (
             "\n\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"💥 <b>TOP 1 PENNY — Intraday Explosive</b>  <i>(manual only)</i>\n\n"
+            f"💥 <b>EXPLOSIVE PICK</b>  <i>(manual — day trade or swing)</i>\n\n"
             f"🎯 <code>{pp['symbol']}</code>  <b>${pp['last_close']:.2f}</b>  [score {pp['score']:.0f}]\n"
             f"   🔥 +{pp['yesterday_pct']:.1f}% yesterday  ·  {pp['rel_volume']:.1f}x vol  ·  ATR {pp['atr_pct']:.1f}%  ·  close str {pp['close_strength']:.0%}\n"
-            f"   📊 {pp.get('signals', '')}\n\n"
+            + (f"   📡 {meta}\n" if meta else "")
+            + f"   📊 {pp.get('signals', '')}\n\n"
             f"   📥 <b>BUY:</b> {pp['entry_note']}\n"
-            f"   🎯 <b>Target 1:</b> ${pp['target1_price']:.2f} (+{pp['target1_pct']:.0f}%)  |  "
-            f"<b>Target 2:</b> ${pp['target2_price']:.2f} (+{pp['target2_pct']:.0f}%)\n"
+            f"   🎯 <b>T1:</b> ${pp['target1_price']:.2f} (+{pp['target1_pct']:.0f}%)  |  "
+            f"<b>T2:</b> ${pp['target2_price']:.2f} (+{pp['target2_pct']:.0f}%)\n"
             f"   🛑 <b>Stop:</b> ${pp['stop_price']:.2f} ({pp['stop_pct']:.0f}%)\n"
             f"   ⏱ {pp['hold_note']}"
-        )
-
-    # ── Top 1 swing trade ─────────────────────────────────────────────────────
-    swing_section = ""
-    if swing_pick:
-        sw = swing_pick
-        rsi_str  = f"RSI {sw['rsi14']:.0f}" if sw.get("rsi14") else ""
-        macd_str = "MACD ✅" if sw.get("macd_crossed") else ("MACD 📈" if sw.get("macd_bullish") else "")
-        swing_section = (
-            "\n\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📅 <b>TOP 1 SWING — ~1 Week Hold</b>  <i>(manual only)</i>\n\n"
-            f"🎯 <code>{sw['symbol']}</code>  <b>${sw['last_close']:.2f}</b>  [score {sw['score']:.0f}]\n"
-            f"   📈 +{sw['yesterday_pct']:.1f}% yesterday  ·  {sw['rel_volume']:.1f}x vol  ·  ATR {sw['atr_pct']:.1f}%  ·  {rsi_str}  {macd_str}\n"
-            f"   📊 {sw.get('signals', '')}\n\n"
-            f"   📥 <b>BUY:</b> {sw['entry_note']}\n"
-            f"       Pullback → <b>${sw['entry_ideal']:.2f}</b> (EMA5)  |  Breakout → <b>${sw['entry_breakout']:.2f}</b>\n"
-            f"   🎯 <b>Target:</b> ${sw['target_price']:.2f} (+{sw['target_pct']:.0f}%)  |  "
-            f"<b>Partial +{sw['partial_pct']:.0f}%:</b> ${sw['partial_price']:.2f}\n"
-            f"   🛑 <b>Stop:</b> ${sw['stop_price']:.2f} ({sw['stop_pct']:.0f}%)  |  "
-            f"⏱ {sw['hold_note']}"
         )
 
     # ── Penny rockets section (100%+ gainers yesterday) ───────────────────────
@@ -2200,14 +2176,13 @@ def build_top_picks_message(
             + "\n<i>⚠️ Manual review — bot will NOT auto-buy these</i>"
         )
 
-    if not picks and not penny_pick and not swing_pick and not rockets:
+    if not picks and not penny_pick and not rockets:
         return None
 
     return (
         f"📊 <b>LE GRINDER — {label}</b>\n\n"
         f"{picks_section}"
         f"{penny_section}"
-        f"{swing_section}"
         f"{rocket_section}\n\n"
         f"📡 Futures : <b>{bias_emoji}</b>\n"
         f"<i>Le Grinder · NYSE/NASDAQ</i>"
@@ -2232,9 +2207,8 @@ def _send_top_picks_with_rockets(
     label: str,
     fresh_picks: "list[GrinderPick] | None" = None,
     penny_pick: "dict | None" = None,
-    swing_pick: "dict | None" = None,
 ) -> None:
-    """Send combined top-3 + penny explosive + swing trade + penny rockets in one Telegram message."""
+    """Send combined top-3 + explosive pick + penny rockets in one Telegram message."""
     try:
         # Load cached rockets (once-daily penny rocket scan)
         rockets: list[dict] = []
@@ -2252,7 +2226,6 @@ def _send_top_picks_with_rockets(
             rockets=rockets if rockets else None,
             fresh_picks=fresh_picks,
             penny_pick=penny_pick,
-            swing_pick=swing_pick,
         )
         if msg:
             send_message(msg)
