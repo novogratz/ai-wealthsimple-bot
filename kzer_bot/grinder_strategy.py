@@ -1602,6 +1602,10 @@ class PennyExplosiveStrategy:
     MIN_PCT_CHG       = 3.0    # lowered to cast wider net; score sorts quality
     MIN_CLOSE_STR     = 0.35
     MAX_VIX           = 28.0
+    MAX_MARKET_CAP    = 500_000_000  # $500M — true penny/small cap only
+
+    _mc_cache: "dict[str, tuple[float, float]]" = {}  # symbol -> (market_cap, timestamp)
+    _MC_TTL = 3600.0  # refresh market cap once per hour
 
     def __init__(
         self,
@@ -1610,6 +1614,23 @@ class PennyExplosiveStrategy:
     ) -> None:
         self.md  = market_data or GrinderMarketData()
         self.ctx = ctx or SmartMarketContext.load_or_fetch()
+
+    @classmethod
+    def _get_market_cap(cls, symbol: str) -> float:
+        """Return market cap in USD. Cached 1h. Returns 0 if unavailable (allows through)."""
+        import time as _time
+        now = _time.time()
+        if symbol in cls._mc_cache:
+            mc, ts = cls._mc_cache[symbol]
+            if now - ts < cls._MC_TTL:
+                return mc
+        try:
+            import yfinance as yf
+            mc = float(getattr(yf.Ticker(symbol).fast_info, "market_cap", 0) or 0)
+        except Exception:
+            mc = 0.0
+        cls._mc_cache[symbol] = (mc, now)
+        return mc
 
     def scan(self, watchlist: list) -> "dict | None":
         """Return the best explosive pick as a dict, or None."""
@@ -1634,16 +1655,25 @@ class PennyExplosiveStrategy:
 
         candidates.sort(key=lambda x: x[0], reverse=True)
 
-        # Short squeeze enrichment + earnings blackout (top 20 only)
+        # Market cap filter — keep only true penny/small caps (< $500M)
+        # Applied to top 40 only to limit fast_info HTTP calls
+        mc_filtered: list = []
+        for sc, sn, sg in candidates[:40]:
+            mc = self._get_market_cap(sn.symbol)
+            if mc == 0 or mc <= self.MAX_MARKET_CAP:  # 0 = unavailable → allow through
+                mc_filtered.append((sc, sn, sg))
+        top_candidates = mc_filtered[:20] if mc_filtered else candidates[:20]
+
+        # Short squeeze enrichment + earnings blackout
         enriched: list = []
-        for score, snap, sig in candidates[:20]:
+        for score, snap, sig in top_candidates:
             if _is_earnings_blackout(snap.symbol):
                 continue
             score += _squeeze_bonus(snap.symbol, snap.yesterday_pct_change)
             enriched.append((score, snap, sig))
 
         if not enriched:
-            enriched = candidates[:3]
+            enriched = top_candidates[:3]
 
         enriched.sort(key=lambda x: x[0], reverse=True)
         score, snap, sig = enriched[0]
