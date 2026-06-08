@@ -1568,3 +1568,373 @@ class SmartGrinderStrategy:
         s *= self.ctx.regime_multiplier
 
         return s
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PennyExplosiveStrategy — intraday 100%+ potential scanner (FYI only)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class PennyExplosiveStrategy:
+    """
+    Penny explosive scanner — 6-signal composite (0-100 pts).
+    Finds sub-$10 stocks with the highest intraday 100%+ potential.
+    FYI only — bot will NOT auto-buy these.
+
+    Signals:
+      A. Yesterday momentum  — tiered by % gain                (0-30 pts)
+      B. Volume conviction   — tiered rel_vol + vol_trend bonus (0-25 pts)
+      C. ATR volatility      — tiered by daily range %          (0-20 pts)
+      D. Close strength      — buyers held the close            (0-15 pts)
+      E. OBV smart money     — volume-weighted up/down direction (0-5 pts)
+      F. Yahoo trending      — retail/algo attention             (0-5 pts)
+    Short squeeze enrichment on top 20 candidates.
+    VIX gate: skip when VIX >= 28 (panic mode destroys penny plays).
+    """
+
+    MIN_PRICE         = 0.30
+    MAX_PRICE         = 9.99
+    MIN_AVG_VOL       = 100_000
+    MIN_YDAY_VOL      = 50_000
+    MIN_PCT_CHG       = 5.0
+    MIN_CLOSE_STR     = 0.45
+    MAX_VIX           = 28.0
+
+    def __init__(
+        self,
+        market_data: Optional[GrinderMarketData] = None,
+        ctx: Optional[SmartMarketContext] = None,
+    ) -> None:
+        self.md  = market_data or GrinderMarketData()
+        self.ctx = ctx or SmartMarketContext.load_or_fetch()
+
+    def scan(self, watchlist: list) -> "dict | None":
+        """Return the best penny explosive pick as a dict, or None."""
+        if self.ctx.vix_level >= self.MAX_VIX:
+            return None
+
+        candidates: list = []
+        for sym in watchlist:
+            snap = self.md.snapshot(sym)
+            if snap is None or not self._base_ok(snap):
+                continue
+            df = self.md.get_frame(sym)
+            if df is None or len(df) < 7:
+                continue
+            sig = _build_smart_signals(df)
+            score = self._score(snap, sig)
+            if score > 0:
+                candidates.append((score, snap, sig))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda x: x[0], reverse=True)
+
+        # Short squeeze enrichment + earnings blackout (top 20 only)
+        enriched: list = []
+        for score, snap, sig in candidates[:20]:
+            if _is_earnings_blackout(snap.symbol):
+                continue
+            score += _squeeze_bonus(snap.symbol, snap.yesterday_pct_change)
+            enriched.append((score, snap, sig))
+
+        if not enriched:
+            enriched = candidates[:3]
+
+        enriched.sort(key=lambda x: x[0], reverse=True)
+        score, snap, sig = enriched[0]
+
+        price  = snap.last_close
+        t1     = round(price * 1.30, 2)
+        t2     = round(price * 1.75, 2)
+        stop   = round(price * 0.85, 2)
+
+        signal_parts = []
+        if sig.obv_score > 0.1:
+            signal_parts.append("OBV accumulation")
+        if snap.symbol in self.ctx.trending:
+            signal_parts.append("Yahoo trending")
+        if snap.close_strength >= 0.80:
+            signal_parts.append("closed at highs")
+        sq_pct, _ = _get_float_info(snap.symbol)
+        if sq_pct >= 0.20:
+            signal_parts.append(f"{sq_pct*100:.0f}% short float → squeeze risk")
+        if sig.macd_diff > 0:
+            signal_parts.append("MACD bullish")
+        if not signal_parts:
+            signal_parts.append("volume + momentum surge")
+
+        return {
+            "symbol":           snap.symbol,
+            "last_close":       round(price, 4),
+            "atr_pct":          round(snap.atr_pct, 1),
+            "rel_volume":       round(snap.rel_volume, 1),
+            "yesterday_pct":    round(snap.yesterday_pct_change, 1),
+            "close_strength":   round(snap.close_strength, 2),
+            "vol_trend":        round(sig.vol_trend, 2),
+            "obv_score":        round(sig.obv_score, 2),
+            "consec_green":     sig.consec_green,
+            "score":            round(score, 1),
+            "signals":          "  ·  ".join(signal_parts),
+            # Buy/sell recommendations
+            "entry_note":       "9:31 AM ET market open — before retail FOMO",
+            "entry_price":      price,
+            "target1_pct":      30.0,
+            "target1_price":    t1,
+            "target2_pct":      75.0,
+            "target2_price":    t2,
+            "stop_pct":         -15.0,
+            "stop_price":       stop,
+            "hold_note":        "Same day only — exit by 3 PM ET. Trail stop 20% from peak once up 25%+.",
+        }
+
+    def _base_ok(self, snap: GrinderSnapshot) -> bool:
+        return (
+            self.MIN_PRICE <= snap.last_close <= self.MAX_PRICE
+            and snap.avg_volume_20 >= self.MIN_AVG_VOL
+            and snap.yesterday_volume >= self.MIN_YDAY_VOL
+            and snap.yesterday_pct_change >= self.MIN_PCT_CHG
+            and snap.close_strength >= self.MIN_CLOSE_STR
+        )
+
+    def _score(self, snap: GrinderSnapshot, sig: SmartSignals) -> float:
+        s = 0.0
+
+        # A — Yesterday momentum (0-30) ─────────────────────────────────────
+        pct = snap.yesterday_pct_change
+        if   pct >= 100: s += 30.0
+        elif pct >=  50: s += 24.0 + (pct - 50)  / 50  * 6.0
+        elif pct >=  25: s += 18.0 + (pct - 25)  / 25  * 6.0
+        elif pct >=  10: s += 10.0 + (pct - 10)  / 15  * 8.0
+        else:            s +=        (pct -  5.0) /  5  * 10.0
+
+        # B — Volume conviction (0-25) ───────────────────────────────────────
+        rv = snap.rel_volume
+        if   rv >= 10: s += 25.0
+        elif rv >=  5: s += 21.0
+        elif rv >=  3: s += 15.0
+        elif rv >=  2: s +=  8.0
+        if sig.vol_trend >= 1.5: s += 3.0
+        elif sig.vol_trend >= 1.2: s += 1.5
+
+        # C — ATR volatility (0-20) ──────────────────────────────────────────
+        atr = snap.atr_pct
+        if   atr >= 30: s += 20.0
+        elif atr >= 20: s += 18.0
+        elif atr >= 10: s += 14.0
+        elif atr >=  5: s +=  8.0
+
+        # D — Close strength (0-15) ──────────────────────────────────────────
+        s += snap.close_strength * 15.0
+
+        # E — OBV smart money (0-5) ──────────────────────────────────────────
+        s += max(0.0, sig.obv_score * 5.0)
+
+        # F — Yahoo trending bonus (0-5) ─────────────────────────────────────
+        if snap.symbol in self.ctx.trending:
+            s += 5.0
+
+        return s
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SwingTradeStrategy — ~1-week Minervini + CANSLIM screener (FYI only)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class SwingTradeStrategy:
+    """
+    Swing trade screener — Minervini Stage 2 + CANSLIM + RSI/MACD (0-100 pts).
+    Finds the best stock for a ~1-week hold.
+    FYI only — bot will NOT auto-buy.
+
+    Signals:
+      A. Minervini Stage 2   — Price > SMA50 > SMA150 > SMA200             (0-25 pts)
+      B. RS vs SPY           — outperforms SPY 5d return                    (0-20 pts)
+      C. 52-week proximity   — within X% of 52-week high (CANSLIM "N")     (0-15 pts)
+      D. RSI(14) zone        — 50-65 momentum, not overbought               (0-15 pts)
+      E. MACD(12,26,9)       — fresh crossover or bullish above signal      (0-10 pts)
+      F. Volume trend        — 5d avg / 20d avg (rising = institutional)    (0-8 pts)
+      G. ATR quality         — 1.5-5% preferred (clean swings, not choppy) (0-7 pts)
+    Earnings blackout: 7-day window (protects the full hold period).
+    Regime gate: SPY below SMA200 → ×0.75.
+    Requires 50 bars minimum (for SMA50).
+    """
+
+    MIN_PRICE            = 10.0
+    MIN_AVG_VOL          = 1_000_000
+    MIN_YDAY_VOL         = 500_000
+    MIN_PCT_CHG          = 0.5
+    EARNINGS_WINDOW_DAYS = 7
+
+    def __init__(
+        self,
+        market_data: Optional[GrinderMarketData] = None,
+        ctx: Optional[SmartMarketContext] = None,
+    ) -> None:
+        self.md  = market_data or GrinderMarketData()
+        self.ctx = ctx or SmartMarketContext.load_or_fetch()
+
+    def scan(self, watchlist: list) -> "dict | None":
+        """Return the best swing trade pick as a dict, or None."""
+        candidates: list = []
+        for sym in watchlist:
+            snap = self.md.snapshot(sym)
+            if snap is None or not self._base_ok(snap):
+                continue
+            df = self.md.get_frame(sym)
+            if df is None or len(df) < 50:
+                continue
+            sig = _build_smart_signals(df)
+            if sig.consec_green >= 6:
+                continue  # extended — too late for a clean swing entry
+            score = self._score(snap, sig)
+            if score > 0:
+                candidates.append((score, snap, sig))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda x: x[0], reverse=True)
+
+        # Earnings blackout with 7-day window (protect the full hold)
+        final_score, final_snap, final_sig = candidates[0]
+        for score, snap, sig in candidates:
+            if not _is_earnings_blackout(snap.symbol, window_days=self.EARNINGS_WINDOW_DAYS):
+                final_score, final_snap, final_sig = score, snap, sig
+                break
+
+        snap  = final_snap
+        sig   = final_sig
+        score = final_score
+        price = snap.last_close
+
+        # Build recommendations
+        entry_ideal     = round(snap.ema5, 2)
+        entry_breakout  = round(snap.yesterday_high * 1.005, 2)
+        target_price    = round(price * 1.15, 2)
+        partial_price   = round(price * 1.08, 2)
+        stop_price      = round(price * 0.95, 2)
+
+        is_full_stage2 = (
+            sig.sma50 > 0 and sig.sma200 > 0
+            and price > sig.sma50 > sig.sma200
+        )
+        rs_vs_spy   = round(sig.pct_5d - self.ctx.spy_5d_pct, 1)
+        prox_52w    = round((price / sig.high_52w - 1) * 100, 1) if sig.high_52w > 0 else 0.0
+
+        signal_parts = []
+        if is_full_stage2:
+            signal_parts.append("Stage 2 ✅ (Minervini)")
+        if rs_vs_spy > 2:
+            signal_parts.append(f"RS vs SPY +{rs_vs_spy:.1f}%")
+        if prox_52w >= -10:
+            signal_parts.append(f"near 52w high ({prox_52w:+.1f}%)")
+        if sig.macd_crossed:
+            signal_parts.append("MACD crossover 🔔")
+        elif sig.macd_diff > 0:
+            signal_parts.append("MACD bullish")
+        if 50 <= sig.rsi14 <= 65:
+            signal_parts.append(f"RSI {sig.rsi14:.0f} (momentum zone)")
+        if sig.vol_trend >= 1.3:
+            signal_parts.append(f"volume expanding {sig.vol_trend:.1f}×")
+        if not signal_parts:
+            signal_parts.append("trend + volume alignment")
+
+        return {
+            "symbol":           snap.symbol,
+            "last_close":       round(price, 4),
+            "atr_pct":          round(snap.atr_pct, 1),
+            "rel_volume":       round(snap.rel_volume, 1),
+            "yesterday_pct":    round(snap.yesterday_pct_change, 1),
+            "close_strength":   round(snap.close_strength, 2),
+            "above_ema5":       snap.last_close > snap.ema5,
+            "above_ema20":      True,
+            "rsi14":            round(sig.rsi14, 1),
+            "macd_bullish":     sig.macd_diff > 0,
+            "macd_crossed":     sig.macd_crossed,
+            "sma50":            round(sig.sma50, 2),
+            "sma200":           round(sig.sma200, 2),
+            "is_full_stage2":   is_full_stage2,
+            "rs_vs_spy":        rs_vs_spy,
+            "prox_52w_pct":     prox_52w,
+            "vol_trend":        round(sig.vol_trend, 2),
+            "consec_green":     sig.consec_green,
+            "score":            round(score, 1),
+            "signals":          "  ·  ".join(signal_parts),
+            # Buy recommendations
+            "entry_note":       "Pullback to EMA5 or breakout above yesterday's high",
+            "entry_ideal":      entry_ideal,
+            "entry_breakout":   entry_breakout,
+            # Sell recommendations
+            "target_pct":       15.0,
+            "target_price":     target_price,
+            "partial_pct":      8.0,
+            "partial_price":    partial_price,
+            "stop_pct":         -5.0,
+            "stop_price":       stop_price,
+            "hold_days":        8,
+            "hold_note":        "Scale: sell 50% at +8%, rest at +15%. Time stop: 8 trading days.",
+        }
+
+    def _base_ok(self, snap: GrinderSnapshot) -> bool:
+        return (
+            snap.last_close >= self.MIN_PRICE
+            and snap.avg_volume_20 >= self.MIN_AVG_VOL
+            and snap.yesterday_volume >= self.MIN_YDAY_VOL
+            and snap.yesterday_pct_change >= self.MIN_PCT_CHG
+            and snap.last_close > snap.ema20
+        )
+
+    def _score(self, snap: GrinderSnapshot, sig: SmartSignals) -> float:
+        s = 0.0
+        price = snap.last_close
+
+        # A — Minervini Stage 2 MA alignment (0-25) ──────────────────────────
+        if sig.sma50 > 0 and sig.sma150 > 0 and sig.sma200 > 0:
+            if price > sig.sma50 > sig.sma150 > sig.sma200:
+                s += 25.0
+            elif price > sig.sma50 > sig.sma200:
+                s += 15.0
+            elif price > sig.sma50:
+                s +=  8.0
+        elif sig.sma50 > 0 and price > sig.sma50:
+            s += 8.0
+
+        # B — RS vs SPY 5d return (0-20) ──────────────────────────────────────
+        rs = sig.pct_5d - self.ctx.spy_5d_pct
+        if   rs >= 5.0: s += 20.0
+        elif rs >= 2.0: s += 14.0
+        elif rs >= 0.0: s +=  8.0
+
+        # C — 52-week proximity (0-15) ─────────────────────────────────────────
+        if sig.high_52w > 0:
+            prox = (price / sig.high_52w - 1) * 100
+            if   prox >= -5.0:  s += 15.0
+            elif prox >= -10.0: s += 10.0
+            elif prox >= -20.0: s +=  5.0
+
+        # D — RSI(14) zone (0-15) ───────────────────────────────────────────────
+        rsi = sig.rsi14
+        if   50 <= rsi <= 65: s += 15.0
+        elif 65 <  rsi <= 72: s +=  8.0
+        elif 45 <= rsi <  50: s +=  6.0
+
+        # E — MACD(12,26,9) (0-10) ──────────────────────────────────────────────
+        if sig.macd_crossed: s += 10.0
+        elif sig.macd_diff > 0: s +=  5.0
+
+        # F — Volume trend (0-8) ────────────────────────────────────────────────
+        if   sig.vol_trend >= 1.3: s += 8.0
+        elif sig.vol_trend >= 1.0: s += 4.0
+
+        # G — ATR quality (0-7): prefer 1.5-5% for clean multi-day swings ──────
+        atr = snap.atr_pct
+        if   1.5 <= atr <= 5.0: s += 7.0
+        elif 5.0 <  atr <= 8.0: s += 3.0
+        elif atr < 1.5:         s += 1.0
+
+        # Regime gate: SPY below SMA200 → tougher market for swings
+        if not self.ctx.spy_above_sma200:
+            s *= 0.75
+
+        return s

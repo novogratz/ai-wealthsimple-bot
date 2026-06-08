@@ -40,8 +40,10 @@ from kzer_bot.grinder_strategy import (
     GrinderMarketData,
     GrinderPick,
     GrinderStrategy,
+    PennyExplosiveStrategy,
     SmartGrinderStrategy,
     SmartMarketContext,
+    SwingTradeStrategy,
     WATCHLIST,
     get_futures_bias,
 )
@@ -2037,81 +2039,6 @@ def _send_rapport_live() -> None:
         log(f"  Rapport LIVE échoué: {exc}")
 
 
-def _scan_penny_explosive(md: "GrinderMarketData", exclude: str | None = None) -> "dict | None":
-    """Top 1 penny stock ($0.30–$9.99) with highest intraday explosive potential — FYI only."""
-    best_score = -1.0
-    best: dict | None = None
-    for snap in md.all_snapshots():
-        if snap.symbol == exclude:
-            continue
-        if not (0.30 <= snap.last_close <= 9.99):
-            continue
-        if snap.avg_volume_20 < 100_000:
-            continue
-        if snap.atr_pct < 5.0:
-            continue
-        if snap.rel_volume < 2.0:
-            continue
-        if snap.yesterday_pct_change < 5.0:
-            continue
-        score = snap.atr_pct * snap.rel_volume * (1.0 + snap.close_strength) * (1.0 + snap.yesterday_pct_change / 100)
-        if score > best_score:
-            best_score = score
-            best = {
-                "symbol":         snap.symbol,
-                "last_close":     round(snap.last_close, 4),
-                "atr_pct":        round(snap.atr_pct, 1),
-                "rel_volume":     round(snap.rel_volume, 1),
-                "yesterday_pct":  round(snap.yesterday_pct_change, 1),
-                "close_strength": round(snap.close_strength, 2),
-                "score":          round(score, 1),
-            }
-    return best
-
-
-def _scan_swing_trade(md: "GrinderMarketData", exclude: str | None = None) -> "dict | None":
-    """Top 1 swing trade pick (~1 week hold), scored for uptrend quality + volume support."""
-    best_score = -1.0
-    best: dict | None = None
-    for snap in md.all_snapshots():
-        if snap.symbol == exclude:
-            continue
-        if snap.last_close < 5.0:
-            continue
-        if snap.avg_volume_20 < 500_000:
-            continue
-        if snap.last_close <= snap.ema20:
-            continue
-        if snap.last_close <= snap.ema5:
-            continue
-        if snap.yesterday_pct_change < 0.3:
-            continue
-        if snap.close_strength < 0.50:
-            continue
-        # Prefer moderate ATR (2–6%) — not too choppy for a multi-day hold
-        atr_factor = max(0.0, 1.0 - abs(snap.atr_pct - 3.5) / 10.0)
-        score = (
-            snap.yesterday_pct_change * 0.25
-            + snap.rel_volume * 2.0
-            + snap.close_strength * 15.0
-            + atr_factor * 8.0
-        )
-        if score > best_score:
-            best_score = score
-            best = {
-                "symbol":         snap.symbol,
-                "last_close":     round(snap.last_close, 4),
-                "atr_pct":        round(snap.atr_pct, 1),
-                "rel_volume":     round(snap.rel_volume, 1),
-                "yesterday_pct":  round(snap.yesterday_pct_change, 1),
-                "close_strength": round(snap.close_strength, 2),
-                "above_ema5":     True,
-                "above_ema20":    True,
-                "score":          round(score, 1),
-            }
-    return best
-
-
 def _combined_report() -> None:
     """Every 30 min (24/7): fresh scan → top 3 momentum + top 1 penny explosive + top 1 swing trade + rapport live."""
     global _last_combined_t
@@ -2142,8 +2069,12 @@ def _combined_report() -> None:
                 current_sym = json.loads(POS_FILE.read_text()).get("symbol")
         except Exception:
             pass
-        penny_pick = _scan_penny_explosive(md, current_sym)
-        swing_pick = _scan_swing_trade(md, current_sym)
+        # Sophisticated specialist strategies (FYI only)
+        penny_symbols = [s for s in symbols if s != current_sym]
+        penny_pick = PennyExplosiveStrategy(md, ctx).scan(penny_symbols)
+        swing_pick = SwingTradeStrategy(md, ctx).scan(
+            [s for s in symbols if s != current_sym]
+        )
         log(
             f"  Scan done: {len(fresh_picks)} picks  "
             f"penny={penny_pick['symbol'] if penny_pick else 'none'}  "
@@ -2216,24 +2147,35 @@ def build_top_picks_message(
         pp = penny_pick
         penny_section = (
             "\n\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"💥 <b>TOP 1 PENNY — Intraday Explosive</b>  <i>(manual only — bot won't buy)</i>\n\n"
-            f"🎯 <code>{pp['symbol']}</code>  <b>${pp['last_close']:.2f}</b>\n"
-            f"   🔥 ATR {pp['atr_pct']:.1f}%  ·  {pp['rel_volume']:.1f}x vol  ·  +{pp['yesterday_pct']:.1f}% yesterday\n"
-            f"   Close str {pp['close_strength']:.0%}  ·  score {pp['score']:.0f}\n"
-            f"   <i>High ATR + volume surge = potential 50–100%+ move on catalyst</i>"
+            f"💥 <b>TOP 1 PENNY — Intraday Explosive</b>  <i>(manual only)</i>\n\n"
+            f"🎯 <code>{pp['symbol']}</code>  <b>${pp['last_close']:.2f}</b>  [score {pp['score']:.0f}]\n"
+            f"   🔥 +{pp['yesterday_pct']:.1f}% yesterday  ·  {pp['rel_volume']:.1f}x vol  ·  ATR {pp['atr_pct']:.1f}%  ·  close str {pp['close_strength']:.0%}\n"
+            f"   📊 {pp.get('signals', '')}\n\n"
+            f"   📥 <b>BUY:</b> {pp['entry_note']}\n"
+            f"   🎯 <b>Target 1:</b> ${pp['target1_price']:.2f} (+{pp['target1_pct']:.0f}%)  |  "
+            f"<b>Target 2:</b> ${pp['target2_price']:.2f} (+{pp['target2_pct']:.0f}%)\n"
+            f"   🛑 <b>Stop:</b> ${pp['stop_price']:.2f} ({pp['stop_pct']:.0f}%)\n"
+            f"   ⏱ {pp['hold_note']}"
         )
 
     # ── Top 1 swing trade ─────────────────────────────────────────────────────
     swing_section = ""
     if swing_pick:
         sw = swing_pick
+        rsi_str  = f"RSI {sw['rsi14']:.0f}" if sw.get("rsi14") else ""
+        macd_str = "MACD ✅" if sw.get("macd_crossed") else ("MACD 📈" if sw.get("macd_bullish") else "")
         swing_section = (
             "\n\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📅 <b>TOP 1 SWING — ~1 Week Hold</b>  <i>(manual only — bot won't buy)</i>\n\n"
-            f"🎯 <code>{sw['symbol']}</code>  <b>${sw['last_close']:.2f}</b>\n"
-            f"   📈 +{sw['yesterday_pct']:.1f}% yesterday  ·  {sw['rel_volume']:.1f}x vol  ·  ATR {sw['atr_pct']:.1f}%\n"
-            f"   EMA5 ✅  EMA20 ✅  ·  Close str {sw['close_strength']:.0%}  ·  score {sw['score']:.1f}\n"
-            f"   <i>Stage 2 uptrend + volume support = multi-day continuation setup</i>"
+            f"📅 <b>TOP 1 SWING — ~1 Week Hold</b>  <i>(manual only)</i>\n\n"
+            f"🎯 <code>{sw['symbol']}</code>  <b>${sw['last_close']:.2f}</b>  [score {sw['score']:.0f}]\n"
+            f"   📈 +{sw['yesterday_pct']:.1f}% yesterday  ·  {sw['rel_volume']:.1f}x vol  ·  ATR {sw['atr_pct']:.1f}%  ·  {rsi_str}  {macd_str}\n"
+            f"   📊 {sw.get('signals', '')}\n\n"
+            f"   📥 <b>BUY:</b> {sw['entry_note']}\n"
+            f"       Pullback → <b>${sw['entry_ideal']:.2f}</b> (EMA5)  |  Breakout → <b>${sw['entry_breakout']:.2f}</b>\n"
+            f"   🎯 <b>Target:</b> ${sw['target_price']:.2f} (+{sw['target_pct']:.0f}%)  |  "
+            f"<b>Partial +{sw['partial_pct']:.0f}%:</b> ${sw['partial_price']:.2f}\n"
+            f"   🛑 <b>Stop:</b> ${sw['stop_price']:.2f} ({sw['stop_pct']:.0f}%)  |  "
+            f"⏱ {sw['hold_note']}"
         )
 
     # ── Penny rockets section (100%+ gainers yesterday) ───────────────────────
