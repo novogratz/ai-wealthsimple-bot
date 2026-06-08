@@ -81,7 +81,7 @@ _DEPLOY_PCT           = 100       # 100% of balance deployed per trade
 _PROFIT_TARGET_PCT    = 5.0       # default fallback profit target (adaptive per trade)
 _last_rapport_t: float = 0.0
 _last_combined_t: float = 0.0          # timestamp of last combined report send
-_REPORT_INTERVAL_SECS = 2 * 3600       # every 2 hours
+_REPORT_INTERVAL_SECS = 30 * 60        # every 30 minutes
 
 
 def _dynamic_profit_target(atr_pct: float) -> float:
@@ -2037,31 +2037,154 @@ def _send_rapport_live() -> None:
         log(f"  Rapport LIVE échoué: {exc}")
 
 
+def _scan_penny_explosive(md: "GrinderMarketData", exclude: str | None = None) -> "dict | None":
+    """Top 1 penny stock ($0.30–$9.99) with highest intraday explosive potential — FYI only."""
+    best_score = -1.0
+    best: dict | None = None
+    for snap in md.all_snapshots():
+        if snap.symbol == exclude:
+            continue
+        if not (0.30 <= snap.last_close <= 9.99):
+            continue
+        if snap.avg_volume_20 < 100_000:
+            continue
+        if snap.atr_pct < 5.0:
+            continue
+        if snap.rel_volume < 2.0:
+            continue
+        if snap.yesterday_pct_change < 5.0:
+            continue
+        score = snap.atr_pct * snap.rel_volume * (1.0 + snap.close_strength) * (1.0 + snap.yesterday_pct_change / 100)
+        if score > best_score:
+            best_score = score
+            best = {
+                "symbol":         snap.symbol,
+                "last_close":     round(snap.last_close, 4),
+                "atr_pct":        round(snap.atr_pct, 1),
+                "rel_volume":     round(snap.rel_volume, 1),
+                "yesterday_pct":  round(snap.yesterday_pct_change, 1),
+                "close_strength": round(snap.close_strength, 2),
+                "score":          round(score, 1),
+            }
+    return best
+
+
+def _scan_swing_trade(md: "GrinderMarketData", exclude: str | None = None) -> "dict | None":
+    """Top 1 swing trade pick (~1 week hold), scored for uptrend quality + volume support."""
+    best_score = -1.0
+    best: dict | None = None
+    for snap in md.all_snapshots():
+        if snap.symbol == exclude:
+            continue
+        if snap.last_close < 5.0:
+            continue
+        if snap.avg_volume_20 < 500_000:
+            continue
+        if snap.last_close <= snap.ema20:
+            continue
+        if snap.last_close <= snap.ema5:
+            continue
+        if snap.yesterday_pct_change < 0.3:
+            continue
+        if snap.close_strength < 0.50:
+            continue
+        # Prefer moderate ATR (2–6%) — not too choppy for a multi-day hold
+        atr_factor = max(0.0, 1.0 - abs(snap.atr_pct - 3.5) / 10.0)
+        score = (
+            snap.yesterday_pct_change * 0.25
+            + snap.rel_volume * 2.0
+            + snap.close_strength * 15.0
+            + atr_factor * 8.0
+        )
+        if score > best_score:
+            best_score = score
+            best = {
+                "symbol":         snap.symbol,
+                "last_close":     round(snap.last_close, 4),
+                "atr_pct":        round(snap.atr_pct, 1),
+                "rel_volume":     round(snap.rel_volume, 1),
+                "yesterday_pct":  round(snap.yesterday_pct_change, 1),
+                "close_strength": round(snap.close_strength, 2),
+                "above_ema5":     True,
+                "above_ema20":    True,
+                "score":          round(score, 1),
+            }
+    return best
+
+
 def _combined_report() -> None:
-    """Every 2 hours: top 3 picks (+ penny rockets if any) then rapport live."""
+    """Every 30 min (24/7): fresh scan → top 3 momentum + top 1 penny explosive + top 1 swing trade + rapport live."""
     global _last_combined_t
     if time.time() - _last_combined_t < _REPORT_INTERVAL_SECS:
         return
     _last_combined_t = time.time()
     label = now_et().strftime("%Hh%M ET")
     log(f"Rapport combiné — {label}...")
-    _send_top_picks_with_rockets(label)
+
+    fresh_picks: list[GrinderPick] = []
+    penny_pick: "dict | None" = None
+    swing_pick: "dict | None" = None
+    try:
+        scan_symbols, _ = _choose_scan_symbols()
+        symbols = scan_symbols[:200]
+        log(f"  Fresh 30-min scan: {len(symbols)} tickers...")
+        md = GrinderMarketData()
+        md.prefetch(symbols)
+        ctx = SmartMarketContext.load_or_fetch()
+        fresh_picks = SmartGrinderStrategy(md, ctx).scan(symbols)
+        if not fresh_picks:
+            fresh_picks = GrinderStrategy(md).scan(symbols)
+        if not fresh_picks:
+            fresh_picks = FallbackStrategy(md).scan(symbols)
+        current_sym: str | None = None
+        try:
+            if POS_FILE.exists():
+                current_sym = json.loads(POS_FILE.read_text()).get("symbol")
+        except Exception:
+            pass
+        penny_pick = _scan_penny_explosive(md, current_sym)
+        swing_pick = _scan_swing_trade(md, current_sym)
+        log(
+            f"  Scan done: {len(fresh_picks)} picks  "
+            f"penny={penny_pick['symbol'] if penny_pick else 'none'}  "
+            f"swing={swing_pick['symbol'] if swing_pick else 'none'}"
+        )
+    except Exception as exc:
+        log(f"  Fresh scan failed: {exc} — using cached picks")
+
+    _send_top_picks_with_rockets(
+        label,
+        fresh_picks=fresh_picks or [],
+        penny_pick=penny_pick,
+        swing_pick=swing_pick,
+    )
     _send_rapport_live()
 
 
 
-def build_top_picks_message(label: str, rockets: list[dict] | None = None) -> str | None:
+def build_top_picks_message(
+    label: str,
+    rockets: "list[dict] | None" = None,
+    fresh_picks: "list[GrinderPick] | None" = None,
+    penny_pick: "dict | None" = None,
+    swing_pick: "dict | None" = None,
+) -> "str | None":
     """
-    Combined message: top 3 momentum picks + optional penny rockets section.
-    Sent every 2h via _combined_report().
+    Combined message: top 3 momentum picks + penny explosive + swing trade + optional penny rockets.
+    Sent every 30 min via _combined_report().
     """
     state = _load_scan_state()
-    raw_picks = state.get("picks", [])
-    picks: list[GrinderPick] = []
-    for raw in (raw_picks if isinstance(raw_picks, list) else []):
-        p = _pick_from_dict(raw)
-        if p:
-            picks.append(p)
+
+    # Use fresh picks when provided (live 30-min scan), else fall back to cached state
+    if fresh_picks is not None:
+        picks: list[GrinderPick] = fresh_picks
+    else:
+        raw_picks = state.get("picks", [])
+        picks = []
+        for raw in (raw_picks if isinstance(raw_picks, list) else []):
+            p = _pick_from_dict(raw)
+            if p:
+                picks.append(p)
 
     try:
         bias = FuturesBias(state.get("bias", "neutral"))
@@ -2087,7 +2210,33 @@ def build_top_picks_message(label: str, rockets: list[dict] | None = None) -> st
         + ("\n\n".join(pick_lines) if pick_lines else "<i>No scan available yet.</i>")
     )
 
-    # ── Penny rockets section (100%+ gainers) ─────────────────────────────────
+    # ── Top 1 penny explosive ─────────────────────────────────────────────────
+    penny_section = ""
+    if penny_pick:
+        pp = penny_pick
+        penny_section = (
+            "\n\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💥 <b>TOP 1 PENNY — Intraday Explosive</b>  <i>(manual only — bot won't buy)</i>\n\n"
+            f"🎯 <code>{pp['symbol']}</code>  <b>${pp['last_close']:.2f}</b>\n"
+            f"   🔥 ATR {pp['atr_pct']:.1f}%  ·  {pp['rel_volume']:.1f}x vol  ·  +{pp['yesterday_pct']:.1f}% yesterday\n"
+            f"   Close str {pp['close_strength']:.0%}  ·  score {pp['score']:.0f}\n"
+            f"   <i>High ATR + volume surge = potential 50–100%+ move on catalyst</i>"
+        )
+
+    # ── Top 1 swing trade ─────────────────────────────────────────────────────
+    swing_section = ""
+    if swing_pick:
+        sw = swing_pick
+        swing_section = (
+            "\n\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📅 <b>TOP 1 SWING — ~1 Week Hold</b>  <i>(manual only — bot won't buy)</i>\n\n"
+            f"🎯 <code>{sw['symbol']}</code>  <b>${sw['last_close']:.2f}</b>\n"
+            f"   📈 +{sw['yesterday_pct']:.1f}% yesterday  ·  {sw['rel_volume']:.1f}x vol  ·  ATR {sw['atr_pct']:.1f}%\n"
+            f"   EMA5 ✅  EMA20 ✅  ·  Close str {sw['close_strength']:.0%}  ·  score {sw['score']:.1f}\n"
+            f"   <i>Stage 2 uptrend + volume support = multi-day continuation setup</i>"
+        )
+
+    # ── Penny rockets section (100%+ gainers yesterday) ───────────────────────
     rocket_section = ""
     if rockets:
         r_medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
@@ -2106,12 +2255,14 @@ def build_top_picks_message(label: str, rockets: list[dict] | None = None) -> st
             + "\n<i>⚠️ Manual review — bot will NOT auto-buy these</i>"
         )
 
-    if not picks and not rockets:
+    if not picks and not penny_pick and not swing_pick and not rockets:
         return None
 
     return (
         f"📊 <b>LE GRINDER — {label}</b>\n\n"
         f"{picks_section}"
+        f"{penny_section}"
+        f"{swing_section}"
         f"{rocket_section}\n\n"
         f"📡 Futures : <b>{bias_emoji}</b>\n"
         f"<i>Le Grinder · NYSE/NASDAQ</i>"
@@ -2132,10 +2283,15 @@ def _send_top_picks(label: str) -> None:
         log(f"  Top picks échoué ({label}): {exc}")
 
 
-def _send_top_picks_with_rockets(label: str) -> None:
-    """Send combined top-3 + penny rockets in one Telegram message."""
+def _send_top_picks_with_rockets(
+    label: str,
+    fresh_picks: "list[GrinderPick] | None" = None,
+    penny_pick: "dict | None" = None,
+    swing_pick: "dict | None" = None,
+) -> None:
+    """Send combined top-3 + penny explosive + swing trade + penny rockets in one Telegram message."""
     try:
-        # Fetch cached rockets (don't re-scan — use last scan_state or rocket file)
+        # Load cached rockets (once-daily penny rocket scan)
         rockets: list[dict] = []
         try:
             if PENNY_ROCKET_FILE.exists():
@@ -2146,7 +2302,13 @@ def _send_top_picks_with_rockets(label: str) -> None:
         except Exception:
             pass
 
-        msg = build_top_picks_message(label, rockets=rockets if rockets else None)
+        msg = build_top_picks_message(
+            label,
+            rockets=rockets if rockets else None,
+            fresh_picks=fresh_picks,
+            penny_pick=penny_pick,
+            swing_pick=swing_pick,
+        )
         if msg:
             send_message(msg)
             log(f"  → Combined picks+rockets envoyés ({label}).")
