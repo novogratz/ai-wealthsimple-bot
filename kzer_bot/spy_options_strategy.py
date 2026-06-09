@@ -35,6 +35,7 @@ TARGET_PREMIUM_MIN   = 0.10   # minimum ask price
 TARGET_PREMIUM_MAX   = 0.60   # maximum ask price — AI picks best in this range
 TARGET_PREMIUM_MID   = 0.35   # fallback target when no contract is exactly in range
 MIN_OTM_STRIKES      = 3      # minimum strikes from ATM before starting the search
+MAX_OTM_STRIKES      = 8      # maximum strikes from ATM — never go further OTM than this
 MIN_PM_PCT           = 0.15   # minimum pre-market move to trade (skip flat days)
 PROFIT_TARGET_PCT    = 500.0  # +500% → close all (6x bagger — 0DTE can do 1000%+)
 PARTIAL_CLOSE_PCT    = 200.0  # +200% → sell half, let remaining half run free
@@ -279,9 +280,9 @@ def get_premarket_bias() -> PreMarketBias:
 
     reasons.append(f"  TOTAL SCORE: {score:+.1f}  ({'PUTS' if score < 0 else 'CALLS'})")
 
-    # ── Skip flat days (score near zero AND tiny gap) ─────────────────────────
+    # ── Skip flat days (score near zero AND tiny gap AND no strong regime bias) ─
     abs_pm = abs(spy_pm_pct)
-    if abs_pm < MIN_PM_PCT and abs(score) < 5:
+    if abs_pm < MIN_PM_PCT and abs(score) < 5 and abs(REGIME_BIAS) < 8:
         return PreMarketBias(
             direction="flat", fade_with="skip",
             pm_pct=spy_pm_pct, vix=vix,
@@ -393,9 +394,9 @@ def get_otm_contract(
 
         # Filter to OTM only (put = below ATM, call = above ATM), skip ATM and close-to-money
         if option_type == "put":
-            df = df[df["strike"] <= atm - MIN_OTM_STRIKES].sort_values("strike", ascending=False)
+            df = df[(df["strike"] <= atm - MIN_OTM_STRIKES) & (df["strike"] >= atm - MAX_OTM_STRIKES)].sort_values("strike", ascending=False)
         else:
-            df = df[df["strike"] >= atm + MIN_OTM_STRIKES].sort_values("strike", ascending=True)
+            df = df[(df["strike"] >= atm + MIN_OTM_STRIKES) & (df["strike"] <= atm + MAX_OTM_STRIKES)].sort_values("strike", ascending=True)
 
         if df.empty:
             return None
@@ -468,9 +469,9 @@ def get_otm_contracts_in_range(
         atm     = float(df.iloc[atm_idx]["strike"])
 
         if option_type == "put":
-            df = df[df["strike"] <= atm - MIN_OTM_STRIKES].sort_values("strike", ascending=False)
+            df = df[(df["strike"] <= atm - MIN_OTM_STRIKES) & (df["strike"] >= atm - MAX_OTM_STRIKES)].sort_values("strike", ascending=False)
         else:
-            df = df[df["strike"] >= atm + MIN_OTM_STRIKES].sort_values("strike", ascending=True)
+            df = df[(df["strike"] >= atm + MIN_OTM_STRIKES) & (df["strike"] <= atm + MAX_OTM_STRIKES)].sort_values("strike", ascending=True)
 
         def _ask(row) -> float:
             a = float(row.get("ask", 0) or 0)
