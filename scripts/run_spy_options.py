@@ -55,7 +55,7 @@ LOG_FILE  = ROOT / "data" / "options.log"
 _DRY_RUN: bool = False
 _keepalive_proc: "subprocess.Popen | None" = None
 _last_report_t: float = 0.0
-REPORT_INTERVAL_SECS = 30 * 60
+REPORT_INTERVAL_SECS = 15 * 60
 
 
 # ── Keepalive ─────────────────────────────────────────────────────────────────
