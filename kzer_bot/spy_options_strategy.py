@@ -31,11 +31,11 @@ def now_et() -> datetime:
 
 
 # ── Strategy parameters ──────────────────────────────────────────────────────
-TARGET_PREMIUM_MIN   = 0.15   # minimum ask price
+TARGET_PREMIUM_MIN   = 0.10   # minimum ask price
 TARGET_PREMIUM_MAX   = 0.60   # maximum ask price — AI picks best in this range
 TARGET_PREMIUM_MID   = 0.35   # fallback target when no contract is exactly in range
 MIN_OTM_STRIKES      = 3      # minimum strikes from ATM before starting the search
-MIN_PM_PCT           = 0.20   # minimum pre-market move to trade (skip flat days)
+MIN_PM_PCT           = 0.15   # minimum pre-market move to trade (skip flat days)
 PROFIT_TARGET_PCT    = 500.0  # +500% → close all (6x bagger — 0DTE can do 1000%+)
 PARTIAL_CLOSE_PCT    = 200.0  # +200% → sell half, let remaining half run free
 PARTIAL_TARGET_PCT   = 500.0  # second target for remaining half
@@ -50,6 +50,12 @@ ENTRY_MINUTE_START   = 45
 ENTRY_MINUTE_END     = 60     # if no entry by 10:00 → skip today
 MAX_VIX              = 40.0   # skip if market is panic-mode (VIX > 40)
 REVERSAL_CONFIRM_PCT = 0.05   # SPY must be pulling back this much from the open high/low to confirm fade
+
+# Regime bias: negative = lean bearish (prefer puts), positive = lean bullish (prefer calls).
+# Applied as an additive score offset. On flat/ambiguous gap days this is the deciding factor.
+# Magnitude guide: ±10 is a gentle tilt; ±20 overrides all but the largest gap signals.
+# Current: -12 → bearish regime (market overextended to the upside).
+REGIME_BIAS          = -12
 
 
 @dataclass
@@ -92,15 +98,62 @@ class OptionsPosition:
 
 # ── Pre-market direction ─────────────────────────────────────────────────────
 
+def _get_spy_rsi_daily() -> float:
+    """SPY 14-day RSI on daily closes. Returns 50 on failure (neutral)."""
+    try:
+        hist = yf.Ticker("SPY").history(period="30d", interval="1d")
+        if len(hist) < 15:
+            return 50.0
+        closes = hist["Close"].values.astype(float)
+        deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+        gains  = [max(d, 0) for d in deltas[-14:]]
+        losses = [max(-d, 0) for d in deltas[-14:]]
+        avg_g  = sum(gains) / 14
+        avg_l  = sum(losses) / 14
+        if avg_l == 0:
+            return 100.0
+        rs = avg_g / avg_l
+        return 100.0 - (100.0 / (1 + rs))
+    except Exception:
+        return 50.0
+
+
+def _get_spy_week_return(spy_prev_close: float) -> float:
+    """SPY 5-trading-day return (% from 5 sessions ago to yesterday close)."""
+    try:
+        hist = yf.Ticker("SPY").history(period="10d", interval="1d")
+        if len(hist) < 6:
+            return 0.0
+        close_5d_ago = float(hist["Close"].iloc[-6])
+        if close_5d_ago <= 0:
+            return 0.0
+        # Use spy_prev_close as yesterday close; fallback to last bar
+        yesterday = spy_prev_close if spy_prev_close > 0 else float(hist["Close"].iloc[-1])
+        return (yesterday - close_5d_ago) / close_5d_ago * 100
+    except Exception:
+        return 0.0
+
+
 def get_premarket_bias() -> PreMarketBias:
     """
-    Determine pre-market bias from SPY pre-market data + ES futures + VIX.
-    Call this at 9:00–9:30 AM ET before the open.
+    Multi-factor scoring to decide direction (puts vs calls) for today's 0DTE trade.
+
+    Score components (positive = lean calls/bullish, negative = lean puts/bearish):
+      1. Gap fade   — green gap → negative (fade up = puts); red gap → positive (fade down = calls)
+      2. RSI daily  — overbought (>65) → more negative; oversold (<35) → more positive
+      3. Weekly ext — SPY up big 5 days → more negative; down big → more positive
+      4. ES futures — fade the 1h ES trend too
+      5. VIX level  — high VIX → lean puts (fear = puts outperform)
+      6. REGIME_BIAS — user-set constant (currently bearish = -12)
+
+    Positive total → buy CALLS  |  Negative total → buy PUTS
+    On flat gaps (< MIN_PM_PCT), regime + technicals decide.
     """
     reasons: list[str] = []
-    spy_pm_pct    = 0.0
-    es_pct        = 0.0
-    vix           = 16.0
+    score          = 0.0
+    spy_pm_pct     = 0.0
+    es_pct         = 0.0
+    vix            = 16.0
     spy_prev_close = 0.0
     spy_pm_price   = 0.0
 
@@ -108,14 +161,12 @@ def get_premarket_bias() -> PreMarketBias:
     try:
         hist = yf.Ticker("SPY").history(period="3d", interval="5m", prepost=True)
         if not hist.empty:
-            # yesterday's regular-hours close
             rh = hist[hist.index.map(
                 lambda x: 9 <= x.hour < 16 if hasattr(x, "hour") else False
             )]
             if len(rh) >= 1:
                 spy_prev_close = float(rh["Close"].iloc[-1])
 
-            # latest pre-market price
             pm = hist[hist.index.map(
                 lambda x: (x.hour < 9 or (x.hour == 9 and x.minute < 30))
                 if hasattr(x, "hour") else False
@@ -123,7 +174,7 @@ def get_premarket_bias() -> PreMarketBias:
             if not pm.empty and spy_prev_close > 0:
                 spy_pm_price = float(pm["Close"].iloc[-1])
                 spy_pm_pct   = (spy_pm_price - spy_prev_close) / spy_prev_close * 100
-                reasons.append(f"SPY pre-market: {spy_pm_pct:+.2f}%  (${spy_prev_close:.2f} → ${spy_pm_price:.2f})")
+                reasons.append(f"SPY pre-market: {spy_pm_pct:+.2f}%  (${spy_prev_close:.2f} -> ${spy_pm_price:.2f})")
     except Exception as e:
         reasons.append(f"SPY PM data error: {e}")
 
@@ -131,9 +182,9 @@ def get_premarket_bias() -> PreMarketBias:
     try:
         es_hist = yf.Ticker("ES=F").history(period="2d", interval="5m", prepost=True)
         if len(es_hist) >= 12:
-            es_now   = float(es_hist["Close"].iloc[-1])
-            es_1h    = float(es_hist["Close"].iloc[-12])
-            es_pct   = (es_now - es_1h) / es_1h * 100
+            es_now  = float(es_hist["Close"].iloc[-1])
+            es_1h   = float(es_hist["Close"].iloc[-12])
+            es_pct  = (es_now - es_1h) / es_1h * 100
             reasons.append(f"ES futures 1h: {es_pct:+.2f}%")
     except Exception as e:
         reasons.append(f"ES data error: {e}")
@@ -147,7 +198,7 @@ def get_premarket_bias() -> PreMarketBias:
     except Exception as e:
         reasons.append(f"VIX error: {e}")
 
-    # ── Decision ──────────────────────────────────────────────────────────────
+    # ── Hard gates ────────────────────────────────────────────────────────────
     if vix > MAX_VIX:
         return PreMarketBias(
             direction="skip", fade_with="skip",
@@ -157,24 +208,95 @@ def get_premarket_bias() -> PreMarketBias:
             skip_reason=f"VIX {vix:.1f} > {MAX_VIX} — market in panic, skip today",
         )
 
+    # ── Scoring: 1. Gap fade (primary signal, max ~±30 pts) ──────────────────
+    # Green gap → market likely to pull back → puts → negative contribution
+    gap_pts = -spy_pm_pct * 25
+    score  += gap_pts
+    if abs(spy_pm_pct) >= 0.05:
+        reasons.append(f"  Gap fade: {gap_pts:+.1f} pts (PM {spy_pm_pct:+.2f}%)")
+
+    # ── Scoring: 2. RSI daily (max ±20 pts) ──────────────────────────────────
+    rsi = _get_spy_rsi_daily()
+    if rsi > 70:
+        rsi_pts = -20
+    elif rsi > 65:
+        rsi_pts = -12
+    elif rsi > 60:
+        rsi_pts = -6
+    elif rsi < 30:
+        rsi_pts = +20
+    elif rsi < 35:
+        rsi_pts = +12
+    elif rsi < 40:
+        rsi_pts = +6
+    else:
+        rsi_pts = 0
+    score += rsi_pts
+    reasons.append(f"  RSI(14): {rsi:.0f} -> {rsi_pts:+.0f} pts")
+
+    # ── Scoring: 3. Weekly extension (max ±15 pts) ───────────────────────────
+    week_ret = _get_spy_week_return(spy_prev_close)
+    if week_ret > 4.0:
+        wk_pts = -15
+    elif week_ret > 2.5:
+        wk_pts = -10
+    elif week_ret > 1.5:
+        wk_pts = -5
+    elif week_ret < -4.0:
+        wk_pts = +15
+    elif week_ret < -2.5:
+        wk_pts = +10
+    elif week_ret < -1.5:
+        wk_pts = +5
+    else:
+        wk_pts = 0
+    score += wk_pts
+    reasons.append(f"  Week return: {week_ret:+.1f}% -> {wk_pts:+.0f} pts")
+
+    # ── Scoring: 4. ES futures fade (max ±10 pts) ────────────────────────────
+    es_pts = -es_pct * 5
+    score += es_pts
+    if abs(es_pts) >= 1.0:
+        reasons.append(f"  ES fade: {es_pts:+.1f} pts")
+
+    # ── Scoring: 5. VIX level (max ±10 pts) ──────────────────────────────────
+    if vix > 25:
+        vix_pts = -10
+    elif vix > 20:
+        vix_pts = -5
+    elif vix < 12:
+        vix_pts = +5
+    else:
+        vix_pts = 0
+    score += vix_pts
+    if vix_pts != 0:
+        reasons.append(f"  VIX {vix:.1f}: {vix_pts:+.0f} pts")
+
+    # ── Scoring: 6. Regime bias constant ─────────────────────────────────────
+    score += REGIME_BIAS
+    regime_label = "bearish" if REGIME_BIAS < 0 else "bullish" if REGIME_BIAS > 0 else "neutral"
+    reasons.append(f"  Regime bias: {REGIME_BIAS:+.0f} pts ({regime_label})")
+
+    reasons.append(f"  TOTAL SCORE: {score:+.1f}  ({'PUTS' if score < 0 else 'CALLS'})")
+
+    # ── Skip flat days (score near zero AND tiny gap) ─────────────────────────
     abs_pm = abs(spy_pm_pct)
-    if abs_pm < MIN_PM_PCT:
+    if abs_pm < MIN_PM_PCT and abs(score) < 5:
         return PreMarketBias(
             direction="flat", fade_with="skip",
             pm_pct=spy_pm_pct, vix=vix,
             spy_prev_close=spy_prev_close, spy_pm_price=spy_pm_price,
             es_pct=es_pct, reasons=reasons,
-            skip_reason=f"SPY pre-market move {abs_pm:.2f}% < {MIN_PM_PCT:.2f}% minimum — flat open, skip",
+            skip_reason=f"Score {score:+.1f} + PM {abs_pm:.2f}% — too ambiguous, skip today",
         )
 
-    if spy_pm_pct > 0:
-        direction = "green"
-        fade_with = "put"     # fade the green → buy puts
-        reasons.append(f"→ GREEN pre-market → fading with OTM PUTS")
-    else:
-        direction = "red"
-        fade_with = "call"    # fade the red → buy calls
-        reasons.append(f"→ RED pre-market → fading with OTM CALLS")
+    # ── Direction decision ────────────────────────────────────────────────────
+    fade_with = "put" if score < 0 else "call"
+    direction = "green" if spy_pm_pct > 0 else "red" if spy_pm_pct < 0 else "flat"
+    reasons.append(
+        f"-> {'GREEN' if spy_pm_pct >= 0 else 'RED'} PM + score {score:+.1f} "
+        f"-> {'OTM PUTS' if fade_with == 'put' else 'OTM CALLS'}"
+    )
 
     return PreMarketBias(
         direction=direction, fade_with=fade_with,

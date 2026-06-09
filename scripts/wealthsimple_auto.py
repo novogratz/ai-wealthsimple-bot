@@ -1324,19 +1324,41 @@ def _dismiss_options_overlays(page) -> None:
         except Exception:
             continue
 
-    # 2. 'Build a trade with AI' modal dismiss
-    for dismiss_text in ["Maybe later", "Maybe Later", "No thanks", "Not now"]:
+    # 2. 'Build a trade with AI' modal + 'Add money' / 'Fund your account' modals
+    for dismiss_text in ["Maybe later", "Maybe Later", "No thanks", "Not now", "Skip", "Dismiss", "Close"]:
         try:
             btn = page.get_by_text(dismiss_text, exact=True).first
             if btn.is_visible(timeout=600):
                 btn.click()
                 page.wait_for_timeout(500)
-                print(f"  Dismissed AI modal via: '{dismiss_text}'")
+                print(f"  Dismissed modal via: '{dismiss_text}'")
                 break
         except Exception:
             continue
 
-    # 3. Any remaining × / Close buttons in the upper-right area of the screen
+    # 3. 'Add money' deposit modal — dismiss via its own close button
+    page.evaluate("""
+        () => {
+            const addMoneyTexts = ['add money', 'make a deposit', 'fund your account', 'deposit funds'];
+            const modals = [...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [class*="modal" i], [class*="Modal" i]')];
+            for (const modal of modals) {
+                const txt = (modal.textContent || '').toLowerCase();
+                if (!addMoneyTexts.some(t => txt.includes(t))) continue;
+                // Find and click the close/dismiss button inside the modal
+                const closeBtn = modal.querySelector(
+                    '[aria-label*="close" i], [aria-label*="dismiss" i], button[class*="close" i]'
+                );
+                if (closeBtn) { closeBtn.click(); return; }
+                // Fall back to any × or Cancel button
+                const btns = [...modal.querySelectorAll('button')];
+                const skipBtn = btns.find(b => /maybe later|not now|skip|cancel|close|dismiss/i.test(b.textContent));
+                if (skipBtn) { skipBtn.click(); }
+            }
+        }
+    """)
+    page.wait_for_timeout(300)
+
+    # 4. Any remaining × / Close buttons in the upper-right area of the screen
     page.evaluate("""
         () => {
             const closeSymbols = new Set(['×', '✕', '✖', '⨯']);
@@ -1498,6 +1520,9 @@ def place_option_order(page, side: str, n_contracts: int, confirm: bool) -> dict
     """
     result: dict = {"side": side, "submitted": False}
 
+    # Kill popups before interacting with the ticket
+    _dismiss_options_overlays(page)
+
     # The ticket appears as a bottom drawer — scroll to the bottom to reach it
     print("Scrolling to options ticket drawer...")
     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -1561,6 +1586,7 @@ def place_option_order(page, side: str, n_contracts: int, confirm: bool) -> dict
         pass
 
     if confirm:
+        _dismiss_options_overlays(page)  # panel often reopens on the review page
         submitted_via_js = page.evaluate("""
             () => {
                 // NOTE: 'Queue order' is intentionally excluded — that means
@@ -1645,6 +1671,136 @@ def cmd_buy_option(args) -> None:
         sys.exit(1)
 
 
+def sell_option_from_portfolio(
+    page,
+    option_type: str,
+    strike: float,
+    n_contracts: int,
+    confirm: bool,
+) -> dict:
+    """
+    Sell an existing options position via the SPY stock portfolio page.
+
+    Flow (mirrors the stock sell UX):
+      1. Navigate to SPY stock page (not the options chain)
+      2. Dismiss all overlays
+      3. Find the open option position card in the holdings section
+         (WS shows options positions on the underlying stock page)
+      4. Click the position → the sell ticket/drawer opens
+      5. Fill contracts + submit (reuses place_option_order)
+
+    Falls back to the options-chain Bid(Sell) approach if the position card
+    cannot be found on the stock page.
+    """
+    strike_int = int(strike)
+    type_lower = option_type.lower()
+
+    print(f"Navigating to SPY stock page to close {option_type.upper()} ${strike_int} position...")
+    page = navigate_to_stock(page, "SPY")
+    page.wait_for_timeout(2500)
+    _dismiss_options_overlays(page)
+    snap(page, "sell_option_portfolio_page")
+
+    def _find_and_click_position() -> str:
+        return page.evaluate(f"""
+            () => {{
+                const strikeStr = '{strike_int}';
+                const typeStr   = '{type_lower}';
+
+                // Walk all elements looking for one that mentions both the strike and option type.
+                // WS positions appear in cards/list rows — prioritise clickable elements and
+                // containers whose class name hints at 'position', 'holding', or 'contract'.
+                const all = [...document.querySelectorAll('button, [role="button"], a, li, div, article, section')];
+
+                let bestEl = null;
+                let bestScore = 0;
+
+                for (const el of all) {{
+                    const txt  = (el.textContent || '').toLowerCase();
+                    if (!txt.includes(strikeStr) || !txt.includes(typeStr)) continue;
+
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width < 30 || rect.height < 12) continue;
+
+                    const tag   = el.tagName.toLowerCase();
+                    const role  = (el.getAttribute('role') || '').toLowerCase();
+                    const cls   = (el.className || '').toLowerCase();
+
+                    let s = 1;
+                    if (tag === 'button' || role === 'button') s += 5;
+                    if (tag === 'a'      || role === 'link')   s += 4;
+                    if (/position|holding|contract|portfolio/i.test(cls)) s += 3;
+                    if (rect.height > 30 && rect.height < 200) s += 2;  // reasonable card height
+
+                    if (s > bestScore) {{ bestScore = s; bestEl = el; }}
+                }}
+
+                if (bestEl) {{
+                    bestEl.click();
+                    return 'clicked:' + bestEl.tagName + ':score=' + bestScore;
+                }}
+                return 'not_found';
+            }}
+        """)
+
+    # First attempt
+    click_result = _find_and_click_position()
+    print(f"  Position search: {click_result}")
+
+    if click_result == "not_found":
+        # Scroll down and retry — position may be below the fold
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(1200)
+        click_result = _find_and_click_position()
+        print(f"  Position search (after scroll): {click_result}")
+
+    if click_result == "not_found":
+        snap(page, "sell_option_portfolio_not_found")
+        print(
+            f"  [WARN] Position ${strike_int} {option_type.upper()} not found on SPY stock page — "
+            f"falling back to options chain Bid(Sell) approach"
+        )
+        # Fallback: use options chain — navigate chain and click Bid(Sell) button
+        page = navigate_to_spy_options(page)
+        # Click the Bid(Sell) button = FIRST price button in the strike row
+        snap(page, "sell_option_chain_fallback")
+        found = page.evaluate(f"""
+            () => {{
+                const strikeLabel = '${strike_int}';
+                const strikeEl = [...document.querySelectorAll('*')].find(el => {{
+                    const txt = (el.textContent || '').trim();
+                    return txt === strikeLabel && el.children.length === 0;
+                }});
+                if (!strikeEl) return false;
+                let row = strikeEl.parentElement;
+                for (let i = 0; i < 10; i++) {{
+                    if (!row) return false;
+                    const priceBtns = [...row.querySelectorAll('button')].filter(
+                        b => /^\\$[0-9]/.test((b.textContent || '').trim())
+                    );
+                    if (priceBtns.length >= 2) {{
+                        priceBtns[0].click();  // FIRST button = Bid(Sell)
+                        return true;
+                    }}
+                    row = row.parentElement;
+                }}
+                return false;
+            }}
+        """)
+        if not found:
+            raise RuntimeError(
+                f"Could not find ${strike_int} {option_type.upper()} on stock page or options chain — "
+                f"see data/screen_sell_option_portfolio_not_found.png"
+            )
+        page.wait_for_timeout(2000)
+
+    else:
+        page.wait_for_timeout(2000)
+
+    snap(page, "sell_option_ticket_opened")
+    return place_option_order(page, "sell", n_contracts, confirm)
+
+
 def cmd_sell_option(args) -> None:
     from playwright.sync_api import sync_playwright
 
@@ -1658,15 +1814,13 @@ def cmd_sell_option(args) -> None:
         with sync_playwright() as p:
             ctx, page = open_browser(p)
             try:
-                page = navigate_to_spy_options(page)
-                select_option_expiry(page, args.expiry)
-                found = find_and_click_option_contract(page, args.option_type, float(args.strike))
-                if not found:
-                    raise RuntimeError(
-                        f"Contract not found: {args.option_type.upper()} ${args.strike} "
-                        f"exp {args.expiry} — see screenshots in data/"
-                    )
-                result = place_option_order(page, "sell", args.contracts, confirm=args.confirm)
+                result = sell_option_from_portfolio(
+                    page,
+                    args.option_type,
+                    float(args.strike),
+                    args.contracts,
+                    confirm=args.confirm,
+                )
                 result.update({
                     "symbol": args.symbol, "option_type": args.option_type,
                     "strike": args.strike, "expiry": args.expiry,

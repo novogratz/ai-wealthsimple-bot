@@ -53,6 +53,28 @@ POS_FILE  = ROOT / "data" / "options_position.json"
 LOG_FILE  = ROOT / "data" / "options.log"
 
 _DRY_RUN: bool = False
+_keepalive_proc: "subprocess.Popen | None" = None
+_last_report_t: float = 0.0
+REPORT_INTERVAL_SECS = 30 * 60
+
+
+# ── Keepalive ─────────────────────────────────────────────────────────────────
+
+def _start_keepalive() -> None:
+    """Launch wealthsimple_auto.py keepalive as a background daemon.
+    Refreshes the WS Edge session every 2 min so it never expires mid-session."""
+    global _keepalive_proc
+    if _DRY_RUN:
+        return
+    try:
+        _keepalive_proc = subprocess.Popen(
+            [PYTHON, str(AUTO), "keepalive"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        log(f"[keepalive] Started (PID {_keepalive_proc.pid}) — refreshing WS session every 2 min")
+    except Exception as exc:
+        log(f"[keepalive] Failed to start: {exc}")
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -264,17 +286,71 @@ def execute_sell_option(contract: OptionContract, n_contracts: int) -> bool:
     return result.returncode == 0
 
 
+# ── Telegram report messages ──────────────────────────────────────────────────
+
+def _plan_report_msg(bias: "PreMarketBias", today: str, mins_to_entry: int) -> str:
+    direction_emoji = "🔴" if bias.fade_with == "put" else "🟢"
+    from kzer_bot.spy_options_strategy import REGIME_BIAS, TARGET_PREMIUM_MIN, TARGET_PREMIUM_MAX
+    regime_label = "bearish" if REGIME_BIAS < 0 else "bullish" if REGIME_BIAS > 0 else "neutral"
+    lines = [
+        f"📊 <b>0DTE SPY OPTIONS | {today} | {'DRY RUN' if _DRY_RUN else 'LIVE'}</b>",
+        f"{direction_emoji} <b>Playing {bias.fade_with.upper()}S today</b> (gap-fade + {regime_label} regime)",
+        f"   SPY PM: {bias.pm_pct:+.2f}%  VIX: {bias.vix:.1f}  ES 1h: {bias.es_pct:+.2f}%",
+        f"   Strike range: ${TARGET_PREMIUM_MIN:.2f}–${TARGET_PREMIUM_MAX:.2f} ask | 3+ strikes OTM",
+        f"   Entry window: 9:45–10:00 AM ET",
+        f"   Exits: +200% half close → +500% full | Noon hard close | 3:45 PM nuclear",
+    ]
+    if mins_to_entry > 0:
+        lines.append(f"   ⏰ {mins_to_entry} min to entry window")
+    return "\n".join(lines)
+
+
+def _position_report_msg(pos: "OptionsPosition", current_mid: float) -> str:
+    n   = now_et()
+    pnl_pct = (current_mid - pos.entry_premium) / pos.entry_premium * 100 if pos.entry_premium > 0 else 0.0
+    pnl_usd = (current_mid - pos.entry_premium) * pos.contracts * 100
+    noon    = n.replace(hour=12, minute=0, second=0, microsecond=0)
+    mins_to_noon = max(int((noon - n).total_seconds() / 60), 0)
+    trend_emoji = "📈" if pnl_pct > 5 else "📉" if pnl_pct < -5 else "⚡"
+    direction_emoji = "🔴" if pos.contract.option_type == "put" else "🟢"
+    from kzer_bot.spy_options_strategy import PROFIT_TARGET_PCT, PARTIAL_CLOSE_PCT
+    lines = [
+        f"{direction_emoji}{trend_emoji} <b>SPY ${int(pos.contract.strike)} {pos.contract.option_type.upper()} 0DTE</b>",
+        f"   Entry: ${pos.entry_premium:.2f}  Now: ${current_mid:.2f}",
+        f"   P&L: <b>{pnl_pct:+.0f}%</b> / ${pnl_usd:+.0f}",
+        f"   Contracts: {pos.contracts}  Cost basis: ${pos.cost_basis:.0f}",
+    ]
+    if pos.partial_closed:
+        lines.append(f"   ✅ Partial close taken at +{PARTIAL_CLOSE_PCT:.0f}%")
+        lines.append(f"   Next target: +{PROFIT_TARGET_PCT:.0f}% (${pos.entry_premium * (1 + PROFIT_TARGET_PCT / 100):.2f}/contract)")
+    else:
+        lines.append(f"   Partial at +{PARTIAL_CLOSE_PCT:.0f}% → full at +{PROFIT_TARGET_PCT:.0f}%")
+    lines.append(f"   ⏰ Noon close in {mins_to_noon} min")
+    return "\n".join(lines)
+
+
 # ── Timing helpers ────────────────────────────────────────────────────────────
 
-def _sleep_until(hour: int, minute: int, label: str) -> None:
+def _sleep_until(hour: int, minute: int, label: str, period_fn=None) -> None:
+    """Sleep until hour:minute ET. Calls period_fn(mins_left) every REPORT_INTERVAL_SECS if provided."""
+    global _last_report_t
     while True:
         n = now_et()
         if n.hour > hour or (n.hour == hour and n.minute >= minute):
             return
         target = n.replace(hour=hour, minute=minute, second=0, microsecond=0)
         secs   = max((target - n).total_seconds(), 1)
-        log(f"Waiting for {hour:02d}:{minute:02d} ET ({label}) — {int(secs / 60)} min left")
-        time.sleep(min(secs, 300))
+        mins   = int(secs / 60)
+
+        if period_fn and time.time() - _last_report_t >= REPORT_INTERVAL_SECS:
+            try:
+                period_fn(mins)
+            except Exception:
+                pass
+            _last_report_t = time.time()
+
+        log(f"Waiting for {hour:02d}:{minute:02d} ET ({label}) — {mins} min left")
+        time.sleep(min(secs, 60))
 
 
 def _past_cutoff() -> bool:
@@ -285,12 +361,15 @@ def _past_cutoff() -> bool:
 # ── Hold loop ─────────────────────────────────────────────────────────────────
 
 def hold_loop(pos: OptionsPosition) -> None:
+    global _last_report_t
+    direction_emoji = "🔴" if pos.contract.option_type == "put" else "🟢"
     notify(
-        f"POSITION OPEN | SPY ${pos.contract.strike:.0f} "
+        f"{direction_emoji} <b>BOUGHT</b> | SPY ${int(pos.contract.strike)} "
         f"{pos.contract.option_type.upper()} 0DTE | "
         f"entry ${pos.entry_premium:.2f} | "
         f"{pos.contracts} contract(s) | cost ${pos.cost_basis:.0f}"
     )
+    _last_report_t = time.time()
 
     while True:
         time.sleep(60)
@@ -299,6 +378,11 @@ def hold_loop(pos: OptionsPosition) -> None:
         if current_mid <= 0:
             log("Could not refresh option mid — retrying next cycle")
             continue
+
+        # 30-min position update to Telegram
+        if time.time() - _last_report_t >= REPORT_INTERVAL_SECS:
+            notify(_position_report_msg(pos, current_mid))
+            _last_report_t = time.time()
 
         action, reason = check_exit(pos, current_mid)
         pnl_pct = (current_mid - pos.entry_premium) / pos.entry_premium * 100
@@ -318,10 +402,13 @@ def hold_loop(pos: OptionsPosition) -> None:
                 pos.partial_closed = True
                 save_position(pos)
                 notify(
-                    f"PARTIAL CLOSE | {half} contract(s) @ ${current_mid:.2f} | "
-                    f"P&L: {pnl_pct:+.0f}% / ${pnl_usd:+.0f} | "
-                    f"{remaining} remaining | {reason}"
+                    f"✅ <b>PARTIAL CLOSE</b> | SPY ${int(pos.contract.strike)} "
+                    f"{pos.contract.option_type.upper()} | "
+                    f"{half} contract(s) @ ${current_mid:.2f} | "
+                    f"<b>P&L: {pnl_pct:+.0f}% / ${pnl_usd:+.0f}</b> | "
+                    f"{remaining} contracts riding free | {reason}"
                 )
+                _last_report_t = time.time()
             else:
                 log("[WARN] Partial sell failed — retrying next cycle")
             continue
@@ -329,9 +416,12 @@ def hold_loop(pos: OptionsPosition) -> None:
         if action == "close_all":
             ok = execute_sell_option(pos.contract, pos.contracts)
             if ok:
+                result_emoji = "🚀" if pnl_pct > 100 else "✅" if pnl_pct > 0 else "🔻"
                 notify(
-                    f"CLOSED | {pos.contracts} contract(s) @ ${current_mid:.2f} | "
-                    f"P&L: {pnl_pct:+.0f}% / ${pnl_usd:+.0f} | {reason}"
+                    f"{result_emoji} <b>CLOSED</b> | SPY ${int(pos.contract.strike)} "
+                    f"{pos.contract.option_type.upper()} | "
+                    f"{pos.contracts} contract(s) @ ${current_mid:.2f} | "
+                    f"<b>P&L: {pnl_pct:+.0f}% / ${pnl_usd:+.0f}</b> | {reason}"
                 )
                 clear_position()
                 return
@@ -369,15 +459,16 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
         notify(f"SKIP TODAY: {bias.skip_reason}")
         return
 
-    notify(
-        f"PRE-MARKET BIAS: {bias.direction.upper()} ({bias.pm_pct:+.2f}%) "
-        f"→ fade with {bias.fade_with.upper()}S | "
-        f"VIX {bias.vix:.1f} | ES {bias.es_pct:+.2f}%"
-    )
+    # Send initial game plan to Telegram
+    notify(_plan_report_msg(bias, today, 0))
 
-    # ── Wait for 9:45 AM entry window ─────────────────────────────────────────
+    # ── Wait for 9:45 AM entry window — resend plan every 30 min ─────────────
     if not now_flag:
-        _sleep_until(ENTRY_HOUR, ENTRY_MINUTE_START, "entry window 9:45 AM")
+        _sleep_until(
+            ENTRY_HOUR, ENTRY_MINUTE_START,
+            "entry window 9:45 AM",
+            period_fn=lambda mins: notify(_plan_report_msg(bias, today, mins)),
+        )
 
     if _past_cutoff():
         notify(f"MISSED ENTRY WINDOW ({now_et().strftime('%H:%M')} ET) — skip today")
@@ -473,6 +564,9 @@ def main() -> None:
     _DRY_RUN = args.dry
     if _DRY_RUN:
         log("[DRY RUN] No orders will be placed — strategy logic only")
+
+    # Keep the WS browser session alive throughout the entire options session
+    _start_keepalive()
 
     # Wait for 9:00 AM before starting bias detection
     if not args.now:

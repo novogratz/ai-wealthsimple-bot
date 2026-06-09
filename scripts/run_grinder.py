@@ -4116,6 +4116,14 @@ def _run_paper_screener(balance: float) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    # ── OPTIONS MODE (switched 2026-06-09) ────────────────────────────────────
+    # Delegating to 0DTE SPY options bot. --now and --balance pass through.
+    # To revert to stock trading, remove this block.
+    _opts_script = ROOT / "scripts" / "run_spy_options.py"
+    result = subprocess.run([PYTHON, str(_opts_script)] + sys.argv[1:], cwd=ROOT)
+    sys.exit(result.returncode)
+    # ── END OPTIONS MODE ─────────────────────────────────────────────────────
+
     parser = argparse.ArgumentParser(
         description="Le Grinder — 1 trade/day, no stop, 3:55 PM exit"
     )
