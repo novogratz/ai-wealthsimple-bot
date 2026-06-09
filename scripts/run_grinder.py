@@ -85,6 +85,7 @@ _last_rapport_t: float = 0.0
 _last_combined_t: float = 0.0          # timestamp of last combined report send
 _REPORT_INTERVAL_SECS = 30 * 60        # every 30 minutes
 _intraday_rotation_signal: "tuple[str, float] | None" = None  # (top1_sym, gap) set by combined report
+_last_rotation_t: float = 0.0  # epoch time of last intraday rotation — 60-min cooldown guard
 
 
 def _dynamic_profit_target(atr_pct: float) -> float:
@@ -113,6 +114,7 @@ def _filter_extended_at_buy(picks: list) -> "GrinderPick":
     return picks[0]
 _TRAILING_STOP_TRIGGER_PCT  = 2.0  # activate trailing stop at +2.0%
 _TRAILING_STOP_DISTANCE_PCT = 1.0  # trail by 1.0% from peak
+_PARTIAL_SELL_PCT           = 0.50 # sell this fraction of shares when halfway to profit target
 
 # ── After-hours / extended-hours trading ──────────────────────────────────────
 _AH_BUY_START_HOUR  = 16   # 4:00 PM ET — AH buy window opens
@@ -2079,19 +2081,31 @@ def _combined_report() -> None:
             _top1_sym   = fresh_picks[0].symbol if fresh_picks else "?"
             _rank_str   = f"#{_held_rank}" if _held_rank else "outside top 10"
             if _held_score == 0 or _gap > _HOLD_SCORE_GAP:
-                global _intraday_rotation_signal
+                global _intraday_rotation_signal, _last_rotation_t
                 if _is_market_hours() and _top1_sym != current_sym:
-                    # During market hours: flag for immediate rotation (no fees)
-                    _intraday_rotation_signal = (_top1_sym, _gap)
-                    try:
-                        notify(
-                            f"🔄 <b>Intraday rotation signal — <code>{current_sym}</code> → <code>{_top1_sym}</code></b>\n\n"
-                            f"📊 Score gap: <b>{_gap:.1f} pts</b>  "
-                            f"({current_sym} {_held_score:.0f} vs {_top1_sym} {_top1_score:.0f})\n"
-                            f"⚡ Rotating now — zero fees"
-                        )
-                    except Exception:
-                        pass
+                    _mins_since_rot = int((time.time() - _last_rotation_t) / 60)
+                    if _last_rotation_t > 0 and _mins_since_rot < 60:
+                        # Cooldown: don't whipsaw if we rotated < 60 min ago
+                        try:
+                            notify(
+                                f"⏳ <b>Score gap >{_HOLD_SCORE_GAP:.0f} pts but rotation on cooldown</b>\n\n"
+                                f"📊 {current_sym} {_held_score:.0f} vs {_top1_sym} {_top1_score:.0f}  (gap {_gap:.1f})\n"
+                                f"🕐 Last rotation: {_mins_since_rot} min ago — next window in {60 - _mins_since_rot} min"
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        # During market hours: flag for immediate rotation (no fees)
+                        _intraday_rotation_signal = (_top1_sym, _gap)
+                        try:
+                            notify(
+                                f"🔄 <b>Intraday rotation signal — <code>{current_sym}</code> → <code>{_top1_sym}</code></b>\n\n"
+                                f"📊 Score gap: <b>{_gap:.1f} pts</b>  "
+                                f"({current_sym} {_held_score:.0f} vs {_top1_sym} {_top1_score:.0f})\n"
+                                f"⚡ Rotating now — zero fees"
+                            )
+                        except Exception:
+                            pass
                 else:
                     # Outside market hours: alert only, will decide at 3:55 PM / 9:45 AM
                     try:
@@ -3409,6 +3423,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
     strat  = pos.get("strategyName", "")
     # ATR-adaptive profit target — falls back to module default if not saved
     _profit_target_pct = float(pos.get("profitTargetPct", _PROFIT_TARGET_PCT))
+    _partial_sold = bool(pos.get("partialSold", False))
 
     if shares < 0.01 and cost > 0 and entry > 0:
         shares = cost / entry
@@ -3528,7 +3543,11 @@ def hold_and_sell(balance: float = 0.0) -> None:
             # 4 PM daily quant summary (Mon–Fri only)
             if "daily_report" not in _scanned and cur.hour >= 16 and cur.weekday() < 5:
                 _scanned.add("daily_report")
-                log("4:00 PM — rapport live actif, daily summary ignoré.")
+                try:
+                    log("4:00 PM — sending daily quant summary...")
+                    notify(build_daily_report())
+                except Exception as _dr_exc:
+                    log(f"Daily report error: {_dr_exc}")
 
             # 5 PM preview scan disabled — combined report covers this
 
@@ -3754,6 +3773,45 @@ def hold_and_sell(balance: float = 0.0) -> None:
                 
                 max_pnl_pct = (max_price - entry) / entry * 100 if entry > 0 else 0
 
+                # 0. Partial profit booking: sell half at the halfway point
+                _partial_trigger = _profit_target_pct / 2
+                if not _partial_sold and pnl_pct >= _partial_trigger:
+                    _half_qty = round(shares * _PARTIAL_SELL_PCT, 4)
+                    log(f"PARTIAL SELL: {pnl_pct:+.1f}% ≥ halfway target +{_partial_trigger:.1f}% — selling {_half_qty:.4f} sh")
+                    notify(
+                        f"💰 <b>PARTIAL SELL — <code>{symbol}</code></b>\n\n"
+                        f"📈 Up <b>{pnl_pct:+.1f}%</b>  |  Halfway to +{_profit_target_pct:.1f}% target\n"
+                        f"🔢 Selling <b>{_half_qty:.4f} sh</b> (50% of position) @ ${price:.2f}\n"
+                        f"🎯 Remaining <b>{shares - _half_qty:.4f} sh</b> runs to +{_profit_target_pct:.1f}%"
+                    )
+                    _ps_result = subprocess.run(
+                        [PYTHON, str(AUTO_SCRIPT), "sell", "--symbol", symbol, "--shares", f"{_half_qty:.4f}"],
+                        capture_output=True, text=True, timeout=180,
+                    )
+                    _ps_ok = _ps_result.returncode == 0 or _parse_order_result(_ps_result.stdout).get("submitted")
+                    if _ps_ok:
+                        _half_cost     = cost * _PARTIAL_SELL_PCT
+                        _half_proceeds = _half_qty * price
+                        _half_pnl      = _half_proceeds - _half_cost
+                        _record_trade(symbol, _half_cost, _half_proceeds, _half_qty)
+                        _append_trade_history(symbol, "PARTIAL SELL", price, _half_qty, _half_cost, _half_pnl, strat)
+                        shares        -= _half_qty
+                        cost          *= (1 - _PARTIAL_SELL_PCT)
+                        _partial_sold  = True
+                        if POS_FILE.exists():
+                            _pos_u = json.loads(POS_FILE.read_text())
+                            _pos_u["shares"]        = shares
+                            _pos_u["estimatedCost"] = cost
+                            _pos_u["partialSold"]   = True
+                            POS_FILE.write_text(json.dumps(_pos_u, indent=2))
+                        notify(
+                            f"✅ <b>Partial sell complete — half locked in</b>\n\n"
+                            f"💵 Realized: <b>${_half_pnl:+.2f}</b> on half position\n"
+                            f"🎯 Letting <b>{shares:.4f} sh</b> run to +{_profit_target_pct:.1f}%"
+                        )
+                    else:
+                        log("Partial sell order failed — holding full position, will retry next cycle")
+
                 # 1. Hard Profit Target (ATR-adaptive)
                 if pnl_pct >= _profit_target_pct:
                     log(f"PROFIT TARGET: {pnl_pct:+.1f}% ≥ +{_profit_target_pct:.1f}% — selling now")
@@ -3794,7 +3852,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
         _combined_report()
 
         # Intraday rotation: execute immediately if combined report flagged a gap
-        global _intraday_rotation_signal
+        global _intraday_rotation_signal, _last_rotation_t
         if _intraday_rotation_signal is not None:
             _rot_sym, _rot_gap = _intraday_rotation_signal
             _intraday_rotation_signal = None
@@ -3814,6 +3872,7 @@ def hold_and_sell(balance: float = 0.0) -> None:
                         f"⏰ Too late to re-buy today — AH scan at 4 PM"
                     )
                 _execute_sell_order(symbol, entry, shares, cost, strat, "Intraday Rotation")
+                _last_rotation_t = time.time()
             except Exception as _exc:
                 log(f"Intraday rotation execution failed: {_exc}")
                 _intraday_rotation_signal = None
@@ -3902,6 +3961,15 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
 
         # Once-daily penny rocket alert at 7 AM
         _maybe_send_penny_rockets(scans_done)
+
+        # 4 PM daily quant summary (Mon–Fri only)
+        if "daily_report" not in scans_done and now.weekday() < 5 and now.hour >= 16:
+            scans_done.add("daily_report")
+            try:
+                log("4:00 PM — sending daily quant summary...")
+                notify(build_daily_report())
+            except Exception as _dr_exc:
+                log(f"Daily report error: {_dr_exc}")
 
         # 4-8 PM after-hours buy — Rule: no idle cash in AH window
         if "ah" not in scans_done and _is_afterhours_window() and not POS_FILE.exists():

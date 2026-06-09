@@ -98,10 +98,12 @@ Market regime gate: SPY×VIX combined multiplier (0.55–1.12)
 - **Zero Idle Cash:** Always deployed (PM → Intraday → AH → Overnight)
 - **Hold Threshold:** `_HOLD_SCORE_GAP = 25.0` — hold while `held_score ≥ top1_score − 25`
 - **Intraday Rotation:** Every 30 min scan; if gap > 25 pts during market hours (9:35–3:30 PM) → sell immediately & buy top 1
+- **Rotation Cooldown:** `_last_rotation_t` guard — no re-rotation within 60 min of last rotation (prevents whipsaw)
 - **Late-Day Guard:** Rotation after 3:20 PM → execute sell but skip re-buy (AH handles at 4 PM)
 - **3:55 PM Rank Check:** If gap > 25 pts → sell; if still within threshold → hold overnight
 - **9:45 AM Morning Check:** Rank check 10 min after open to skip noise; sell + buy new top 1 if gap > 25 pts
-- **Hard Target:** +10% unrealized profit → sell immediately & rotate
+- **Partial Profit Booking:** At 50% of profit target (`_PARTIAL_SELL_PCT = 0.50`) → sell half; remaining shares run to full target
+- **Hard Target:** Full profit target hit → sell all remaining shares & rotate
 - **Trailing Stop:** Triggered at +2%, 1% trail distance
 
 ### Extended Hours Rules
@@ -136,6 +138,7 @@ Every 30 minutes during market hours, Telegram sends:
 | 3:20 PM | Late rotation guard — sell rotations after this skip re-buy |
 | 3:30 PM | Last entry cutoff for intraday rotation |
 | 3:55 PM | Rank check — sell if gap > 25 pts, hold overnight if still in range |
+| 4:00 PM | Daily quant summary → Telegram (today's P&L, trades, W/L, all-time stats) |
 | 4:00 PM | After-hours scan (SmartGrinderStrategy) → limit buy top < $10 mover |
 | 5:00 PM | Next-day preview scan |
 
@@ -192,7 +195,9 @@ run_grinder.py
 
 Key state globals in `run_grinder.py`:
 - `_HOLD_SCORE_GAP = 25.0` — rotate when gap between held score and top-1 exceeds this
+- `_PARTIAL_SELL_PCT = 0.50` — fraction of shares sold at halfway to profit target
 - `_intraday_rotation_signal` — set by `_combined_report()`, consumed by `hold_and_sell()` daytime loop
+- `_last_rotation_t` — epoch time of last rotation; prevents re-rotation within 60 min
 - `_is_market_hours()` — True from 9:35 AM to 3:30 PM ET Mon–Fri
 
 Data flows: WATCHLIST → scan (SmartGrinderStrategy + live gap enrichment) → earnings/squeeze enrichment → AI analysis → game plan Telegram → buy order → position file → 30-min rescan + top-3 alert → rank-based rotation or sell → P&L ledger + CSV.
@@ -207,3 +212,4 @@ Data flows: WATCHLIST → scan (SmartGrinderStrategy + live gap enrichment) → 
 - Do not put credentials directly in code — always use `.env`
 - Do not append `.TO` or `.V` to tickers — this bot trades US stocks only
 - Do not add `_LATE_LOCK_PCT` or `_MIN_SMART_HOLD_SCORE` back — these constants were removed; rank-based logic replaces them
+- Do not remove the 60-min rotation cooldown — it prevents whipsaw on oscillating borderline scores
