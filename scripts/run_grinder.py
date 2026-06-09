@@ -4036,6 +4036,82 @@ def wait_overnight(bias: FuturesBias, scans_done: set[str],
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Paper screener (--paper flag — no trading, full 12-signal scan every 30 min)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _run_paper_screener(balance: float) -> None:
+    """
+    Paper screener mode — Wealthsimple disabled, no trades executed.
+    Runs full SmartGrinderStrategy (12 signals + live gap) + PennyExplosiveStrategy
+    every 30 min and sends top-3 momentum picks + top-1 explosive penny to Telegram.
+    """
+    notify(
+        f"📊 <b>Le Grinder — PAPER SCREENER</b>\n\n"
+        f"🔍 Full 12-signal scan  ·  {len(WATCHLIST):,} tickers  ·  every 30 min\n"
+        f"📈 Top 3 momentum picks  +  top 1 explosive penny stock\n"
+        f"⚡ Live gap enrichment (prepost=True) — picks update with real intraday prices\n"
+        f"🚫 Wealthsimple: <b>DISABLED</b>  |  No trades executed"
+    )
+
+    _last_screener_t: float = 0.0
+    scans_done: set[str] = set()
+
+    while True:
+        now = now_et()
+
+        # Midnight reset
+        if now.hour == 0 and now.minute < 2:
+            scans_done.clear()
+
+        # 5 AM game plan scan
+        if _should_fire("5am", 5, 0, scans_done) and not _passed_today(9, 10):
+            scans_done.add("5am")
+            _run_overnight_scan("5 AM Screener Game Plan", balance, "5am")
+
+        # 30-min top-3 momentum + explosive penny pick
+        slot_minute = 0 if now.minute < 30 else 30
+        slot_ts = now.replace(minute=slot_minute, second=0, microsecond=0).timestamp()
+        if _last_screener_t < slot_ts:
+            _last_screener_t = time.time()
+            label = now.strftime("%Hh%M ET")
+            log(f"Paper screener — {label}...")
+
+            fresh_picks: list[GrinderPick] = []
+            penny_pick: "dict | None" = None
+            try:
+                scan_symbols, _ = _choose_scan_symbols()
+                symbols = scan_symbols[:200]
+                log(f"  Scanning {len(symbols)} tickers (12-signal + live gap enrichment)...")
+                md  = GrinderMarketData()
+                md.prefetch(symbols)
+                ctx = SmartMarketContext.load_or_fetch()
+
+                fresh_picks = SmartGrinderStrategy(md, ctx).scan(symbols)
+                if not fresh_picks:
+                    fresh_picks = GrinderStrategy(md).scan(symbols)
+                if not fresh_picks:
+                    fresh_picks = FallbackStrategy(md).scan(symbols)
+                log(f"  Momentum picks: {len(fresh_picks)}")
+
+                # Explosive penny — reuses same md/ctx (no extra HTTP calls)
+                try:
+                    penny_pick = PennyExplosiveStrategy(md, ctx).scan(symbols)
+                    if penny_pick:
+                        log(f"  Penny: {penny_pick.get('symbol')}  score={penny_pick.get('score', 0):.0f}")
+                    else:
+                        log("  No qualifying penny pick this cycle")
+                except Exception as _pe:
+                    log(f"  Penny scan error: {_pe}")
+
+            except Exception as exc:
+                log(f"  Screener scan failed: {exc}")
+
+            _send_top_picks_with_rockets(label, fresh_picks=fresh_picks, penny_pick=penny_pick)
+
+        time.sleep(60)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -4045,6 +4121,8 @@ def main() -> None:
     )
     parser.add_argument("--balance", type=float, default=None,
                         help="Cash in USD (default: live fetch from Wealthsimple)")
+    parser.add_argument("--paper", action="store_true",
+                        help="Screener-only mode — no trades, top-3 + penny pick every 30 min")
     parser.add_argument("--now", "--buy-now", action="store_true",
                         help="Skip all waiting and buy immediately (debug)")
     parser.add_argument("--ticker", type=str, default=None,
@@ -4095,12 +4173,18 @@ def main() -> None:
     else:
         refresh_universe_if_stale()
 
-    balance: float = args.balance or fetch_live_balance() or 100.0
+    balance: float = args.balance or (100.0 if args.paper else fetch_live_balance()) or 100.0
     SESSION_FILE.write_text(json.dumps({
         "startingBalance": balance,
         "startTime": now_et().isoformat(),
     }))
     log(f"Starting balance: ${balance:.2f} USD")
+
+    # ── Paper screener mode — skip all trading, loop the scanner ─────────────
+    if args.paper:
+        log("PAPER MODE — screener only, no Wealthsimple calls")
+        _run_paper_screener(balance)
+        return
 
     stats = _get_trade_stats()
     at_color = _pnl_color(stats["total_pnl"])
