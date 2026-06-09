@@ -31,7 +31,10 @@ def now_et() -> datetime:
 
 
 # ── Strategy parameters ──────────────────────────────────────────────────────
-OTM_STRIKES          = 2      # strikes away from ATM (SPY has $1 increments → $2 OTM)
+TARGET_PREMIUM_MIN   = 0.20   # minimum ask price — go further OTM if too expensive
+TARGET_PREMIUM_MAX   = 0.40   # maximum ask price — ideal cheap OTM range
+TARGET_PREMIUM_MID   = 0.30   # fallback target when no contract is in range
+MIN_OTM_STRIKES      = 5      # minimum strikes from ATM before starting the search
 MIN_PM_PCT           = 0.20   # minimum pre-market move to trade (skip flat days)
 PROFIT_TARGET_PCT    = 100.0  # +100% → close all (doubled)
 PARTIAL_CLOSE_PCT    = 50.0   # +50% → close half
@@ -235,48 +238,68 @@ def check_reversal_starting(bias: PreMarketBias) -> tuple[bool, str]:
 def get_otm_contract(
     option_type: str,
     spy_price: float,
-    otm_strikes: int = OTM_STRIKES,
     expiry: Optional[str] = None,
 ) -> Optional[OptionContract]:
     """
-    Pull today's SPY 0DTE chain from yfinance and return the OTM contract.
-    SPY has $1 strike increments.
+    Pull today's SPY 0DTE chain from yfinance and find the contract whose ask
+    price falls in [TARGET_PREMIUM_MIN, TARGET_PREMIUM_MAX] ($0.20–$0.40).
+
+    We start at least MIN_OTM_STRIKES away from ATM and scan further OTM until
+    we find a contract in the target range. If none found, we return the contract
+    closest to TARGET_PREMIUM_MID ($0.30) as a best-effort pick.
+
     option_type: "call" or "put"
-    otm_strikes: how many strikes away from ATM (2 = $2 OTM for SPY)
     """
     if expiry is None:
         expiry = date.today().strftime("%Y-%m-%d")
 
     try:
-        spy   = yf.Ticker("SPY")
-        exps  = spy.options           # list of available expiry dates
+        spy  = yf.Ticker("SPY")
+        exps = spy.options
         if expiry not in exps:
-            # Find closest available expiry (handles holidays)
             from datetime import datetime as dt
             target = dt.strptime(expiry, "%Y-%m-%d")
-            closest = min(exps, key=lambda d: abs((dt.strptime(d, "%Y-%m-%d") - target).days))
-            expiry = closest
+            expiry = min(exps, key=lambda d: abs((dt.strptime(d, "%Y-%m-%d") - target).days))
 
         chain = spy.option_chain(expiry)
-        df    = chain.calls if option_type == "call" else chain.puts
+        df    = (chain.calls if option_type == "call" else chain.puts).copy()
 
-        # ATM strike = nearest strike to current price
-        atm = float(df.iloc[(df["strike"] - spy_price).abs().argsort().iloc[0]]["strike"])
+        # ATM strike = nearest strike to current SPY price
+        atm_idx = (df["strike"] - spy_price).abs().argsort().iloc[0]
+        atm     = float(df.iloc[atm_idx]["strike"])
 
-        if option_type == "call":
-            target_strike = atm + otm_strikes
+        # Filter to OTM only (put = below ATM, call = above ATM), skip ATM and close-to-money
+        if option_type == "put":
+            df = df[df["strike"] <= atm - MIN_OTM_STRIKES].sort_values("strike", ascending=False)
         else:
-            target_strike = atm - otm_strikes
+            df = df[df["strike"] >= atm + MIN_OTM_STRIKES].sort_values("strike", ascending=True)
 
-        # Find closest strike to target
-        df    = df.copy()
-        df["dist"] = (df["strike"] - target_strike).abs()
-        row   = df.nsmallest(1, "dist").iloc[0]
+        if df.empty:
+            return None
 
-        bid   = float(row.get("bid", 0) or 0)
-        ask   = float(row.get("ask", 0) or 0)
-        last  = float(row.get("lastPrice", 0) or 0)
-        mid   = (bid + ask) / 2 if (bid > 0 and ask > 0) else last
+        # Compute ask price for each row (use last if bid/ask spread is 0)
+        def _ask(row) -> float:
+            a = float(row.get("ask", 0) or 0)
+            b = float(row.get("bid", 0) or 0)
+            l = float(row.get("lastPrice", 0) or 0)
+            return a if a > 0 else (l if l > 0 else b)
+
+        df = df.copy()
+        df["_ask"] = df.apply(_ask, axis=1)
+
+        # Prefer contracts with ask in the $0.20–$0.40 target window
+        in_range = df[(df["_ask"] >= TARGET_PREMIUM_MIN) & (df["_ask"] <= TARGET_PREMIUM_MAX)]
+        if not in_range.empty:
+            # Among in-range contracts, pick the one closest to TARGET_PREMIUM_MID ($0.30)
+            row = in_range.iloc[(in_range["_ask"] - TARGET_PREMIUM_MID).abs().argsort().iloc[0]]
+        else:
+            # Best-effort: pick the contract whose ask is closest to $0.30
+            row = df.iloc[(df["_ask"] - TARGET_PREMIUM_MID).abs().argsort().iloc[0]]
+
+        bid  = float(row.get("bid", 0) or 0)
+        ask  = float(row.get("ask", 0) or 0)
+        last = float(row.get("lastPrice", 0) or 0)
+        mid  = (bid + ask) / 2 if (bid > 0 and ask > 0) else last
 
         return OptionContract(
             expiry=expiry,
@@ -290,7 +313,7 @@ def get_otm_contract(
             volume=int(row.get("volume", 0) or 0),
             open_interest=int(row.get("openInterest", 0) or 0),
         )
-    except Exception as e:
+    except Exception:
         return None
 
 

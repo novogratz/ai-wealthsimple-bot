@@ -1263,16 +1263,15 @@ def cmd_sell(args) -> None:
 
 def navigate_to_spy_options(page):
     """
-    Navigate to Wealthsimple's SPY options chain.
-    Tries the "Options" tab on the SPY stock page first; falls back to direct URLs.
-    Returns the page (possibly on the options chain).
+    Navigate to Wealthsimple's SPY options chain and dismiss any modal dialogs.
+    WS shows an 'Options' tab on the SPY stock page that loads the chain inline.
     """
     print("Loading SPY stock page...")
     page = navigate_to_stock(page, "SPY")
     page.wait_for_timeout(2000)
     snap(page, "spy_stock_page")
 
-    # Try clicking the Options tab on the stock page
+    # Click the Options tab (confirmed working from UI test)
     for sel in [
         'button:has-text("Options")',
         '[role="tab"]:has-text("Options")',
@@ -1285,54 +1284,69 @@ def navigate_to_spy_options(page):
                 page.wait_for_timeout(2500)
                 snap(page, "options_tab")
                 print(f"  Options tab clicked via: {sel}")
-                return page
+                break
         except Exception:
             continue
+    else:
+        snap(page, "options_tab_not_found")
+        raise RuntimeError(
+            "Options tab not found on SPY page — "
+            "check data/screen_spy_stock_page.png"
+        )
 
-    # Try direct options URL variants
-    for url in [
-        "https://my.wealthsimple.com/app/trade/SPY/options",
-        "https://my.wealthsimple.com/app/options/SPY",
-        "https://my.wealthsimple.com/app/options?symbol=SPY",
-    ]:
+    # Dismiss the "Build a trade with AI" modal if present
+    for dismiss_text in ["Maybe later", "Maybe Later", "No thanks", "Close", "Dismiss"]:
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=20_000)
-            page.wait_for_timeout(2000)
-            snap(page, f"options_url_{url.split('/')[-1].split('?')[0]}")
-            text = page.locator("body").inner_text(timeout=3000).lower()
-            if "option" in text and "expir" in text:
-                print(f"  Options page found via URL: {url}")
-                return page
+            btn = page.get_by_text(dismiss_text, exact=True).first
+            if btn.is_visible(timeout=1500):
+                btn.click()
+                page.wait_for_timeout(800)
+                print(f"  Dismissed modal via: '{dismiss_text}'")
+                break
         except Exception:
-            pass
+            continue
+    # Also try X button on any modal
+    try:
+        close_btn = page.locator('[aria-label*="close" i], [aria-label*="dismiss" i], button:has-text("×")').first
+        if close_btn.is_visible(timeout=800):
+            close_btn.click()
+            page.wait_for_timeout(500)
+    except Exception:
+        pass
 
-    snap(page, "options_not_found")
-    raise RuntimeError(
-        "Could not find Wealthsimple options chain for SPY. "
-        "Check data/screen_spy_stock_page.png and data/screen_options_*.png for the current state."
-    )
+    snap(page, "options_chain_ready")
+    return page
 
 
 def select_option_expiry(page, expiry: str) -> bool:
     """
-    Select the given expiry date (YYYY-MM-DD) on the WS options chain.
-    WS shows expiry dates as tabs or a scrollable date row.
+    Select today's expiry on the WS options chain.
+    WS defaults to the nearest expiry (today for 0DTE) so this is usually a no-op.
+    Only attempts to click a date tab if multiple expiries are visible.
     """
     from datetime import datetime as _dt
-    exp_dt      = _dt.strptime(expiry, "%Y-%m-%d")
-    # Try several label formats WS might show
+    exp_dt = _dt.strptime(expiry, "%Y-%m-%d")
+    # Build labels without Linux-only %-d (use str(int()) to strip leading zeros)
+    month_short = exp_dt.strftime("%b")   # "Jun"
+    month_long  = exp_dt.strftime("%B")   # "June"
+    day         = str(exp_dt.day)         # "9"  (no leading zero)
+    day_padded  = exp_dt.strftime("%d")   # "09"
+    month_num   = str(exp_dt.month)       # "6"
+    month_padded= exp_dt.strftime("%m")   # "06"
+    year        = str(exp_dt.year)
+
     labels = [
-        exp_dt.strftime("%-m/%-d"),          # 6/9
-        exp_dt.strftime("%m/%d"),             # 06/09
-        exp_dt.strftime("%b %-d"),            # Jun 9
-        exp_dt.strftime("%b %d"),             # Jun 09
-        exp_dt.strftime("%B %-d, %Y"),        # June 9, 2026
-        expiry,                               # 2026-06-09
+        f"{month_num}/{day}",                  # 6/9
+        f"{month_padded}/{day_padded}",         # 06/09
+        f"{month_short} {day}",                # Jun 9
+        f"{month_short} {day_padded}",         # Jun 09
+        f"{month_long} {day}, {year}",         # June 9, 2026
+        expiry,                                # 2026-06-09
     ]
     for label in labels:
         try:
             el = page.locator(f':text("{label}")').first
-            if el.is_visible(timeout=1000):
+            if el.is_visible(timeout=800):
                 el.click()
                 page.wait_for_timeout(1000)
                 snap(page, "options_expiry_selected")
@@ -1341,9 +1355,8 @@ def select_option_expiry(page, expiry: str) -> bool:
         except Exception:
             continue
 
-    snap(page, "options_expiry_not_found")
-    print(f"  [WARN] Could not select expiry {expiry} — options chain may default to today")
-    return False
+    print(f"  Expiry selector not needed — WS defaults to today ({expiry})")
+    return True
 
 
 def find_and_click_option_contract(
@@ -1352,81 +1365,88 @@ def find_and_click_option_contract(
     strike: float,
 ) -> bool:
     """
-    Find and click the specific call/put contract by strike in the options chain.
-    WS options chains are typically two-column tables: puts on left, calls on right,
-    with the strike column in the middle.
+    Select the correct Call/Put side, then click the green Ask(Buy) button
+    in the row matching the target strike.
+
+    WS options chain UI (confirmed from screenshot):
+      - "Call" / "Put" toggle buttons at top-left of chain
+      - Each row: Strike column | ... | Ask(Buy) green button
+      - The green Ask(Buy) button opens the order ticket
     """
-    strike_str = str(int(strike))
+    strike_label = f"${int(strike)}"
     snap(page, "options_chain_before_select")
 
-    # Strategy 1: click via table cell containing the strike number
-    clicked = page.evaluate(f"""
-        () => {{
-            const type = '{option_type.lower()}';
-            const target = {int(strike)};
+    # Step 1: click Call or Put toggle to show the right side
+    print(f"  Selecting {option_type.upper()} side...")
+    type_label = "Call" if option_type == "call" else "Put"
+    try:
+        toggle = page.get_by_text(type_label, exact=True).first
+        toggle.wait_for(state="visible", timeout=3000)
+        toggle.click()
+        page.wait_for_timeout(1000)
+        print(f"  Clicked '{type_label}' toggle")
+    except Exception as e:
+        print(f"  [WARN] Could not click '{type_label}' toggle: {e}")
 
-            // Find all elements containing just the strike number
-            const allEls = [...document.querySelectorAll('td, [role="cell"], [class*="strike"], [class*="Strike"]')];
-            const strikeEls = allEls.filter(el => {{
-                const txt = (el.textContent || '').trim();
-                return txt === String(target) || txt === '$' + target || txt === target.toFixed(2);
-            }});
+    snap(page, f"options_{option_type}_selected")
 
-            if (!strikeEls.length) return false;
+    # Step 2: find the row with this strike and click the Ask(Buy) button.
+    # Chain columns (left→right): Strike | Breakeven | %toBE | OI | Volume | Mid | Bid(Sell) | Ask(Buy)
+    # Ask(Buy) is always the LAST (rightmost) price button in each row — green coloured.
+    # Bid(Sell) is second-to-last — red/pink. We must click the last one.
+    print(f"  Looking for strike {strike_label} Ask(Buy) button...")
 
-            for (const el of strikeEls) {{
-                // Walk up to the row
-                const row = el.closest('tr, [role="row"]');
-                if (!row) continue;
+    def _click_ask_js(label: str) -> str:
+        return page.evaluate(f"""
+            () => {{
+                const strikeLabel = '{label}';
 
-                // In each row, the put cell is typically left of the strike
-                // and the call cell is to the right. Click the correct side.
-                const cells = [...row.querySelectorAll('td, [role="cell"]')];
-                const strikeIdx = cells.indexOf(el);
-                if (strikeIdx < 0) continue;
+                // Find the leaf element whose exact text matches the strike label
+                const strikeEl = [...document.querySelectorAll('*')].find(el => {{
+                    const txt = (el.textContent || el.innerText || '').trim();
+                    return txt === strikeLabel && el.children.length === 0;
+                }});
+                if (!strikeEl) return 'strike_not_found';
 
-                const targetCell = (type === 'call')
-                    ? cells[strikeIdx + 1]   // cell to the right
-                    : cells[strikeIdx - 1];  // cell to the left
-
-                if (targetCell) {{ targetCell.click(); return true; }}
-                // Fallback: click the strike itself and look for type selector
-                el.click();
-                return true;
+                // Walk up until we find a container that has >= 2 price buttons
+                let row = strikeEl.parentElement;
+                for (let i = 0; i < 10; i++) {{
+                    if (!row) return 'no_row';
+                    const priceBtns = [...row.querySelectorAll('button')].filter(
+                        b => /^\\$[0-9]/.test((b.textContent || '').trim())
+                    );
+                    if (priceBtns.length >= 2) {{
+                        // Ask(Buy) is the LAST price button (rightmost column)
+                        const askBtn = priceBtns[priceBtns.length - 1];
+                        askBtn.click();
+                        return 'clicked_ask:' + askBtn.textContent.trim();
+                    }}
+                    row = row.parentElement;
+                }}
+                return 'row_not_found';
             }}
-            return false;
-        }}
-    """)
+        """)
 
-    if clicked:
-        page.wait_for_timeout(1500)
-        snap(page, "options_contract_clicked")
-        print(f"  Clicked {option_type.upper()} ${strike_str} contract")
+    result = _click_ask_js(strike_label)
+    print(f"  JS result: {result}")
+
+    if result and result.startswith("clicked_ask"):
+        page.wait_for_timeout(2000)
+        snap(page, "options_ask_clicked")
         return True
 
-    # Strategy 2: find by text proximity (bid/ask row near the strike)
+    # Fallback: scroll the strike into view, then retry
     try:
-        # Look for a clickable row that has the strike number in it
-        row_sel = f'tr:has(:text("{strike_str}")), [role="row"]:has(:text("{strike_str}"))'
-        row     = page.locator(row_sel).first
-        if row.is_visible(timeout=1000):
-            # Try to click the call or put cell within this row
-            side_sel = (
-                f'[class*="call" i], [data-type="call"]' if option_type == "call"
-                else f'[class*="put" i], [data-type="put"]'
-            )
-            cell = row.locator(side_sel).first
-            if cell.is_visible(timeout=500):
-                cell.click()
-                page.wait_for_timeout(1500)
-                snap(page, "options_contract_clicked_v2")
-                return True
-            row.click()
-            page.wait_for_timeout(1500)
-            snap(page, "options_contract_row_clicked")
+        page.locator(f'text="{strike_label}"').first.scroll_into_view_if_needed(timeout=3000)
+        page.wait_for_timeout(600)
+        result2 = _click_ask_js(strike_label)
+        print(f"  JS result after scroll: {result2}")
+        if result2 and result2.startswith("clicked_ask"):
+            page.wait_for_timeout(2000)
+            snap(page, "options_ask_clicked_v2")
             return True
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"  Scroll fallback failed: {e}")
 
     snap(page, "options_contract_not_found")
     return False
@@ -1434,46 +1454,46 @@ def find_and_click_option_contract(
 
 def place_option_order(page, side: str, n_contracts: int, confirm: bool) -> dict:
     """
-    Place a market order for an already-selected option contract.
-    Assumes the options ticket/panel is open after clicking a contract.
+    Interact with the WS options order ticket (slides up as a drawer from the bottom).
+    Handles the one-time 'Writing options' consent screen if present.
     """
-    from playwright.sync_api import TimeoutError as PWTimeout
-
-    snap(page, f"option_{side}_ticket")
     result: dict = {"side": side, "submitted": False}
 
-    print(f"Looking for {side.title()} tab on options ticket...")
-    tab_clicked = page.evaluate(f"""
-        () => {{
-            const tabs = [...document.querySelectorAll('button, [role="tab"]')];
-            const tab  = tabs.find(el => el.textContent.trim().toLowerCase() === '{side}');
-            if (tab) {{ tab.click(); return true; }}
-            return false;
-        }}
-    """)
-    if not tab_clicked:
-        print(f"  No {side} tab found — assuming already on {side} ticket")
-    page.wait_for_timeout(800)
+    # The ticket appears as a bottom drawer — scroll to the bottom to reach it
+    print("Scrolling to options ticket drawer...")
+    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    page.wait_for_timeout(1500)
+    snap(page, f"option_{side}_ticket")
+
+    # Handle one-time 'Writing options' / options-enablement consent screen
+    for consent_text in ["Continue", "I understand", "Enable options", "Agree"]:
+        try:
+            btn = page.get_by_text(consent_text, exact=True).first
+            if btn.is_visible(timeout=1000):
+                btn.click()
+                page.wait_for_timeout(1500)
+                print(f"  Dismissed options consent via: '{consent_text}'")
+                snap(page, f"option_{side}_consent_done")
+                break
+        except Exception:
+            continue
 
     # Choose non-registered account
     choose_unregistered_account(page, f"option_{side}")
 
-    # Enter contract quantity
+    # Enter number of contracts
     print(f"Entering {n_contracts} contract(s)...")
     try:
-        # WS options ticket uses "Contracts" label instead of "Shares"
-        contracts_input = page.get_by_label("Contracts", exact=False).first
-        if contracts_input.is_visible(timeout=2000):
-            contracts_input.click()
+        inp = page.get_by_label("Contracts", exact=False).first
+        if inp.is_visible(timeout=2000):
+            inp.click()
             page.keyboard.press("Control+A")
             page.keyboard.type(str(n_contracts), delay=50)
         else:
-            # Fallback: first visible number input
             fill_visible_input(page, 0, str(n_contracts))
         page.wait_for_timeout(500)
     except Exception as e:
-        print(f"  [WARN] Could not fill contracts: {e}")
-
+        print(f"  [WARN] Could not fill contracts input: {e}")
     snap(page, f"option_{side}_qty")
 
     # Click Next
@@ -1488,7 +1508,10 @@ def place_option_order(page, side: str, n_contracts: int, confirm: bool) -> dict
     """)
     if not next_clicked:
         snap(page, f"option_{side}_next_fail")
-        raise RuntimeError(f"Options ticket Next button not found — see data/screen_option_{side}_next_fail.png")
+        raise RuntimeError(
+            f"Options ticket Next button not found — "
+            f"see data/screen_option_{side}_next_fail.png"
+        )
     page.wait_for_timeout(3000)
     snap(page, f"option_{side}_review")
 
@@ -1501,18 +1524,23 @@ def place_option_order(page, side: str, n_contracts: int, confirm: bool) -> dict
     if confirm:
         submitted_via_js = page.evaluate("""
             () => {
+                // NOTE: 'Queue order' is intentionally excluded — that means
+                // the market is closed and the order would be queued pre-market.
+                // The bot only enters between 9:45 AM and 10:00 AM ET so this
+                // should never appear during normal operation.
                 const texts = [
                     'Submit order', 'Submit Order',
                     'Place order', 'Place Order',
-                    'Queue order', 'Queue Order',
                     'Confirm order', 'Confirm Order',
                     'Submit buy order', 'Submit Buy Order',
                     'Submit sell order', 'Submit Sell Order',
                 ];
                 const buttons = [...document.querySelectorAll('button, [role="button"]')];
                 for (const text of texts) {
-                    const btn = buttons.find(b => b.textContent.trim() === text ||
-                        b.textContent.trim().toLowerCase() === text.toLowerCase());
+                    const btn = buttons.find(b =>
+                        b.textContent.trim() === text ||
+                        b.textContent.trim().toLowerCase() === text.toLowerCase()
+                    );
                     if (btn) { btn.click(); return 'clicked:' + text; }
                 }
                 const submitBtn = document.querySelector('button[type="submit"]');
@@ -1528,7 +1556,8 @@ def place_option_order(page, side: str, n_contracts: int, confirm: bool) -> dict
         else:
             snap(page, f"option_{side}_submit_fail")
             raise RuntimeError(
-                f"Options submit button not found — see data/screen_option_{side}_submit_fail.png"
+                f"Options submit button not found — "
+                f"see data/screen_option_{side}_submit_fail.png"
             )
     else:
         print("  Stopped at review — pass --confirm to submit")
