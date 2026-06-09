@@ -71,8 +71,9 @@ _BUY_HOUR              = 9
 _BUY_MINUTE            = 35    # 4 min after overnight sell to allow fill settlement
 _BUY_CATCHUP_HOUR      = 15    # last valid buy entry — never be in cash during market
 _BUY_CATCHUP_MINUTE    = 30
-_OVERNIGHT_SELL_HOUR   = 9     # sell overnight positions at market open
-_OVERNIGHT_SELL_MINUTE = 31
+_OVERNIGHT_SELL_HOUR   = 9     # morning rank check — 15 min after open to skip noise
+_OVERNIGHT_SELL_MINUTE = 45
+_HOLD_SCORE_GAP        = 25.0  # hold while score >= top1 score − this value
 _BUY_DELAY_MINUTES = 0
 _SHORTLIST_SIZE    = 150
 _FULL_REFRESH_TTL  = 24 * 3600
@@ -2070,18 +2071,21 @@ def _combined_report() -> None:
                 current_sym = json.loads(POS_FILE.read_text()).get("symbol")
         except Exception:
             pass
-        # Rank-drop alert: warn if current position has fallen out of top 3
+        # Score-gap alert: warn if held stock has fallen >25 pts below top 1
         if current_sym and fresh_picks:
-            _rank = next((i + 1 for i, p in enumerate(fresh_picks[:10]) if p.symbol == current_sym), None)
-            if _rank is None or _rank > 3:
-                _rank_str = f"#{_rank}" if _rank else "outside top 10"
-                _top1     = fresh_picks[0].symbol if fresh_picks else "?"
+            _top1_score  = fresh_picks[0].score if fresh_picks else 0.0
+            _held_score  = next((p.score for p in fresh_picks[:10] if p.symbol == current_sym), 0.0)
+            _held_rank   = next((i + 1 for i, p in enumerate(fresh_picks[:10]) if p.symbol == current_sym), None)
+            _gap         = _top1_score - _held_score
+            if _held_score == 0 or _gap > _HOLD_SCORE_GAP:
+                _rank_str = f"#{_held_rank}" if _held_rank else "outside top 10"
+                _top1_sym = fresh_picks[0].symbol if fresh_picks else "?"
                 try:
                     notify(
-                        f"⚠️ <b>Rank alert — <code>{current_sym}</code> is {_rank_str}</b>\n\n"
-                        f"📊 Dropped out of top 3 in latest 30-min scan\n"
-                        f"🔝 Current top pick: <code>{_top1}</code>\n"
-                        f"🕐 Will sell at 3:55 PM ET unless it recovers"
+                        f"⚠️ <b>Score alert — <code>{current_sym}</code> {_rank_str}</b>\n\n"
+                        f"📊 Gap vs top pick: <b>{_gap:.1f} pts</b>  "
+                        f"({current_sym} {_held_score:.0f} vs {_top1_sym} {_top1_score:.0f})\n"
+                        f"🕐 Will sell at 3:55 PM ET unless gap closes"
                     )
                 except Exception:
                     pass
@@ -3326,31 +3330,36 @@ def _morning_hold_decision(symbol: str, entry: float, shares: float,
         if not picks:
             picks = GrinderStrategy(_md).scan(symbols)
 
-        rank  = next((i + 1 for i, p in enumerate(picks[:10]) if p.symbol == symbol), None)
-        score = next((p.score for p in picks[:10] if p.symbol == symbol), 0.0)
+        top1_score = picks[0].score if picks else 0.0
+        rank       = next((i + 1 for i, p in enumerate(picks[:10]) if p.symbol == symbol), None)
+        score      = next((p.score for p in picks[:10] if p.symbol == symbol), 0.0)
 
         snap    = _md.snapshot(symbol)
         cur_px  = snap.last_close if snap else entry
         pos_pct = (cur_px - entry) / entry * 100 if entry > 0 else 0
 
-        if rank is not None and rank <= 3:
-            log(f"  {symbol} ranked #{rank} (score {score:.1f}) — HOLDING")
+        # Hold if score is within _HOLD_SCORE_GAP pts of top 1 — prevents rotation on noise
+        gap = top1_score - score
+        if score > 0 and gap <= _HOLD_SCORE_GAP:
+            rank_str = f"#{rank}" if rank else "unranked"
+            log(f"  {symbol} {rank_str} score {score:.1f} (gap {gap:.1f} ≤ {_HOLD_SCORE_GAP}) — HOLDING")
             notify(
                 f"📊 <b>Morning Decision — holding <code>{symbol}</code></b>\n\n"
-                f"🏆 Ranked <b>#{rank}</b> in universe  |  Score: <b>{score:.1f}</b>\n"
+                f"🏆 Ranked <b>{rank_str}</b>  |  Score: <b>{score:.1f}</b>  "
+                f"(gap vs #1: {gap:.1f} pts)\n"
                 f"💼 {shares:.4f} sh @ ${entry:.2f}  |  Now ${cur_px:.2f} ({pos_pct:+.1f}%)\n"
-                f"✅ Still top 3 — holding another day\n"
+                f"✅ Within {_HOLD_SCORE_GAP:.0f} pts of top pick — holding another day\n"
                 f"🌙 Next rank check at 3:55 PM ET"
             )
             return True
 
+        top1_sym = picks[0].symbol if picks else "?"
         rank_str = f"#{rank}" if rank else "outside top 10"
-        top1     = picks[0].symbol if picks else "?"
-        log(f"  {symbol} {rank_str} — rotating out → new top pick: {top1}")
+        log(f"  {symbol} {rank_str} score {score:.1f} gap {gap:.1f} > {_HOLD_SCORE_GAP} — rotating → {top1_sym}")
         notify(
             f"🔄 <b>Morning Decision — rotating out of <code>{symbol}</code></b>\n\n"
-            f"📊 Ranked <b>{rank_str}</b> — dropped out of top 3\n"
-            f"🔝 New top pick: <code>{top1}</code>  |  Buying at 9:35 AM..."
+            f"📊 Ranked <b>{rank_str}</b>  |  Score gap vs #1: <b>{gap:.1f} pts</b>\n"
+            f"🔝 New top pick: <code>{top1_sym}</code>  |  Buying at 9:35 AM..."
         )
         return False
     except Exception as exc:
@@ -3502,6 +3511,26 @@ def hold_and_sell(balance: float = 0.0) -> None:
             if "5am" not in _scanned and 5 <= cur.hour < 7 and cur.weekday() < 5:
                 _scanned.add("5am")
                 _run_overnight_scan("5 AM Morning Scan", balance_approx, "5am")
+
+            # Pre-market alert: warn once if stock is down >7% before open
+            if "pm_alert" not in _scanned and cur.weekday() < 5 and 5 <= cur.hour < 9:
+                _scanned.add("pm_alert")
+                try:
+                    _fi_pm    = yf.Ticker(symbol).fast_info
+                    _pm_price = float(_fi_pm.last_price or 0)
+                    if _pm_price > 0 and entry > 0:
+                        _pm_pct = (_pm_price - entry) / entry * 100
+                        if _pm_pct <= -7.0:
+                            notify(
+                                f"⚠️ <b>Pre-market alert — <code>{symbol}</code></b>\n\n"
+                                f"📉 Down <b>{_pm_pct:+.1f}%</b> vs your entry  |  PM price: ${_pm_price:.2f}\n"
+                                f"💡 Consider selling at 9:35 AM open — rank check still runs at 9:45 AM"
+                            )
+                            log(f"Pre-market alert: {symbol} {_pm_pct:+.1f}% — flagged in Telegram")
+                        else:
+                            log(f"Pre-market check: {symbol} {_pm_pct:+.1f}% — no alert needed")
+                except Exception as _exc:
+                    log(f"Pre-market alert check failed: {_exc}")
 
             _combined_report()
 
@@ -3667,18 +3696,22 @@ def hold_and_sell(balance: float = 0.0) -> None:
             except Exception as _exc:
                 log(f"  3:55 PM rank check failed: {_exc} — defaulting to sell")
 
-            if eod_rank is not None and eod_rank <= 3:
-                log(f"3:55 PM: {eod_pct:+.1f}% — ranked #{eod_rank}, holding overnight")
+            eod_top1_score = _eod_picks[0].score if _eod_picks else 0.0
+            eod_gap        = eod_top1_score - eod_score
+            eod_rank_str   = f"#{eod_rank}" if eod_rank else "unranked"
+
+            if eod_score > 0 and eod_gap <= _HOLD_SCORE_GAP:
+                log(f"3:55 PM: {eod_pct:+.1f}% — {eod_rank_str} score {eod_score:.1f} gap {eod_gap:.1f} ≤ {_HOLD_SCORE_GAP} — holding overnight")
                 notify(
                     f"🌙 <b>3:55 PM — Holding overnight <code>{symbol}</code></b>\n\n"
-                    f"🏆 Ranked <b>#{eod_rank}</b> in universe  |  Score: {eod_score:.1f}\n"
+                    f"🏆 Ranked <b>{eod_rank_str}</b>  |  Score: {eod_score:.1f}  "
+                    f"(gap vs #1: {eod_gap:.1f} pts)\n"
                     f"📈 P&L: <b>{eod_pct:+.1f}%</b>  |  Price: ${price_eod:.2f}\n"
-                    f"✅ Still top 3 — next rank check at 9:31 AM ET"
+                    f"✅ Within {_HOLD_SCORE_GAP:.0f} pts of top pick — next check at 9:45 AM ET"
                 )
-                return  # position stays open; overnight path handles 9:31 AM decision
+                return  # position stays open; overnight path handles 9:45 AM decision
             else:
-                rank_str = f"#{eod_rank}" if eod_rank else "outside top 10"
-                log(f"3:55 PM: {eod_pct:+.1f}% — {rank_str} — selling, AH rotation follows")
+                log(f"3:55 PM: {eod_pct:+.1f}% — {eod_rank_str} gap {eod_gap:.1f} > {_HOLD_SCORE_GAP} — selling")
                 _execute_sell_order(symbol, entry, shares, cost, strat, "3:55 PM")
                 return
 
