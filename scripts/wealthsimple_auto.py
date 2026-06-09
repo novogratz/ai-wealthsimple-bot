@@ -1599,6 +1599,9 @@ def place_option_order(page, side: str, n_contracts: int, confirm: bool) -> dict
                     'Confirm order', 'Confirm Order',
                     'Submit buy order', 'Submit Buy Order',
                     'Submit sell order', 'Submit Sell Order',
+                    'Sell order', 'Sell Order',
+                    'Place sell order', 'Place Sell Order',
+                    'Sell', 'Confirm sell', 'Confirm Sell',
                 ];
                 const buttons = [...document.querySelectorAll('button, [role="button"]')];
                 for (const text of texts) {
@@ -1610,6 +1613,13 @@ def place_option_order(page, side: str, n_contracts: int, confirm: bool) -> dict
                 }
                 const submitBtn = document.querySelector('button[type="submit"]');
                 if (submitBtn) { submitBtn.click(); return 'clicked:type=submit'; }
+                // Last-resort: click the first enabled non-cancel/back button in the ticket drawer
+                const skipWords = ['cancel', 'back', 'close', 'dismiss', 'skip', 'maybe', 'no'];
+                const fallback = buttons.find(b => {
+                    const t = b.textContent.trim().toLowerCase();
+                    return t.length > 0 && !skipWords.some(w => t.includes(w)) && !b.disabled;
+                });
+                if (fallback) { fallback.click(); return 'clicked:fallback:' + fallback.textContent.trim(); }
                 return 'not_found';
             }
         """)

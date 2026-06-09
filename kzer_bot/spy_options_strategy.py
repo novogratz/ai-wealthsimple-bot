@@ -42,7 +42,7 @@ PARTIAL_CLOSE_PCT    = 200.0  # +200% → sell half, let remaining half run free
 PARTIAL_TARGET_PCT   = 500.0  # second target for remaining half
 # NO stop loss — 0DTE deep OTM options can go -80% before reversing violently.
 # Time-based exits (noon + 3:45 PM) are the only hard protection.
-NOON_CLOSE_HOUR      = 12     # hard close at noon (theta kills OTM after this)
+NOON_CLOSE_HOUR      = 14     # hard close at 2 PM for afternoon sessions
 NOON_CLOSE_MINUTE    = 0
 HARD_CLOSE_HOUR      = 15     # nuclear close 3:45 PM
 HARD_CLOSE_MINUTE    = 45
@@ -55,8 +55,8 @@ REVERSAL_CONFIRM_PCT = 0.05   # SPY must be pulling back this much from the open
 # Regime bias: negative = lean bearish (prefer puts), positive = lean bullish (prefer calls).
 # Applied as an additive score offset. On flat/ambiguous gap days this is the deciding factor.
 # Magnitude guide: ±10 is a gentle tilt; ±20 overrides all but the largest gap signals.
-# Current: -12 → bearish regime (market overextended to the upside).
-REGIME_BIAS          = -12
+# Current: 0 → neutral (direction driven entirely by intraday SPY move vs open).
+REGIME_BIAS          = 0
 
 
 @dataclass
@@ -158,26 +158,27 @@ def get_premarket_bias() -> PreMarketBias:
     spy_prev_close = 0.0
     spy_pm_price   = 0.0
 
-    # ── SPY pre-market vs yesterday close ────────────────────────────────────
+    # ── SPY direction: intraday return (current vs today's open) ────────────
+    # Rule: market DOWN from open → buy CALLS (fade the drop)
+    #       market UP   from open → buy PUTS  (fade the rally)
+    # This works at 9:45 AM AND at 12:30–1 PM entries.
     try:
-        hist = yf.Ticker("SPY").history(period="3d", interval="5m", prepost=True)
+        hist = yf.Ticker("SPY").history(period="2d", interval="1m", prepost=False)
         if not hist.empty:
-            rh = hist[hist.index.map(
-                lambda x: 9 <= x.hour < 16 if hasattr(x, "hour") else False
+            today_str = date.today().isoformat()
+            today_bars = hist[hist.index.map(
+                lambda x: x.date().isoformat() == today_str if hasattr(x, "date") else False
             )]
-            if len(rh) >= 1:
-                spy_prev_close = float(rh["Close"].iloc[-1])
-
-            pm = hist[hist.index.map(
-                lambda x: (x.hour < 9 or (x.hour == 9 and x.minute < 30))
-                if hasattr(x, "hour") else False
-            )]
-            if not pm.empty and spy_prev_close > 0:
-                spy_pm_price = float(pm["Close"].iloc[-1])
-                spy_pm_pct   = (spy_pm_price - spy_prev_close) / spy_prev_close * 100
-                reasons.append(f"SPY pre-market: {spy_pm_pct:+.2f}%  (${spy_prev_close:.2f} -> ${spy_pm_price:.2f})")
+            if len(today_bars) >= 2:
+                spy_prev_close  = float(today_bars["Open"].iloc[0])   # open = reference
+                spy_pm_price    = float(today_bars["Close"].iloc[-1])  # current price
+                spy_pm_pct      = (spy_pm_price - spy_prev_close) / spy_prev_close * 100
+                reasons.append(
+                    f"SPY intraday: {spy_pm_pct:+.2f}%  "
+                    f"(open ${spy_prev_close:.2f} → now ${spy_pm_price:.2f})"
+                )
     except Exception as e:
-        reasons.append(f"SPY PM data error: {e}")
+        reasons.append(f"SPY data error: {e}")
 
     # ── ES futures 1-hour trend ───────────────────────────────────────────────
     try:
@@ -567,10 +568,10 @@ def check_exit(
     if position.partial_closed and pnl_pct >= PARTIAL_TARGET_PCT:
         return "close_all", f"SECOND TARGET +{pnl_pct:.0f}% — closing remaining half"
 
-    # 4. Noon hard close — theta destroys deep OTM after 12 PM, no point holding
+    # 4. Hard close at NOON_CLOSE_HOUR (default 2 PM for afternoon sessions)
     noon = now.replace(hour=NOON_CLOSE_HOUR, minute=NOON_CLOSE_MINUTE, second=0, microsecond=0)
     if now >= noon:
-        return "close_all", f"NOON CLOSE ({pnl_pct:+.0f}%) — theta kills OTM after 12 PM"
+        return "close_all", f"TIME CLOSE {NOON_CLOSE_HOUR:02d}:{NOON_CLOSE_MINUTE:02d} ({pnl_pct:+.0f}%) — theta kills OTM after {NOON_CLOSE_HOUR}h"
 
     # 5. Nuclear close 3:45 PM — never hold 0DTE into expiry
     hard = now.replace(hour=HARD_CLOSE_HOUR, minute=HARD_CLOSE_MINUTE, second=0, microsecond=0)

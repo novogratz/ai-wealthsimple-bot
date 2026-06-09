@@ -82,7 +82,10 @@ def _start_keepalive() -> None:
 def log(msg: str) -> None:
     ts   = now_et().strftime("%Y-%m-%d %H:%M:%S ET")
     line = f"[{ts}] {msg}"
-    print(line, flush=True)
+    try:
+        print(line, flush=True)
+    except UnicodeEncodeError:
+        print(line.encode("ascii", errors="replace").decode("ascii"), flush=True)
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(line + "\n")
@@ -470,7 +473,7 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
             period_fn=lambda mins: notify(_plan_report_msg(bias, today, mins)),
         )
 
-    if _past_cutoff():
+    if not now_flag and _past_cutoff():
         notify(f"MISSED ENTRY WINDOW ({now_et().strftime('%H:%M')} ET) — skip today")
         return
 
@@ -519,8 +522,12 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
         log("Fetching live balance from Wealthsimple...")
         balance = get_available_balance()
         if balance <= 0:
-            log("[WARN] Balance fetch failed — defaulting to 1 contract")
-            balance = entry_ask * 100  # enough for exactly 1
+            log("[WARN] Balance fetch failed — retrying once...")
+            time.sleep(15)
+            balance = get_available_balance()
+        if balance <= 0:
+            notify("ERROR: Could not fetch balance from Wealthsimple — aborting. Use --balance X to override.")
+            return
 
     n_contracts = calc_max_contracts(entry_ask, balance)
     cost_total  = entry_ask * n_contracts * 100
