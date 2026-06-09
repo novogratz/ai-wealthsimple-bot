@@ -42,8 +42,8 @@ PARTIAL_CLOSE_PCT    = 200.0  # +200% → sell half, let remaining half run free
 PARTIAL_TARGET_PCT   = 500.0  # second target for remaining half
 # NO stop loss — 0DTE deep OTM options can go -80% before reversing violently.
 # Time-based exits (noon + 3:45 PM) are the only hard protection.
-NOON_CLOSE_HOUR      = 14     # hard close at 2 PM for afternoon sessions
-NOON_CLOSE_MINUTE    = 0
+NOON_CLOSE_HOUR      = 15     # hard close at 3:25 PM
+NOON_CLOSE_MINUTE    = 25
 HARD_CLOSE_HOUR      = 15     # nuclear close 3:45 PM
 HARD_CLOSE_MINUTE    = 45
 ENTRY_HOUR           = 9      # entry window: 9:45–10:00 AM ET

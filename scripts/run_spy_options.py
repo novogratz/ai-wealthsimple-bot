@@ -173,8 +173,8 @@ def calc_max_contracts(ask_price: float, balance: float) -> int:
     """How many contracts can we buy with the available balance? Each contract = ask × 100."""
     if ask_price <= 0 or balance <= 0:
         return 1
-    # Use 95% of balance as usable cash (leave a small buffer for fees)
-    usable   = balance * 0.95
+    # Use 50% of balance per trade (risk management)
+    usable   = balance * 0.50
     cost_per = ask_price * 100
     n        = int(usable // cost_per)
     return max(n, 1)
