@@ -1294,28 +1294,48 @@ def navigate_to_spy_options(page):
             "check data/screen_spy_stock_page.png"
         )
 
-    # Dismiss the "Build a trade with AI" modal if present
-    for dismiss_text in ["Maybe later", "Maybe Later", "No thanks", "Close", "Dismiss"]:
-        try:
-            btn = page.get_by_text(dismiss_text, exact=True).first
-            if btn.is_visible(timeout=1500):
-                btn.click()
-                page.wait_for_timeout(800)
-                print(f"  Dismissed modal via: '{dismiss_text}'")
-                break
-        except Exception:
-            continue
-    # Also try X button on any modal
-    try:
-        close_btn = page.locator('[aria-label*="close" i], [aria-label*="dismiss" i], button:has-text("×")').first
-        if close_btn.is_visible(timeout=800):
-            close_btn.click()
-            page.wait_for_timeout(500)
-    except Exception:
-        pass
+    # Dismiss all modals/overlays: "Build a trade with AI", "What's your view on SPY?",
+    # and any other interstitial that blocks the chain.
+    _dismiss_options_overlays(page)
 
     snap(page, "options_chain_ready")
     return page
+
+
+def _dismiss_options_overlays(page) -> None:
+    """Close any WS options-page overlays (AI modal, 'What's your view' panel, etc.)."""
+    # Text-based dismiss buttons
+    for dismiss_text in ["Maybe later", "Maybe Later", "No thanks", "Not now", "Close", "Dismiss", "×"]:
+        try:
+            btn = page.get_by_text(dismiss_text, exact=True).first
+            if btn.is_visible(timeout=600):
+                btn.click()
+                page.wait_for_timeout(500)
+                print(f"  Dismissed overlay via: '{dismiss_text}'")
+        except Exception:
+            continue
+
+    # X / close icon buttons (aria-label)
+    for sel in [
+        '[aria-label*="close" i]',
+        '[aria-label*="dismiss" i]',
+        '[aria-label*="Close" i]',
+        'button[class*="close" i]',
+    ]:
+        try:
+            btn = page.locator(sel).first
+            if btn.is_visible(timeout=400):
+                btn.click()
+                page.wait_for_timeout(400)
+        except Exception:
+            continue
+
+    # Press Escape to close any remaining overlay
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+    except Exception:
+        pass
 
 
 def select_option_expiry(page, expiry: str) -> bool:
