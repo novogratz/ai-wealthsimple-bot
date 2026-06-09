@@ -2,7 +2,7 @@
 """
 Le Grinder
 ====================================
-Quant rules  : intraday rotation  |  no stop loss  |  +5% profit target  |  3:55 PM late-lock
+Quant rules  : intraday rotation  |  no stop loss  |  +5% profit target  |  3:55 PM rank check
 Edge source  : momentum continuation on high-volume up-days + EMA trend filter
 Entry timing : 9:31 AM ET every weekday, with same-morning catch-up on restart
 AI analysis  : claude CLI analyses top candidates each morning
@@ -113,8 +113,6 @@ def _filter_extended_at_buy(picks: list) -> "GrinderPick":
     return picks[0]
 _TRAILING_STOP_TRIGGER_PCT  = 2.0  # activate trailing stop at +2.0%
 _TRAILING_STOP_DISTANCE_PCT = 1.0  # trail by 1.0% from peak
-_LATE_LOCK_PCT        = 2.0       # legacy constant — kept for messages only (always sell at 3:55 PM now)
-_MIN_SMART_HOLD_SCORE = 20        # hold overnight if re-scan smart score still >= this
 
 # ── After-hours / extended-hours trading ──────────────────────────────────────
 _AH_BUY_START_HOUR  = 16   # 4:00 PM ET — AH buy window opens
@@ -1135,7 +1133,7 @@ def build_scan_message(
             f"  (~{shares_est} sh,  ${deploy:.0f} USD)"
         )
         plan_steps.append(
-            f"  3️⃣  Autonomous exit — +{_PROFIT_TARGET_PCT:.0f}% target anytime or +{_LATE_LOCK_PCT:.0f}% lock at 3:55 PM"
+            f"  3️⃣  Autonomous exit — +{_PROFIT_TARGET_PCT:.0f}% target anytime  |  3:55 PM rank check  |  Intraday rotation"
         )
     else:
         plan_steps.append(
@@ -1143,7 +1141,7 @@ def build_scan_message(
             f"  (~{shares_est} sh,  ${deploy:.0f} USD)"
         )
         plan_steps.append(
-            f"  2️⃣  Autonomous exit — +{_PROFIT_TARGET_PCT:.0f}% target anytime or +{_LATE_LOCK_PCT:.0f}% lock at 3:55 PM  |  Intraday rotation enabled"
+            f"  2️⃣  Autonomous exit — +{_PROFIT_TARGET_PCT:.0f}% target anytime  |  3:55 PM rank check  |  Intraday rotation enabled"
         )
 
     plan_body = "\n".join(plan_steps)
@@ -1200,7 +1198,7 @@ def build_buy_message(
         f"{_criteria_explanation(pick)}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📋 <b>PLAN:</b>  {pick.strategy_name}\n"
-        f"🎯 Exit: +{_PROFIT_TARGET_PCT:.0f}% target  |  +{_LATE_LOCK_PCT:.0f}% lock at 3:55 PM  |  No stop loss — intraday rotation enabled"
+        f"🎯 Exit: +{_PROFIT_TARGET_PCT:.0f}% target  |  3:55 PM rank check  |  Intraday rotation enabled  |  No stop loss"
     )
 
     if ai_analysis:
@@ -2658,48 +2656,48 @@ def _is_premarket_window() -> bool:
 
 def _scan_afterhours(watchlist: list[str], min_pct: float = _AH_MIN_PCT) -> list[dict]:
     """
-    Scan top tickers for after-hours momentum.
-    Score = pct^1.5 * vol_bonus — superlinear so big movers on big volume dominate.
+    Scan top tickers for after-hours momentum using SmartGrinderStrategy (12-signal composite).
+    Hard filter: price < $10 (Wealthsimple AH fractional-share limitation).
     """
     import yfinance as yf
-    picks = []
-    # If min_pct <= 0, we are in fallback mode — expand search to 250 tickers to ensure we find one
     limit = 250 if min_pct <= 0 else _AH_WATCHLIST_SIZE
     subset = watchlist[:limit]
-    log(f"After-hours scan: checking {len(subset)} tickers (min {min_pct:.1f}%)...")
-    for sym in subset:
+    log(f"After-hours scan: scoring {len(subset)} tickers with SmartGrinderStrategy (min {min_pct:.1f}%)...")
+
+    try:
+        md  = GrinderMarketData()
+        ctx = SmartMarketContext.load_or_fetch()
+        smart_picks: list[GrinderPick] = SmartGrinderStrategy(md, ctx).scan(subset)
+    except Exception as exc:
+        log(f"AH SmartGrinderStrategy scan failed: {exc}")
+        return []
+
+    result: list[dict] = []
+    for pick in smart_picks:
         try:
-            fi    = yf.Ticker(sym).fast_info
-            close = fi.previous_close
-            last  = fi.last_price
-            if not close or not last or close <= 0 or last < 0.50:
-                continue
-            ah_pct = (last / close - 1) * 100
-            if ah_pct < min_pct:
-                continue
-            
+            # Reconstruct live AH price from last_close + premarket_gap_pct
+            ah_price = pick.last_close * (1 + pick.premarket_gap_pct / 100)
+
             # HARD FILTER: No fractional shares in PM/AH on Wealthsimple.
-            # Must be < $10 to ensure we can actually buy enough whole shares.
-            if last >= 10.0:
+            if ah_price >= 10.0:
                 continue
-            
-            reg_vol = getattr(fi, "regular_market_volume", 0) or 0
-            avg_vol = getattr(fi, "three_month_average_volume", 0) or 0
-            vol_ratio = (reg_vol / avg_vol) if avg_vol > 0 else 1.0
-            vol_bonus = min(max(vol_ratio, 0.5), 4.0)
-            score = (max(ah_pct, 0) ** 1.5) * vol_bonus
-            picks.append({
-                "symbol":    sym,
-                "close":     round(close, 4),
-                "ah_price":  round(last, 4),
-                "ah_pct":    round(ah_pct, 2),
-                "vol_ratio": round(vol_ratio, 1),
-                "score":     round(score, 3),
+
+            if pick.premarket_gap_pct < min_pct:
+                continue
+
+            result.append({
+                "symbol":    pick.symbol,
+                "close":     round(pick.last_close, 4),
+                "ah_price":  round(ah_price, 4),
+                "ah_pct":    round(pick.premarket_gap_pct, 2),
+                "vol_ratio": round(pick.rel_volume, 1),
+                "score":     round(pick.score, 3),
             })
         except Exception:
             pass
-    picks.sort(key=lambda x: x["score"], reverse=True)
-    return picks
+
+    result.sort(key=lambda x: x["score"], reverse=True)
+    return result
 
 
 def _afterhours_buy(pick: dict, balance: float) -> bool:
@@ -3496,14 +3494,14 @@ def hold_and_sell(balance: float = 0.0) -> None:
                 f"💰 Deploying: <b>${cost:.2f} USD</b>  |  📋 {strat}\n"
                 f"📋 Pre-market order — fills at <b>9:30 AM ET open</b>  ({mins_to_open} min)\n"
                 f"🔄 {'Market sell + rotation at' if is_ah_position else 'Morning decision at'} <b>9:35 AM ET</b>\n"
-                f"🎯 Target: +{_profit_target_pct:.1f}%  |  3:55 PM lock: +{_LATE_LOCK_PCT:.0f}%  |  No stop loss"
+                f"🎯 Target: +{_profit_target_pct:.1f}%  |  3:55 PM rank check  |  No stop loss"
             )
         else:
             notify(
                 f"📊 <b>Position open — overnight hold</b>\n\n"
                 f"🎫 <code>{symbol}</code>  |  {shares:.4f} sh @ ${entry:.2f}\n"
                 f"💰 Cost: <b>${cost:.2f} USD</b>  |  📋 {strat}\n"
-                f"🔄 {'Market sell + rotation at <b>9:35 AM ET</b>' if is_ah_position else 'Rank check at <b>9:31 AM ET</b> — hold if top 3, sell if not'}\n"
+                f"🔄 {'Market sell + rotation at <b>9:35 AM ET</b>' if is_ah_position else 'Rank check at <b>9:45 AM ET</b> — hold if within 25 pts of top 1, sell if not'}\n"
                 f"🎯 Target: +{_profit_target_pct:.1f}%  |  Trailing stop: +{_TRAILING_STOP_TRIGGER_PCT:.0f}% trigger"
             )
 
@@ -4045,7 +4043,7 @@ def main() -> None:
             f"💰 Balance: <b>${balance:.2f} USD</b>\n"
             f"📋 Target: <b>{args.ticker.upper()}</b>\n"
             f"⏰ Buying immediately — no scan, no wait\n"
-            f"🎯 Exit: +{_PROFIT_TARGET_PCT:.0f}% target  |  3:55 PM lock if +{_LATE_LOCK_PCT:.0f}%  |  Intraday rotation  |  No stop loss\n\n"
+            f"🎯 Exit: +{_PROFIT_TARGET_PCT:.0f}% target  |  3:55 PM rank check  |  Intraday rotation  |  No stop loss\n\n"
             f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} USD</b>"
             f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
         )
@@ -4056,7 +4054,7 @@ def main() -> None:
             f"📋 Watchlist: <b>{len(WATCHLIST)} tickers</b>  (Yahoo most active CA — volume sorted)\n"
             f"📐 Strategy: 8-criteria momentum screen  +  Claude AI analysis\n"
             f"⏰ Entry: 9:31 AM ET every weekday\n"
-            f"🎯 Exit: +{_PROFIT_TARGET_PCT:.0f}% target  |  3:55 PM lock if +{_LATE_LOCK_PCT:.0f}%  |  Intraday rotation  |  No stop loss\n\n"
+            f"🎯 Exit: +{_PROFIT_TARGET_PCT:.0f}% target  |  3:55 PM rank check  |  Intraday rotation  |  No stop loss\n\n"
             f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} USD</b>"
             f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
         )
@@ -4067,7 +4065,7 @@ def main() -> None:
             f"📋 Watchlist: <b>{len(WATCHLIST)} tickers</b>  (hardcoded — no rate limits)\n"
             f"📐 Strategy: 8-criteria momentum screen  +  Claude AI analysis\n"
             f"⏰ Entry: 9:31 AM ET every weekday\n"
-            f"🎯 Exit: +{_PROFIT_TARGET_PCT:.0f}% target  |  3:55 PM lock if +{_LATE_LOCK_PCT:.0f}%  |  Intraday rotation  |  No stop loss\n\n"
+            f"🎯 Exit: +{_PROFIT_TARGET_PCT:.0f}% target  |  3:55 PM rank check  |  Intraday rotation  |  No stop loss\n\n"
             f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} USD</b>"
             f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
         )
@@ -4078,7 +4076,7 @@ def main() -> None:
             f"📋 Watchlist: <b>{len(WATCHLIST)} US tickers (NYSE/NASDAQ)</b>  (TSX / TSXV / NEO)\n"
             f"📐 Strategy: 8-criteria momentum screen  +  Claude AI analysis\n"
             f"⏰ Entry: 9:31 AM ET every weekday\n"
-            f"🎯 Exit: +{_PROFIT_TARGET_PCT:.0f}% target  |  3:55 PM lock if +{_LATE_LOCK_PCT:.0f}%  |  Intraday rotation  |  No stop loss\n\n"
+            f"🎯 Exit: +{_PROFIT_TARGET_PCT:.0f}% target  |  3:55 PM rank check  |  Intraday rotation  |  No stop loss\n\n"
             f"{at_color} All-time PnL: <b>${stats['total_pnl']:+.2f} USD</b>"
             f"  |  🏆 {stats['wins']}W / {stats['losses']}L"
         )
@@ -4099,12 +4097,12 @@ def main() -> None:
             log(f"Open position found: {pos['symbol']} — resuming hold/sell loop.")
 
             if _is_afterhours_window():
-                log("After-hours window — holding existing position until 9:31 AM (no limit sells in extended hours).")
+                log("After-hours window — holding existing position until 9:35 AM (no limit sells in extended hours).")
                 notify(
                     f"🌙 <b>After-hours window detected</b>\n\n"
                     f"🎫 Holding <code>{pos['symbol']}</code>  "
                     f"{pos.get('shares', 0):.4f} sh @ ${pos.get('buyPrice', 0):.2f}\n"
-                    f"📋 No limit sells in extended hours — holding until <b>9:31 AM ET</b> market open"
+                    f"📋 No limit sells in extended hours — holding until <b>9:35 AM ET</b> market open"
                 )
                 _run_afterhours_strategy(balance, sell_existing=True)
                 if POS_FILE.exists():
@@ -4116,7 +4114,7 @@ def main() -> None:
                 _exit_line = (
                     f"🔴 <b>SELL at 9:35 AM ET</b> → rotate to next pick"
                     if _is_pm_ah else
-                    f"🎯 Hold decision at 9:31 AM → target/trail/3:55 PM exit"
+                    f"🎯 Rank check at 9:45 AM → hold if within 25 pts of top 1, sell + rotate if not"
                 )
                 notify(
                     f"⏳ <b>Bot restarted — order pending fill</b>\n\n"
@@ -4131,7 +4129,7 @@ def main() -> None:
                     f"▶️ <b>Bot restarted — resuming position</b>\n\n"
                     f"🎫 <code>{pos['symbol']}</code>  "
                     f"{pos.get('shares', 0):.4f} sh @ ${pos.get('buyPrice', 0):.2f}\n"
-                    f"🎯 Autonomous: +{_PROFIT_TARGET_PCT:.0f}% target  |  +{_LATE_LOCK_PCT:.0f}% lock at 3:55 PM"
+                    f"🎯 Autonomous: +{_PROFIT_TARGET_PCT:.0f}% target  |  3:55 PM rank check  |  Intraday rotation enabled"
                 )
                 hold_and_sell(balance=balance)
 
