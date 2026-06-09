@@ -31,15 +31,16 @@ def now_et() -> datetime:
 
 
 # ── Strategy parameters ──────────────────────────────────────────────────────
-TARGET_PREMIUM_MIN   = 0.20   # minimum ask price — go further OTM if too expensive
-TARGET_PREMIUM_MAX   = 0.40   # maximum ask price — ideal cheap OTM range
-TARGET_PREMIUM_MID   = 0.30   # fallback target when no contract is in range
-MIN_OTM_STRIKES      = 5      # minimum strikes from ATM before starting the search
+TARGET_PREMIUM_MIN   = 0.15   # minimum ask price
+TARGET_PREMIUM_MAX   = 0.60   # maximum ask price — AI picks best in this range
+TARGET_PREMIUM_MID   = 0.35   # fallback target when no contract is exactly in range
+MIN_OTM_STRIKES      = 3      # minimum strikes from ATM before starting the search
 MIN_PM_PCT           = 0.20   # minimum pre-market move to trade (skip flat days)
-PROFIT_TARGET_PCT    = 100.0  # +100% → close all (doubled)
-PARTIAL_CLOSE_PCT    = 50.0   # +50% → close half
-PARTIAL_TARGET_PCT   = 150.0  # +150% → close remaining half after partial
-STOP_LOSS_PCT        = 50.0   # -50% → full stop
+PROFIT_TARGET_PCT    = 500.0  # +500% → close all (6x bagger — 0DTE can do 1000%+)
+PARTIAL_CLOSE_PCT    = 200.0  # +200% → sell half, let remaining half run free
+PARTIAL_TARGET_PCT   = 500.0  # second target for remaining half
+# NO stop loss — 0DTE deep OTM options can go -80% before reversing violently.
+# Time-based exits (noon + 3:45 PM) are the only hard protection.
 NOON_CLOSE_HOUR      = 12     # hard close at noon (theta kills OTM after this)
 NOON_CLOSE_MINUTE    = 0
 HARD_CLOSE_HOUR      = 15     # nuclear close 3:45 PM
@@ -317,6 +318,80 @@ def get_otm_contract(
         return None
 
 
+def get_otm_contracts_in_range(
+    option_type: str,
+    spy_price: float,
+    expiry: Optional[str] = None,
+    n: int = 6,
+) -> list[OptionContract]:
+    """
+    Return up to `n` OTM contracts in the $TARGET_PREMIUM_MIN–$TARGET_PREMIUM_MAX range,
+    sorted by ask price (closest to TARGET_PREMIUM_MID first). Used by the LLM picker.
+    Falls back to closest-to-mid contracts if fewer than n are in range.
+    """
+    if expiry is None:
+        expiry = date.today().strftime("%Y-%m-%d")
+    try:
+        spy  = yf.Ticker("SPY")
+        exps = spy.options
+        if expiry not in exps:
+            from datetime import datetime as dt
+            target = dt.strptime(expiry, "%Y-%m-%d")
+            expiry = min(exps, key=lambda d: abs((dt.strptime(d, "%Y-%m-%d") - target).days))
+
+        chain = spy.option_chain(expiry)
+        df    = (chain.calls if option_type == "call" else chain.puts).copy()
+
+        atm_idx = (df["strike"] - spy_price).abs().argsort().iloc[0]
+        atm     = float(df.iloc[atm_idx]["strike"])
+
+        if option_type == "put":
+            df = df[df["strike"] <= atm - MIN_OTM_STRIKES].sort_values("strike", ascending=False)
+        else:
+            df = df[df["strike"] >= atm + MIN_OTM_STRIKES].sort_values("strike", ascending=True)
+
+        def _ask(row) -> float:
+            a = float(row.get("ask", 0) or 0)
+            b = float(row.get("bid", 0) or 0)
+            l = float(row.get("lastPrice", 0) or 0)
+            return a if a > 0 else (l if l > 0 else b)
+
+        df = df.copy()
+        df["_ask"] = df.apply(_ask, axis=1)
+        df         = df[df["_ask"] > 0]
+
+        # Candidates in range, sorted by closeness to mid
+        in_range = df[(df["_ask"] >= TARGET_PREMIUM_MIN) & (df["_ask"] <= TARGET_PREMIUM_MAX)]
+        if in_range.empty:
+            in_range = df
+
+        in_range = in_range.copy()
+        in_range["_dist"] = (in_range["_ask"] - TARGET_PREMIUM_MID).abs()
+        top = in_range.nsmallest(n, "_dist")
+
+        contracts = []
+        for _, row in top.iterrows():
+            bid  = float(row.get("bid", 0) or 0)
+            ask  = float(row.get("ask", 0) or 0)
+            last = float(row.get("lastPrice", 0) or 0)
+            mid  = (bid + ask) / 2 if (bid > 0 and ask > 0) else last
+            contracts.append(OptionContract(
+                expiry=expiry,
+                strike=float(row["strike"]),
+                option_type=option_type,
+                last_price=last,
+                bid=bid,
+                ask=ask,
+                mid=mid,
+                iv=float(row.get("impliedVolatility", 0) or 0),
+                volume=int(row.get("volume", 0) or 0),
+                open_interest=int(row.get("openInterest", 0) or 0),
+            ))
+        return contracts
+    except Exception:
+        return []
+
+
 def get_option_mid(contract: OptionContract) -> float:
     """Refresh the mid-price of an open contract. Used in the hold loop."""
     try:
@@ -343,10 +418,13 @@ def check_exit(
     current_premium: float,
 ) -> tuple[str, str]:
     """
-    Returns (action, reason) where action is:
-      "hold"         — keep holding
-      "close_all"    — sell everything
-      "close_half"   — sell half (partial profit at +50%)
+    Returns (action, reason):
+      "hold"       — keep riding
+      "close_all"  — sell everything
+      "close_half" — sell half (lock partial profit, let rest run)
+
+    No stop loss — 0DTE deep OTM can drop 80% before ripping 1000%+.
+    Time exits (noon, 3:45 PM) are the only hard protection.
     """
     if position.entry_premium <= 0 or current_premium <= 0:
         return "hold", ""
@@ -354,28 +432,24 @@ def check_exit(
     pnl_pct = (current_premium - position.entry_premium) / position.entry_premium * 100
     now     = now_et()
 
-    # 1. Full profit target
+    # 1. Full profit target (+500% — close all, 6x bagger)
     if pnl_pct >= PROFIT_TARGET_PCT:
-        return "close_all", f"PROFIT TARGET +{pnl_pct:.0f}% — doubled the money 💰"
+        return "close_all", f"PROFIT TARGET +{pnl_pct:.0f}% — massive winner, closing all"
 
-    # 2. Partial close at +50% (then let rest run to +150%)
+    # 2. Partial at +200% (doubled twice) — sell half, let remaining ride to +500%
     if not position.partial_closed and pnl_pct >= PARTIAL_CLOSE_PCT:
-        return "close_half", f"PARTIAL CLOSE +{pnl_pct:.0f}% — locking half, letting rest run"
+        return "close_half", f"PARTIAL CLOSE +{pnl_pct:.0f}% — locking half, rest runs free"
 
-    # 3. After partial close, close remaining at +150%
+    # 3. After partial, close remaining at +500%
     if position.partial_closed and pnl_pct >= PARTIAL_TARGET_PCT:
-        return "close_all", f"SECOND TARGET +{pnl_pct:.0f}% — closing remaining half 💰"
+        return "close_all", f"SECOND TARGET +{pnl_pct:.0f}% — closing remaining half"
 
-    # 4. Stop loss
-    if pnl_pct <= -STOP_LOSS_PCT:
-        return "close_all", f"STOP LOSS {pnl_pct:.0f}% — protecting capital"
-
-    # 5. Noon time stop
+    # 4. Noon hard close — theta destroys deep OTM after 12 PM, no point holding
     noon = now.replace(hour=NOON_CLOSE_HOUR, minute=NOON_CLOSE_MINUTE, second=0, microsecond=0)
     if now >= noon:
         return "close_all", f"NOON CLOSE ({pnl_pct:+.0f}%) — theta kills OTM after 12 PM"
 
-    # 6. Nuclear close 3:45 PM
+    # 5. Nuclear close 3:45 PM — never hold 0DTE into expiry
     hard = now.replace(hour=HARD_CLOSE_HOUR, minute=HARD_CLOSE_MINUTE, second=0, microsecond=0)
     if now >= hard:
         return "close_all", "HARD CLOSE 3:45 PM — 0DTE expiry protection"

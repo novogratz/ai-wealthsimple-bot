@@ -1303,34 +1303,58 @@ def navigate_to_spy_options(page):
 
 
 def _dismiss_options_overlays(page) -> None:
-    """Close any WS options-page overlays (AI modal, 'What's your view' panel, etc.)."""
-    # Text-based dismiss buttons
-    for dismiss_text in ["Maybe later", "Maybe Later", "No thanks", "Not now", "Close", "Dismiss", "×"]:
+    """
+    Close any WS options-page overlays: the 'Build a trade with AI' modal
+    and the persistent 'What's your view on SPY?' side panel.
+    The panel has a visible × button at its top-right corner.
+    """
+    # 1. Text-based dismiss for the modal ("Maybe later" button)
+    for dismiss_text in ["Maybe later", "Maybe Later", "No thanks", "Not now"]:
         try:
             btn = page.get_by_text(dismiss_text, exact=True).first
             if btn.is_visible(timeout=600):
                 btn.click()
-                page.wait_for_timeout(500)
-                print(f"  Dismissed overlay via: '{dismiss_text}'")
+                page.wait_for_timeout(600)
+                print(f"  Dismissed modal via: '{dismiss_text}'")
+                break
         except Exception:
             continue
 
-    # X / close icon buttons (aria-label)
-    for sel in [
-        '[aria-label*="close" i]',
-        '[aria-label*="dismiss" i]',
-        '[aria-label*="Close" i]',
-        'button[class*="close" i]',
-    ]:
+    # 2. Kill the 'What's your view on SPY?' panel via its × close button.
+    #    Target: any button/element with a single-char × text on the RIGHT half of the screen.
+    closed = page.evaluate("""
+        () => {
+            const closeSymbols = ['×', '✕', '✖', 'X', 'x'];
+            const all = [...document.querySelectorAll('button, [role="button"], svg, [aria-label]')];
+            for (const el of all) {
+                const txt   = (el.textContent || el.innerText || '').trim();
+                const label = (el.getAttribute('aria-label') || '').toLowerCase();
+                const rect  = el.getBoundingClientRect();
+                const onRight = rect.x > window.innerWidth * 0.45;
+                const inTop   = rect.y < 300;
+                if (onRight && inTop && (closeSymbols.includes(txt) || label.includes('close'))) {
+                    el.click();
+                    return 'closed_panel:' + (txt || label);
+                }
+            }
+            return false;
+        }
+    """)
+    if closed:
+        page.wait_for_timeout(500)
+        print(f"  Closed side panel via: {closed}")
+
+    # 3. Aria-label close buttons (covers any remaining overlays)
+    for sel in ['[aria-label="Close"]', '[aria-label="close"]', '[aria-label*="Close" i]']:
         try:
             btn = page.locator(sel).first
-            if btn.is_visible(timeout=400):
+            if btn.is_visible(timeout=300):
                 btn.click()
-                page.wait_for_timeout(400)
+                page.wait_for_timeout(300)
         except Exception:
             continue
 
-    # Press Escape to close any remaining overlay
+    # 4. Escape as final fallback
     try:
         page.keyboard.press("Escape")
         page.wait_for_timeout(300)
