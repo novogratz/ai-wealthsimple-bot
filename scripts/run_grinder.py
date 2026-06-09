@@ -84,6 +84,7 @@ _PROFIT_TARGET_PCT    = 5.0       # default fallback profit target (adaptive per
 _last_rapport_t: float = 0.0
 _last_combined_t: float = 0.0          # timestamp of last combined report send
 _REPORT_INTERVAL_SECS = 30 * 60        # every 30 minutes
+_intraday_rotation_signal: "tuple[str, float] | None" = None  # (top1_sym, gap) set by combined report
 
 
 def _dynamic_profit_target(atr_pct: float) -> float:
@@ -2071,24 +2072,39 @@ def _combined_report() -> None:
                 current_sym = json.loads(POS_FILE.read_text()).get("symbol")
         except Exception:
             pass
-        # Score-gap alert: warn if held stock has fallen >25 pts below top 1
+        # Score-gap check: rotate immediately during market hours, alert only outside
         if current_sym and fresh_picks:
-            _top1_score  = fresh_picks[0].score if fresh_picks else 0.0
-            _held_score  = next((p.score for p in fresh_picks[:10] if p.symbol == current_sym), 0.0)
-            _held_rank   = next((i + 1 for i, p in enumerate(fresh_picks[:10]) if p.symbol == current_sym), None)
-            _gap         = _top1_score - _held_score
+            _top1_score = fresh_picks[0].score if fresh_picks else 0.0
+            _held_score = next((p.score for p in fresh_picks[:10] if p.symbol == current_sym), 0.0)
+            _held_rank  = next((i + 1 for i, p in enumerate(fresh_picks[:10]) if p.symbol == current_sym), None)
+            _gap        = _top1_score - _held_score
+            _top1_sym   = fresh_picks[0].symbol if fresh_picks else "?"
+            _rank_str   = f"#{_held_rank}" if _held_rank else "outside top 10"
             if _held_score == 0 or _gap > _HOLD_SCORE_GAP:
-                _rank_str = f"#{_held_rank}" if _held_rank else "outside top 10"
-                _top1_sym = fresh_picks[0].symbol if fresh_picks else "?"
-                try:
-                    notify(
-                        f"⚠️ <b>Score alert — <code>{current_sym}</code> {_rank_str}</b>\n\n"
-                        f"📊 Gap vs top pick: <b>{_gap:.1f} pts</b>  "
-                        f"({current_sym} {_held_score:.0f} vs {_top1_sym} {_top1_score:.0f})\n"
-                        f"🕐 Will sell at 3:55 PM ET unless gap closes"
-                    )
-                except Exception:
-                    pass
+                global _intraday_rotation_signal
+                if _is_market_hours() and _top1_sym != current_sym:
+                    # During market hours: flag for immediate rotation (no fees)
+                    _intraday_rotation_signal = (_top1_sym, _gap)
+                    try:
+                        notify(
+                            f"🔄 <b>Intraday rotation signal — <code>{current_sym}</code> → <code>{_top1_sym}</code></b>\n\n"
+                            f"📊 Score gap: <b>{_gap:.1f} pts</b>  "
+                            f"({current_sym} {_held_score:.0f} vs {_top1_sym} {_top1_score:.0f})\n"
+                            f"⚡ Rotating now — zero fees"
+                        )
+                    except Exception:
+                        pass
+                else:
+                    # Outside market hours: alert only, will decide at 3:55 PM / 9:45 AM
+                    try:
+                        notify(
+                            f"⚠️ <b>Score alert — <code>{current_sym}</code> {_rank_str}</b>\n\n"
+                            f"📊 Gap vs top pick: <b>{_gap:.1f} pts</b>  "
+                            f"({current_sym} {_held_score:.0f} vs {_top1_sym} {_top1_score:.0f})\n"
+                            f"🕐 Will evaluate at next market decision point"
+                        )
+                    except Exception:
+                        pass
 
         log(f"  Scan done: {len(fresh_picks)} picks  held={current_sym or 'none'}")
     except Exception as exc:
@@ -2605,6 +2621,16 @@ def wait_after_pick(pick: GrinderPick, bias: FuturesBias, futures_detail: str) -
 # ──────────────────────────────────────────────────────────────────────────────
 # After-hours / extended-hours trading
 # ──────────────────────────────────────────────────────────────────────────────
+
+def _is_market_hours() -> bool:
+    """True during regular NYSE/NASDAQ session: 9:35 AM – 3:30 PM ET, Mon–Fri."""
+    n = now_et()
+    if n.weekday() >= 5:
+        return False
+    after_open   = n.hour > 9 or (n.hour == 9 and n.minute >= 35)
+    before_cutoff = n.hour < _BUY_CATCHUP_HOUR or (n.hour == _BUY_CATCHUP_HOUR and n.minute <= _BUY_CATCHUP_MINUTE)
+    return after_open and before_cutoff
+
 
 def _is_afterhours_window() -> bool:
     """True if we're in the weekday 4:00 PM – 7:57 PM ET after-hours window."""
@@ -3768,6 +3794,23 @@ def hold_and_sell(balance: float = 0.0) -> None:
             log(f"Price check error: {exc}")
 
         _combined_report()
+
+        # Intraday rotation: execute immediately if combined report flagged a gap
+        global _intraday_rotation_signal
+        if _intraday_rotation_signal is not None:
+            _rot_sym, _rot_gap = _intraday_rotation_signal
+            _intraday_rotation_signal = None
+            try:
+                _snap_r  = md.snapshot(symbol)
+                _price_r = _snap_r.last_price if _snap_r else entry
+                _pnl_r   = (_price_r - entry) / entry * 100 if entry > 0 else 0
+                log(f"Intraday rotation: {symbol} → {_rot_sym} (gap {_rot_gap:.1f} pts, P&L {_pnl_r:+.1f}%)")
+                _execute_sell_order(symbol, entry, shares, cost, strat, "Intraday Rotation")
+            except Exception as _exc:
+                log(f"Intraday rotation execution failed: {_exc}")
+                _intraday_rotation_signal = None
+            return  # main loop rescans + buys new top 1
+
         time.sleep(60)
 
 
