@@ -1396,9 +1396,9 @@ class SmartGrinderStrategy:
             if df is None or len(df) < 7:
                 continue
             sig = _build_smart_signals(df)
-            if sig.consec_green >= 6:
-                continue  # hard filter: 6+ consecutive green days = extended
             score = self._score(snap, sig)
+            # No hard cap on consecutive green days — rank-based rotation handles
+            # overextended stocks naturally (score gap triggers sell when momentum fades)
             if score > 0:
                 scored.append((score, snap, sig))
 

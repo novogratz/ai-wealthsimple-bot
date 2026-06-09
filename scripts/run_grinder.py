@@ -3800,16 +3800,26 @@ def hold_and_sell(balance: float = 0.0) -> None:
         if _intraday_rotation_signal is not None:
             _rot_sym, _rot_gap = _intraday_rotation_signal
             _intraday_rotation_signal = None
+            # Late-day guard: if < 10 min before buy cutoff, skip new buy → go to AH instead
+            _now_rot = now_et()
+            _cutoff_rot = _now_rot.replace(hour=_BUY_CATCHUP_HOUR, minute=_BUY_CATCHUP_MINUTE - 10, second=0, microsecond=0)
+            _too_late = _now_rot >= _cutoff_rot
             try:
                 _snap_r  = md.snapshot(symbol)
                 _price_r = _snap_r.last_price if _snap_r else entry
                 _pnl_r   = (_price_r - entry) / entry * 100 if entry > 0 else 0
-                log(f"Intraday rotation: {symbol} → {_rot_sym} (gap {_rot_gap:.1f} pts, P&L {_pnl_r:+.1f}%)")
+                log(f"Intraday rotation: {symbol} → {_rot_sym} (gap {_rot_gap:.1f} pts, P&L {_pnl_r:+.1f}%){' — too late to re-buy, AH follows' if _too_late else ''}")
+                if _too_late:
+                    notify(
+                        f"🔄 <b>Late rotation — selling <code>{symbol}</code></b>\n\n"
+                        f"📊 Gap: {_rot_gap:.1f} pts  |  P&L: {_pnl_r:+.1f}%\n"
+                        f"⏰ Too late to re-buy today — AH scan at 4 PM"
+                    )
                 _execute_sell_order(symbol, entry, shares, cost, strat, "Intraday Rotation")
             except Exception as _exc:
                 log(f"Intraday rotation execution failed: {_exc}")
                 _intraday_rotation_signal = None
-            return  # main loop rescans + buys new top 1
+            return  # main loop: buys new top 1 if time remains, else AH
 
         time.sleep(60)
 
