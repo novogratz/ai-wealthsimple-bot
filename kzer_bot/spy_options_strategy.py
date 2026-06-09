@@ -158,25 +158,46 @@ def get_premarket_bias() -> PreMarketBias:
     spy_prev_close = 0.0
     spy_pm_price   = 0.0
 
-    # ── SPY direction: intraday return (current vs today's open) ────────────
-    # Rule: market DOWN from open → buy CALLS (fade the drop)
-    #       market UP   from open → buy PUTS  (fade the rally)
-    # This works at 9:45 AM AND at 12:30–1 PM entries.
+    # ── SPY direction: open-gap (morning) or intraday (afternoon) ────────────
+    # Morning  9:30–10:00 AM: compare today's open vs yesterday's close
+    #   → market gapped UP   → puts  (fade the gap)
+    #   → market gapped DOWN → calls (fade the gap)
+    # Afternoon 10:00 AM +: compare current price vs today's open
+    #   → market DOWN from open → calls (fade the drop)
+    #   → market UP   from open → puts  (fade the rally)
     try:
-        hist = yf.Ticker("SPY").history(period="2d", interval="1m", prepost=False)
+        hist = yf.Ticker("SPY").history(period="3d", interval="1m", prepost=False)
         if not hist.empty:
             today_str = date.today().isoformat()
             today_bars = hist[hist.index.map(
                 lambda x: x.date().isoformat() == today_str if hasattr(x, "date") else False
             )]
+            prev_bars = hist[hist.index.map(
+                lambda x: x.date().isoformat() < today_str if hasattr(x, "date") else False
+            )]
             if len(today_bars) >= 2:
-                spy_prev_close  = float(today_bars["Open"].iloc[0])   # open = reference
-                spy_pm_price    = float(today_bars["Close"].iloc[-1])  # current price
-                spy_pm_pct      = (spy_pm_price - spy_prev_close) / spy_prev_close * 100
-                reasons.append(
-                    f"SPY intraday: {spy_pm_pct:+.2f}%  "
-                    f"(open ${spy_prev_close:.2f} → now ${spy_pm_price:.2f})"
-                )
+                spy_open     = float(today_bars["Open"].iloc[0])
+                spy_current  = float(today_bars["Close"].iloc[-1])
+                n            = now_et()
+                morning_entry = n.hour < 10 or (n.hour == 9 and n.minute < 60)
+                if morning_entry and len(prev_bars) >= 1:
+                    # Morning: gap = how much did SPY open vs yesterday close
+                    spy_prev_close = float(prev_bars["Close"].iloc[-1])
+                    spy_pm_price   = spy_open
+                    spy_pm_pct     = (spy_open - spy_prev_close) / spy_prev_close * 100
+                    reasons.append(
+                        f"SPY open gap: {spy_pm_pct:+.2f}%  "
+                        f"(yesterday ${spy_prev_close:.2f} → open ${spy_open:.2f})"
+                    )
+                else:
+                    # Afternoon: intraday = how much has SPY moved from today's open
+                    spy_prev_close = spy_open
+                    spy_pm_price   = spy_current
+                    spy_pm_pct     = (spy_current - spy_open) / spy_open * 100
+                    reasons.append(
+                        f"SPY intraday: {spy_pm_pct:+.2f}%  "
+                        f"(open ${spy_open:.2f} → now ${spy_current:.2f})"
+                    )
     except Exception as e:
         reasons.append(f"SPY data error: {e}")
 
