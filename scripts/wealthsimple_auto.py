@@ -1542,6 +1542,42 @@ def place_option_order(page, side: str, n_contracts: int, confirm: bool) -> dict
         except Exception:
             continue
 
+    # For sells: switch from default Limit sell to Market sell
+    if side == "sell":
+        switched = page.evaluate("""
+            () => {
+                const selects = [...document.querySelectorAll('select')];
+                for (const sel of selects) {
+                    const opts = [...sel.options].map(o => o.text.toLowerCase());
+                    if (opts.some(o => o.includes('market') || o.includes('limit'))) {
+                        const mktOpt = [...sel.options].find(o =>
+                            o.text.toLowerCase().includes('market'));
+                        if (mktOpt) { sel.value = mktOpt.value;
+                            sel.dispatchEvent(new Event('change', {bubbles: true}));
+                            return 'select:' + mktOpt.text; }
+                    }
+                }
+                // Fallback: click the order type dropdown text and pick Market
+                const els = [...document.querySelectorAll('button, [role="option"], li')];
+                const mktBtn = els.find(el =>
+                    (el.textContent || '').trim().toLowerCase() === 'market sell');
+                if (mktBtn) { mktBtn.click(); return 'click:' + mktBtn.textContent.trim(); }
+                return 'not_found';
+            }
+        """)
+        print(f"  Order type -> Market sell: {switched}")
+        if switched == "not_found":
+            try:
+                dd = page.locator('[data-testid*="order-type"], select').first
+                if dd.is_visible(timeout=1000):
+                    dd.click()
+                    page.wait_for_timeout(400)
+                    page.get_by_text("Market sell", exact=False).first.click(timeout=1500)
+                    print("  Switched to Market sell via Playwright click")
+            except Exception as e:
+                print(f"  [WARN] Could not switch to Market sell: {e}")
+        page.wait_for_timeout(500)
+
     # Choose non-registered account
     choose_unregistered_account(page, f"option_{side}")
 
@@ -1687,126 +1723,88 @@ def sell_option_from_portfolio(
     strike: float,
     n_contracts: int,
     confirm: bool,
+    expiry: str = "",
 ) -> dict:
     """
-    Sell an existing options position via the SPY stock portfolio page.
+    Sell/close an existing options position via the options chain Bid(Sell) button.
 
-    Flow (mirrors the stock sell UX):
-      1. Navigate to SPY stock page (not the options chain)
-      2. Dismiss all overlays
-      3. Find the open option position card in the holdings section
-         (WS shows options positions on the underlying stock page)
-      4. Click the position → the sell ticket/drawer opens
-      5. Fill contracts + submit (reuses place_option_order)
-
-    Falls back to the options-chain Bid(Sell) approach if the position card
-    cannot be found on the stock page.
+    Mirrors the buy flow but clicks the Bid (first price button) instead of
+    the Ask (last price button). This reliably opens the 'sell to close' ticket.
     """
+    from datetime import date as _date
     strike_int = int(strike)
     type_lower = option_type.lower()
+    expiry_str = expiry or _date.today().isoformat()
 
-    print(f"Navigating to SPY stock page to close {option_type.upper()} ${strike_int} position...")
-    page = navigate_to_stock(page, "SPY")
-    page.wait_for_timeout(2500)
-    _dismiss_options_overlays(page)
+    print(f"Navigating to SPY options chain to close {option_type.upper()} ${strike_int} position...")
+    page = navigate_to_spy_options(page)
     snap(page, "sell_option_portfolio_page")
 
-    def _find_and_click_position() -> str:
+    select_option_expiry(page, expiry_str)
+
+    # Select call/put side
+    type_label = "Call" if type_lower == "call" else "Put"
+    try:
+        toggle = page.get_by_text(type_label, exact=True).first
+        toggle.wait_for(state="visible", timeout=3000)
+        toggle.click()
+        page.wait_for_timeout(1000)
+        print(f"  Clicked '{type_label}' toggle")
+    except Exception as e:
+        print(f"  [WARN] Could not click '{type_label}' toggle: {e}")
+
+    snap(page, "sell_option_chain_before_close")
+
+    strike_label = f"${strike_int}"
+    print(f"  Looking for strike {strike_label} Bid(Sell) button...")
+
+    def _click_bid_js(label: str) -> str:
         return page.evaluate(f"""
             () => {{
-                const strikeStr = '{strike_int}';
-                const typeStr   = '{type_lower}';
-
-                // Walk all elements looking for one that mentions both the strike and option type.
-                // WS positions appear in cards/list rows — prioritise clickable elements and
-                // containers whose class name hints at 'position', 'holding', or 'contract'.
-                const all = [...document.querySelectorAll('button, [role="button"], a, li, div, article, section')];
-
-                let bestEl = null;
-                let bestScore = 0;
-
-                for (const el of all) {{
-                    const txt  = (el.textContent || '').toLowerCase();
-                    if (!txt.includes(strikeStr) || !txt.includes(typeStr)) continue;
-
-                    const rect = el.getBoundingClientRect();
-                    if (rect.width < 30 || rect.height < 12) continue;
-
-                    const tag   = el.tagName.toLowerCase();
-                    const role  = (el.getAttribute('role') || '').toLowerCase();
-                    const cls   = (el.className || '').toLowerCase();
-
-                    let s = 1;
-                    if (tag === 'button' || role === 'button') s += 5;
-                    if (tag === 'a'      || role === 'link')   s += 4;
-                    if (/position|holding|contract|portfolio/i.test(cls)) s += 3;
-                    if (rect.height > 30 && rect.height < 200) s += 2;  // reasonable card height
-
-                    if (s > bestScore) {{ bestScore = s; bestEl = el; }}
-                }}
-
-                if (bestEl) {{
-                    bestEl.click();
-                    return 'clicked:' + bestEl.tagName + ':score=' + bestScore;
-                }}
-                return 'not_found';
-            }}
-        """)
-
-    # First attempt
-    click_result = _find_and_click_position()
-    print(f"  Position search: {click_result}")
-
-    if click_result == "not_found":
-        # Scroll down and retry — position may be below the fold
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        page.wait_for_timeout(1200)
-        click_result = _find_and_click_position()
-        print(f"  Position search (after scroll): {click_result}")
-
-    if click_result == "not_found":
-        snap(page, "sell_option_portfolio_not_found")
-        print(
-            f"  [WARN] Position ${strike_int} {option_type.upper()} not found on SPY stock page — "
-            f"falling back to options chain Bid(Sell) approach"
-        )
-        # Fallback: use options chain — navigate chain and click Bid(Sell) button
-        page = navigate_to_spy_options(page)
-        # Click the Bid(Sell) button = FIRST price button in the strike row
-        snap(page, "sell_option_chain_fallback")
-        found = page.evaluate(f"""
-            () => {{
-                const strikeLabel = '${strike_int}';
+                const strikeLabel = '{label}';
                 const strikeEl = [...document.querySelectorAll('*')].find(el => {{
-                    const txt = (el.textContent || '').trim();
+                    const txt = (el.textContent || el.innerText || '').trim();
                     return txt === strikeLabel && el.children.length === 0;
                 }});
-                if (!strikeEl) return false;
+                if (!strikeEl) return 'strike_not_found';
                 let row = strikeEl.parentElement;
                 for (let i = 0; i < 10; i++) {{
-                    if (!row) return false;
+                    if (!row) return 'no_row';
                     const priceBtns = [...row.querySelectorAll('button')].filter(
                         b => /^\\$[0-9]/.test((b.textContent || '').trim())
                     );
                     if (priceBtns.length >= 2) {{
-                        priceBtns[0].click();  // FIRST button = Bid(Sell)
-                        return true;
+                        // Bid(Sell) is the FIRST price button (leftmost price column)
+                        priceBtns[0].click();
+                        return 'clicked_bid:' + priceBtns[0].textContent.trim();
                     }}
                     row = row.parentElement;
                 }}
-                return false;
+                return 'row_not_found';
             }}
         """)
-        if not found:
-            raise RuntimeError(
-                f"Could not find ${strike_int} {option_type.upper()} on stock page or options chain — "
-                f"see data/screen_sell_option_portfolio_not_found.png"
-            )
-        page.wait_for_timeout(2000)
 
-    else:
-        page.wait_for_timeout(2000)
+    result = _click_bid_js(strike_label)
+    print(f"  JS result: {result}")
 
+    if not result or not str(result).startswith("clicked_bid"):
+        # Scroll strike into view and retry
+        try:
+            page.locator(f'text="{strike_label}"').first.scroll_into_view_if_needed(timeout=3000)
+            page.wait_for_timeout(600)
+            result = _click_bid_js(strike_label)
+            print(f"  JS result after scroll: {result}")
+        except Exception as e:
+            print(f"  Scroll fallback failed: {e}")
+
+    if not result or not str(result).startswith("clicked_bid"):
+        snap(page, "sell_option_bid_not_found")
+        raise RuntimeError(
+            f"Could not find Bid(Sell) button for ${strike_int} {option_type.upper()} — "
+            f"see data/screen_sell_option_bid_not_found.png"
+        )
+
+    page.wait_for_timeout(2000)
     snap(page, "sell_option_ticket_opened")
     return place_option_order(page, "sell", n_contracts, confirm)
 
@@ -1830,6 +1828,7 @@ def cmd_sell_option(args) -> None:
                     float(args.strike),
                     args.contracts,
                     confirm=args.confirm,
+                    expiry=args.expiry,
                 )
                 result.update({
                     "symbol": args.symbol, "option_type": args.option_type,
