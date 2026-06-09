@@ -2070,12 +2070,23 @@ def _combined_report() -> None:
                 current_sym = json.loads(POS_FILE.read_text()).get("symbol")
         except Exception:
             pass
-        penny_symbols = [s for s in symbols if s != current_sym]
-        penny_pick = PennyExplosiveStrategy(md, ctx).scan(penny_symbols)
-        log(
-            f"  Scan done: {len(fresh_picks)} picks  "
-            f"penny={penny_pick['symbol'] if penny_pick else 'none'}"
-        )
+        # Rank-drop alert: warn if current position has fallen out of top 3
+        if current_sym and fresh_picks:
+            _rank = next((i + 1 for i, p in enumerate(fresh_picks[:10]) if p.symbol == current_sym), None)
+            if _rank is None or _rank > 3:
+                _rank_str = f"#{_rank}" if _rank else "outside top 10"
+                _top1     = fresh_picks[0].symbol if fresh_picks else "?"
+                try:
+                    notify(
+                        f"⚠️ <b>Rank alert — <code>{current_sym}</code> is {_rank_str}</b>\n\n"
+                        f"📊 Dropped out of top 3 in latest 30-min scan\n"
+                        f"🔝 Current top pick: <code>{_top1}</code>\n"
+                        f"🕐 Will sell at 3:55 PM ET unless it recovers"
+                    )
+                except Exception:
+                    pass
+
+        log(f"  Scan done: {len(fresh_picks)} picks  held={current_sym or 'none'}")
     except Exception as exc:
         log(f"  Fresh scan failed: {exc} — using cached picks")
 
@@ -3300,56 +3311,50 @@ def _morning_hold_decision(symbol: str, entry: float, shares: float,
                            cost: float, balance: float) -> bool:
     """
     At 9:31 AM, decide: keep holding or sell and rotate.
-    Returns True = keep holding (skip sell + skip new buy today).
-    Returns False = sell now and let main loop find a new pick.
-    Criteria: stock still above EMA20 AND smart composite score >= _MIN_SMART_HOLD_SCORE.
+    Returns True  = keep holding (still ranked top 3 in fresh universe scan).
+    Returns False = sell now; main loop finds a new pick at 9:35 AM.
     AH/PM positions never reach here — they sell unconditionally at 9:35 AM.
     """
-    log(f"Morning hold check for {symbol}...")
+    log(f"Morning rank check for {symbol} — scanning full universe...")
     try:
-        from kzer_bot.grinder_strategy import (
-            GrinderMarketData as _GMD,
-            SmartGrinderStrategy as _SGS,
-            SmartMarketContext as _SMC,
-        )
-        _md  = _GMD()
-        _ctx = _SMC.load_or_fetch()
-        _md.prefetch([symbol])
-        snap = _md.snapshot(symbol)
-        if snap is None:
-            log(f"  No data for {symbol} — rotating out")
-            return False
-        if snap.last_close <= snap.ema20:
-            log(f"  {symbol} below EMA20 — rotating out")
-            notify(
-                f"🔄 <b>Morning Decision — rotating out of <code>{symbol}</code></b>\n\n"
-                f"📉 Stock fell below EMA20 — trend broken\n"
-                f"🔍 Scanning for new pick at 9:35 AM..."
-            )
-            return False
-        picks = _SGS(_md, _ctx).scan([symbol])
-        score = picks[0].score if picks else 0
-        if score >= _MIN_SMART_HOLD_SCORE:
-            log(f"  {symbol} smart score {score:.1f} ≥ {_MIN_SMART_HOLD_SCORE} — HOLDING")
-            pos_pct = (snap.last_close - entry) / entry * 100 if entry > 0 else 0
+        scan_symbols, _ = _choose_scan_symbols()
+        symbols = scan_symbols[:200]
+        _md  = GrinderMarketData()
+        _md.prefetch(symbols)
+        _ctx = SmartMarketContext.load_or_fetch()
+        picks = SmartGrinderStrategy(_md, _ctx).scan(symbols)
+        if not picks:
+            picks = GrinderStrategy(_md).scan(symbols)
+
+        rank  = next((i + 1 for i, p in enumerate(picks[:10]) if p.symbol == symbol), None)
+        score = next((p.score for p in picks[:10] if p.symbol == symbol), 0.0)
+
+        snap    = _md.snapshot(symbol)
+        cur_px  = snap.last_close if snap else entry
+        pos_pct = (cur_px - entry) / entry * 100 if entry > 0 else 0
+
+        if rank is not None and rank <= 3:
+            log(f"  {symbol} ranked #{rank} (score {score:.1f}) — HOLDING")
             notify(
                 f"📊 <b>Morning Decision — holding <code>{symbol}</code></b>\n\n"
-                f"🎯 Smart score: <b>{score:.1f}/100</b> — still trending\n"
-                f"💼 {shares:.4f} sh @ ${entry:.2f}  |  Now ${snap.last_close:.2f}"
-                f" ({pos_pct:+.1f}%)\n"
-                f"✅ Holding another day — no new buy today\n"
-                f"🎯 Target: +{_PROFIT_TARGET_PCT:.0f}%  |  3:55 PM lock: +{_LATE_LOCK_PCT:.0f}%"
+                f"🏆 Ranked <b>#{rank}</b> in universe  |  Score: <b>{score:.1f}</b>\n"
+                f"💼 {shares:.4f} sh @ ${entry:.2f}  |  Now ${cur_px:.2f} ({pos_pct:+.1f}%)\n"
+                f"✅ Still top 3 — holding another day\n"
+                f"🌙 Next rank check at 3:55 PM ET"
             )
             return True
-        log(f"  {symbol} score {score:.1f} < {_MIN_SMART_HOLD_SCORE} — rotating out")
+
+        rank_str = f"#{rank}" if rank else "outside top 10"
+        top1     = picks[0].symbol if picks else "?"
+        log(f"  {symbol} {rank_str} — rotating out → new top pick: {top1}")
         notify(
             f"🔄 <b>Morning Decision — rotating out of <code>{symbol}</code></b>\n\n"
-            f"📊 Smart score: <b>{score:.1f}</b> — momentum faded\n"
-            f"🔍 Scanning for new pick at 9:35 AM..."
+            f"📊 Ranked <b>{rank_str}</b> — dropped out of top 3\n"
+            f"🔝 New top pick: <code>{top1}</code>  |  Buying at 9:35 AM..."
         )
         return False
     except Exception as exc:
-        log(f"  Morning hold check error: {exc} — defaulting to sell")
+        log(f"  Morning rank check error: {exc} — defaulting to sell")
         return False
 
 
@@ -3463,8 +3468,8 @@ def hold_and_sell(balance: float = 0.0) -> None:
                 f"📊 <b>Position open — overnight hold</b>\n\n"
                 f"🎫 <code>{symbol}</code>  |  {shares:.4f} sh @ ${entry:.2f}\n"
                 f"💰 Cost: <b>${cost:.2f} USD</b>  |  📋 {strat}\n"
-                f"🔄 {'Market sell + rotation at <b>9:35 AM ET</b>' if is_ah_position else 'Morning decision at <b>9:31 AM ET</b> — hold if trending or rotate'}\n"
-                f"🎯 Target: +{_profit_target_pct:.1f}%  |  3:55 PM lock: +{_LATE_LOCK_PCT:.0f}%  |  No stop loss"
+                f"🔄 {'Market sell + rotation at <b>9:35 AM ET</b>' if is_ah_position else 'Rank check at <b>9:31 AM ET</b> — hold if top 3, sell if not'}\n"
+                f"🎯 Target: +{_profit_target_pct:.1f}%  |  Trailing stop: +{_TRAILING_STOP_TRIGGER_PCT:.0f}% trigger"
             )
 
         fill_notified = not pre_open
@@ -3630,24 +3635,52 @@ def hold_and_sell(balance: float = 0.0) -> None:
         f"🎫 <code>{symbol}</code>  |  {shares:.4f} sh @ ${entry:.2f}\n"
         f"💰 Cost: <b>${cost:.2f} USD</b>  |  📋 {strat}\n"
         f"🎯 Profit target: <b>+{_profit_target_pct:.1f}%</b>  |  "
-        f"Late lock: <b>+{_LATE_LOCK_PCT:.0f}%</b> at 3:55 PM\n"
-        f"🌙 Below target at 3:55 PM → hold overnight, no stop loss"
+        f"Trailing stop: +{_TRAILING_STOP_TRIGGER_PCT:.0f}% trigger / {_TRAILING_STOP_DISTANCE_PCT:.0f}% trail\n"
+        f"🌙 3:55 PM rank check — hold overnight if top 3, sell if not"
     )
 
     while True:
         now = now_et()
 
-        # ── 3:55 PM: always sell — Rule 1: never hold cash, redeploy into AH ─
+        # ── 3:55 PM: rank check — hold overnight if top 3, sell if not ─────
         if now.hour > _SELL_HOUR or (now.hour == _SELL_HOUR and now.minute >= _SELL_MINUTE):
             try:
-                snap_eod = md.snapshot(symbol)
+                snap_eod  = md.snapshot(symbol)
                 price_eod = snap_eod.last_price if snap_eod else entry
             except Exception:
                 price_eod = entry
             eod_pct = (price_eod - entry) / entry * 100 if entry > 0 else 0
-            log(f"3:55 PM: {eod_pct:+.1f}% — selling always, AH rotation follows")
-            _execute_sell_order(symbol, entry, shares, cost, strat, "3:55 PM")
-            return
+
+            # Fresh rank check against full universe
+            eod_rank  = None
+            eod_score = 0.0
+            try:
+                _sc_syms, _ = _choose_scan_symbols()
+                _eod_md  = GrinderMarketData()
+                _eod_md.prefetch(_sc_syms[:200])
+                _eod_ctx = SmartMarketContext.load_or_fetch()
+                _eod_picks = SmartGrinderStrategy(_eod_md, _eod_ctx).scan(_sc_syms[:200])
+                if not _eod_picks:
+                    _eod_picks = GrinderStrategy(_eod_md).scan(_sc_syms[:200])
+                eod_rank  = next((i + 1 for i, p in enumerate(_eod_picks[:10]) if p.symbol == symbol), None)
+                eod_score = next((p.score for p in _eod_picks[:10] if p.symbol == symbol), 0.0)
+            except Exception as _exc:
+                log(f"  3:55 PM rank check failed: {_exc} — defaulting to sell")
+
+            if eod_rank is not None and eod_rank <= 3:
+                log(f"3:55 PM: {eod_pct:+.1f}% — ranked #{eod_rank}, holding overnight")
+                notify(
+                    f"🌙 <b>3:55 PM — Holding overnight <code>{symbol}</code></b>\n\n"
+                    f"🏆 Ranked <b>#{eod_rank}</b> in universe  |  Score: {eod_score:.1f}\n"
+                    f"📈 P&L: <b>{eod_pct:+.1f}%</b>  |  Price: ${price_eod:.2f}\n"
+                    f"✅ Still top 3 — next rank check at 9:31 AM ET"
+                )
+                return  # position stays open; overnight path handles 9:31 AM decision
+            else:
+                rank_str = f"#{eod_rank}" if eod_rank else "outside top 10"
+                log(f"3:55 PM: {eod_pct:+.1f}% — {rank_str} — selling, AH rotation follows")
+                _execute_sell_order(symbol, entry, shares, cost, strat, "3:55 PM")
+                return
 
         # ── Profit target & Trailing stop: check every 60s ─────────────────
         try:
