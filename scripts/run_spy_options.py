@@ -55,7 +55,7 @@ LOG_FILE  = ROOT / "data" / "options.log"
 _DRY_RUN: bool = False
 _keepalive_proc: "subprocess.Popen | None" = None
 _last_report_t: float = 0.0
-REPORT_INTERVAL_SECS = 15 * 60
+REPORT_INTERVAL_SECS = 30 * 60
 
 
 # ── Keepalive ─────────────────────────────────────────────────────────────────
@@ -309,14 +309,17 @@ def _plan_report_msg(bias: "PreMarketBias", today: str, mins_to_entry: int) -> s
 
 
 def _position_report_msg(pos: "OptionsPosition", current_mid: float) -> str:
+    from kzer_bot.spy_options_strategy import (
+        PROFIT_TARGET_PCT, PARTIAL_CLOSE_PCT, NOON_CLOSE_HOUR, NOON_CLOSE_MINUTE,
+    )
     n   = now_et()
     pnl_pct = (current_mid - pos.entry_premium) / pos.entry_premium * 100 if pos.entry_premium > 0 else 0.0
     pnl_usd = (current_mid - pos.entry_premium) * pos.contracts * 100
-    noon    = n.replace(hour=12, minute=0, second=0, microsecond=0)
-    mins_to_noon = max(int((noon - n).total_seconds() / 60), 0)
+    close_dt = n.replace(hour=NOON_CLOSE_HOUR, minute=NOON_CLOSE_MINUTE, second=0, microsecond=0)
+    mins_to_close = max(int((close_dt - n).total_seconds() / 60), 0)
+    close_label = f"{NOON_CLOSE_HOUR % 12 or 12}:{NOON_CLOSE_MINUTE:02d} PM"
     trend_emoji = "📈" if pnl_pct > 5 else "📉" if pnl_pct < -5 else "⚡"
     direction_emoji = "🔴" if pos.contract.option_type == "put" else "🟢"
-    from kzer_bot.spy_options_strategy import PROFIT_TARGET_PCT, PARTIAL_CLOSE_PCT
     lines = [
         f"{direction_emoji}{trend_emoji} <b>SPY ${int(pos.contract.strike)} {pos.contract.option_type.upper()} 0DTE</b>",
         f"   Entry: ${pos.entry_premium:.2f}  Now: ${current_mid:.2f}",
@@ -324,11 +327,12 @@ def _position_report_msg(pos: "OptionsPosition", current_mid: float) -> str:
         f"   Contracts: {pos.contracts}  Cost basis: ${pos.cost_basis:.0f}",
     ]
     if pos.partial_closed:
-        lines.append(f"   ✅ Partial close taken at +{PARTIAL_CLOSE_PCT:.0f}%")
+        lines.append(f"   ✅ Partial close taken")
         lines.append(f"   Next target: +{PROFIT_TARGET_PCT:.0f}% (${pos.entry_premium * (1 + PROFIT_TARGET_PCT / 100):.2f}/contract)")
     else:
         lines.append(f"   Partial at +{PARTIAL_CLOSE_PCT:.0f}% → full at +{PROFIT_TARGET_PCT:.0f}%")
-    lines.append(f"   ⏰ Noon close in {mins_to_noon} min")
+    lines.append(f"   ⏰ Hard close {close_label} ET  ({mins_to_close} min)")
+    lines.append(f"   📅 Tomorrow 9:45 AM: fade PM gap (50% allocation)")
     return "\n".join(lines)
 
 

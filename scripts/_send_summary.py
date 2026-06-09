@@ -12,6 +12,7 @@ for line in open('.env').readlines():
         os.environ[k.strip()] = v.strip()
 
 from kzer_bot.telegram import send_message
+from kzer_bot.spy_options_strategy import NOON_CLOSE_HOUR, NOON_CLOSE_MINUTE
 
 # ---- live SPY price ----
 try:
@@ -23,8 +24,10 @@ except Exception:
 
 # ---- current open position ----
 pos = json.load(open('data/options_position.json'))
-entry    = pos['entry_premium']
+entry     = pos['entry_premium']
 contracts = pos['contracts']
+strike    = int(pos['strike'])
+opt_type  = pos['option_type'].upper()
 
 # last reported premium from log
 current_prem = 0.0
@@ -41,63 +44,60 @@ except Exception:
 open_pnl_usd = (current_prem - entry) * 100 * contracts if current_prem else 0.0
 open_pnl_pct = (current_prem - entry) / entry * 100      if current_prem else 0.0
 
-# ---- known realized trades today ----
-# Session 1: 11 SPY $749 CALL (09:46 AM)
-#   partial close 11 contracts: +$803 (+365%)
-#   remaining 11 noon close:    -$83  (-75%)
-s1_partial =  803.0
-s1_full    =  -83.0
-s1_net     = s1_partial + s1_full    # +720
+# ---- realized trades this afternoon ----
+# Afternoon session: 2 SPY $730 CALL @ $0.745 avg = $149 cost
+#   1 contract sold at market ~+150% = +$112
+realized_usd = 112.0
+realized_pct = 150.0
 
-# Session 2: 2 SPY $730 CALL (12:44 PM, entry $0.745)
-#   1 contract sold at market ~+150%: +$112
-s2_partial =  112.0                  # realized on sold contract
-s2_open    = open_pnl_usd            # unrealized on remaining 1 contract
-
-total_realized   = s1_net + s2_partial
-total_unrealized = s2_open
+total_realized   = realized_usd
+total_unrealized = open_pnl_usd
 total_day        = total_realized + total_unrealized
 
-wins  = 2  # session 1 partial + session 2 partial
-losses = 1  # session 1 noon close
+# ---- timing ----
+import pytz
+et = pytz.timezone('America/New_York')
+now_et_dt = datetime.now(et)
+now_str   = now_et_dt.strftime('%I:%M %p ET')
+close_str = f"{NOON_CLOSE_HOUR % 12 or 12}:{NOON_CLOSE_MINUTE:02d} PM ET"
 
-# ---- format message ----
-sign = '+' if total_day >= 0 else ''
-open_sign = '+' if open_pnl_usd >= 0 else ''
-now_et = datetime.now(timezone.utc).strftime('%I:%M %p ET')
+close_dt  = now_et_dt.replace(hour=NOON_CLOSE_HOUR, minute=NOON_CLOSE_MINUTE, second=0, microsecond=0)
+mins_left = max(int((close_dt - now_et_dt).total_seconds() / 60), 0)
+
+# ---- format ----
+open_sign  = '+' if open_pnl_usd  >= 0 else ''
+total_sign = '+' if total_day     >= 0 else ''
+prem_str   = f"${current_prem:.2f}" if current_prem else "N/A"
+open_emoji = "📈" if open_pnl_pct > 5 else "📉" if open_pnl_pct < -5 else "⚡"
 
 msg = (
-    f"<b>📊 0DTE SPY OPTIONS — DAILY SUMMARY</b>\n"
-    f"<b>June 9, 2026</b> | {now_et}\n"
-    f"{'─'*32}\n"
+    f"<b>📊 0DTE SPY — AFTERNOON SESSION</b>\n"
+    f"<b>June 9, 2026</b>  |  {now_str}\n"
+    f"{'─'*34}\n"
     f"\n"
-    f"<b>SESSION 1</b>  |  SPY $749 CALL  |  09:46 AM\n"
-    f"  🟢 Partial close (11 contracts): <b>+$803</b> (+365%)\n"
-    f"  🔴 Noon hard close (11 contracts): <b>-$83</b> (-75%)\n"
-    f"  Session net: <b>+$720</b>\n"
+    f"<b>TRADE</b>  SPY ${strike} {opt_type}  |  Entry: ${entry:.3f}\n"
+    f"  💰 Cost: $149  |  2 contracts bought\n"
+    f"  🟢 Sold 1 contract at market: <b>+$112  (~+150%)</b>\n"
     f"\n"
-    f"<b>SESSION 2</b>  |  SPY $730 CALL  |  12:44 PM\n"
-    f"  Entry: $0.745 avg  |  2 contracts  |  Cost: $149\n"
-    f"  🟢 Partial close (1 contract): <b>+$112</b> (~+150%)\n"
-    f"  ⏳ Open (1 contract): now ${current_prem:.2f}  "
-    f"<b>{open_sign}{open_pnl_usd:.0f}</b> ({open_sign}{open_pnl_pct:.0f}%)\n"
+    f"<b>OPEN</b>  1 contract  |  {open_emoji} Now: {prem_str}\n"
+    f"  P&L: <b>{open_sign}{open_pnl_usd:.0f} USD  ({open_sign}{open_pnl_pct:.0f}%)</b>\n"
     f"\n"
-    f"{'─'*32}\n"
-    f"<b>TODAY</b>  |  SPY ${spy_price:.2f}\n"
-    f"  Realized P&L:   <b>+${total_realized:.0f}</b>\n"
-    f"  Unrealized P&L: <b>{open_sign}${abs(total_unrealized):.0f}</b>\n"
-    f"  <b>Total day:  {sign}${total_day:.0f}</b>\n"
-    f"  Record:  {wins}W / {losses}L  (win rate {wins/(wins+losses)*100:.0f}%)\n"
+    f"{'─'*34}\n"
+    f"<b>TOTALS</b>  |  SPY ${spy_price:.2f}\n"
+    f"  Realized:   <b>+${total_realized:.0f}</b>\n"
+    f"  Unrealized: <b>{open_sign}${abs(total_unrealized):.0f}</b>\n"
+    f"  <b>Day P&L: {total_sign}${total_day:.0f}</b>\n"
+    f"  Record: 1W / 0L\n"
     f"\n"
-    f"{'─'*32}\n"
+    f"{'─'*34}\n"
     f"<b>PLAN</b>\n"
-    f"  🕓 Hold $730 CALL → hard close 3:25 PM ET\n"
-    f"  💤 No more trades today after close\n"
-    f"  📅 Tomorrow 9:45 AM: fade PM gap\n"
-    f"     SPY UP → buy PUTS | SPY DOWN → buy CALLS\n"
-    f"     Allocation: 50% of balance per bet"
+    f"  ⏰ Hard close at <b>{close_str}</b>  ({mins_left} min)\n"
+    f"  💤 No more trades today\n"
+    f"  📅 Tomorrow 9:45 AM ET:\n"
+    f"     SPY UP → BUY PUTS\n"
+    f"     SPY DOWN → BUY CALLS\n"
+    f"     Max 50% of balance per trade"
 )
 
 send_message(msg)
-print("Telegram summary sent.")
-print(f"Realized: +${total_realized:.0f}  |  Open: {open_sign}${open_pnl_usd:.0f}  |  Day total: {sign}${total_day:.0f}")
+print(f"Summary sent — Day P&L: {total_sign}${total_day:.0f}  |  Open: {open_sign}${open_pnl_usd:.0f}  |  Close in {mins_left} min")
