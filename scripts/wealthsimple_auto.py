@@ -1294,8 +1294,9 @@ def navigate_to_spy_options(page):
             "check data/screen_spy_stock_page.png"
         )
 
-    # Dismiss all modals/overlays: "Build a trade with AI", "What's your view on SPY?",
-    # and any other interstitial that blocks the chain.
+    # Kill all popups/panels — call twice because WS sometimes re-opens the AI panel
+    _dismiss_options_overlays(page)
+    page.wait_for_timeout(500)
     _dismiss_options_overlays(page)
 
     snap(page, "options_chain_ready")
@@ -1304,62 +1305,56 @@ def navigate_to_spy_options(page):
 
 def _dismiss_options_overlays(page) -> None:
     """
-    Close any WS options-page overlays: the 'Build a trade with AI' modal
-    and the persistent 'What's your view on SPY?' side panel.
-    The panel has a visible × button at its top-right corner.
+    Close all WS options-page overlays on every navigation:
+      - 'What's your view on SPY?' panel  → aria-label="Close chat panel"
+      - 'Build a trade with AI' modal      → "Maybe later" button
+      - Any other close/× button on screen
     """
-    # 1. Text-based dismiss for the modal ("Maybe later" button)
+    # 1. 'What's your view on SPY?' panel — exact aria-label confirmed from live DOM dump
+    for sel in [
+        '[aria-label="Close chat panel"]',
+        '[aria-label="close chat panel"]',
+    ]:
+        try:
+            btn = page.locator(sel).first
+            if btn.is_visible(timeout=800):
+                btn.click()
+                page.wait_for_timeout(500)
+                print(f"  Closed 'What's your view' panel via: {sel}")
+        except Exception:
+            continue
+
+    # 2. 'Build a trade with AI' modal dismiss
     for dismiss_text in ["Maybe later", "Maybe Later", "No thanks", "Not now"]:
         try:
             btn = page.get_by_text(dismiss_text, exact=True).first
             if btn.is_visible(timeout=600):
                 btn.click()
-                page.wait_for_timeout(600)
-                print(f"  Dismissed modal via: '{dismiss_text}'")
+                page.wait_for_timeout(500)
+                print(f"  Dismissed AI modal via: '{dismiss_text}'")
                 break
         except Exception:
             continue
 
-    # 2. Kill the 'What's your view on SPY?' panel via its × close button.
-    #    Target: any button/element with a single-char × text on the RIGHT half of the screen.
-    closed = page.evaluate("""
+    # 3. Any remaining × / Close buttons in the upper-right area of the screen
+    page.evaluate("""
         () => {
-            const closeSymbols = ['×', '✕', '✖', 'X', 'x'];
-            const all = [...document.querySelectorAll('button, [role="button"], svg, [aria-label]')];
+            const closeSymbols = new Set(['×', '✕', '✖', '⨯']);
+            const all = [...document.querySelectorAll('button, [role="button"]')];
             for (const el of all) {
                 const txt   = (el.textContent || el.innerText || '').trim();
                 const label = (el.getAttribute('aria-label') || '').toLowerCase();
                 const rect  = el.getBoundingClientRect();
-                const onRight = rect.x > window.innerWidth * 0.45;
-                const inTop   = rect.y < 300;
-                if (onRight && inTop && (closeSymbols.includes(txt) || label.includes('close'))) {
+                if (rect.width === 0) continue;
+                if ((closeSymbols.has(txt) || label.includes('close'))
+                        && rect.x > window.innerWidth * 0.4
+                        && rect.y < 250) {
                     el.click();
-                    return 'closed_panel:' + (txt || label);
                 }
             }
-            return false;
         }
     """)
-    if closed:
-        page.wait_for_timeout(500)
-        print(f"  Closed side panel via: {closed}")
-
-    # 3. Aria-label close buttons (covers any remaining overlays)
-    for sel in ['[aria-label="Close"]', '[aria-label="close"]', '[aria-label*="Close" i]']:
-        try:
-            btn = page.locator(sel).first
-            if btn.is_visible(timeout=300):
-                btn.click()
-                page.wait_for_timeout(300)
-        except Exception:
-            continue
-
-    # 4. Escape as final fallback
-    try:
-        page.keyboard.press("Escape")
-        page.wait_for_timeout(300)
-    except Exception:
-        pass
+    page.wait_for_timeout(300)
 
 
 def select_option_expiry(page, expiry: str) -> bool:
