@@ -5,10 +5,12 @@ import unittest
 from pathlib import Path
 from urllib.parse import parse_qs
 
-from kzer_bot.telegram import TelegramConfig, load_dotenv, send_message, trade_message
+from kzer_bot.telegram import TelegramConfig, get_commands, load_dotenv, send_message, trade_message
 
 
 class FakeResponse:
+    def __init__(self, payload=None):
+        self.payload = payload or {"ok": True}
     def __enter__(self):
         return self
 
@@ -16,7 +18,7 @@ class FakeResponse:
         return False
 
     def read(self):
-        return json.dumps({"ok": True}).encode("utf-8")
+        return json.dumps(self.payload).encode("utf-8")
 
 
 class TelegramTests(unittest.TestCase):
@@ -65,6 +67,18 @@ class TelegramTests(unittest.TestCase):
             finally:
                 os.environ.pop("TELEGRAM_BOT_TOKEN", None)
                 os.environ.pop("TELEGRAM_CHAT_ID", None)
+
+    def test_get_commands_accepts_only_configured_chat(self):
+        payload = {"ok": True, "result": [
+            {"update_id": 10, "message": {"chat": {"id": 123}, "text": "/stop"}},
+            {"update_id": 11, "message": {"chat": {"id": 999}, "text": "/resume"}},
+        ]}
+        commands, offset = get_commands(
+            config=TelegramConfig(bot_token="token", chat_id="123"),
+            opener=lambda request, timeout: FakeResponse(payload),
+        )
+        self.assertEqual(commands, ["/stop"])
+        self.assertEqual(offset, 12)
 
 
 if __name__ == "__main__":

@@ -83,6 +83,37 @@ def send_message(
         raise RuntimeError(f"Telegram API returned an error: {data}")
 
 
+def get_commands(
+    offset: int = 0,
+    config: TelegramConfig | None = None,
+    timeout: float = 5.0,
+    opener: Callable[..., object] = urlopen,
+) -> tuple[list[str], int]:
+    """Poll commands from the configured chat only; return commands and next offset."""
+    cfg = config or TelegramConfig.from_env()
+    query = urlencode({"offset": offset, "timeout": 0, "allowed_updates": json.dumps(["message"])})
+    request = Request(f"{TELEGRAM_API}/bot{cfg.bot_token}/getUpdates?{query}", method="GET")
+    with opener(request, timeout=timeout) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    if not data.get("ok"):
+        raise RuntimeError(f"Telegram getUpdates returned an error: {data}")
+    commands: list[str] = []
+    next_offset = offset
+    for update in data.get("result", []):
+        next_offset = max(next_offset, int(update.get("update_id", 0)) + 1)
+        message = update.get("message") or {}
+        chat = message.get("chat") or {}
+        chat_id = str(chat.get("id", ""))
+        username = str(chat.get("username", "")).lstrip("@").lower()
+        configured = str(cfg.chat_id).lstrip("@")
+        if chat_id != str(cfg.chat_id) and configured != chat_id and configured.lower() != username:
+            continue
+        text = str(message.get("text", "")).strip().lower().split("@", 1)[0]
+        if text in {"/stop", "/resume", "/status"}:
+            commands.append(text)
+    return commands, next_offset
+
+
 def trade_message(
     event: str,
     symbol: str | None = None,

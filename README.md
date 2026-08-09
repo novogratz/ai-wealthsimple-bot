@@ -111,6 +111,20 @@ python scripts/watchdog.py
 - refuses any expiry other than the current ET date and any strike outside 4–5 SPY points OTM; and
 - only submits sell-to-close orders matching its own local position ledger.
 
+Production safeguards in v3.0.0:
+
+- confirms actual fills from Wealthsimple before trusting entry premium or quantity;
+- uses Wealthsimple's displayed bid for exits, with Yahoo only as a fallback;
+- cancels an unconfirmed pending bot order automatically;
+- enforces one entry per trading day plus a persistent daily-loss lockout;
+- handles NYSE holidays and 1:00 PM early closes;
+- relaunches Chrome automatically with the persistent trusted profile;
+- writes every contract score and lifecycle decision to `data/options_audit.jsonl`; and
+- accepts Telegram `/status`, `/stop`, and `/resume` from the configured chat.
+
+`/stop` prevents new entries. If the bot owns a reconciled position, it submits a
+sell-to-close for that exact contract and quantity. It never issues a naked sell.
+
 Safe paper-mode launch (no orders):
 
 ```bash
