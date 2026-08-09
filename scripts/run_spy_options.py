@@ -568,7 +568,12 @@ def _half_hour_report() -> None:
 
 
 def _half_hour_reporter_loop() -> None:
-    """Run forever and align reports to wall-clock :00 and :30 ET."""
+    """Publish once at startup, then align reports to wall-clock :00/:30 ET."""
+    try:
+        _half_hour_report()
+    except Exception as exc:
+        log(f"[reporter] Startup report failed: {exc}")
+
     while not _reporter_stop.is_set():
         n = now_et()
         minute_target = 30 if n.minute < 30 else 60

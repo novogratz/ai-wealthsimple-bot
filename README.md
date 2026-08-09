@@ -105,7 +105,7 @@ python scripts/watchdog.py
 `run_grinder.py` delegates to the SPY 0DTE bot. On weekdays it:
 
 - refreshes the Wealthsimple Chrome session every two minutes;
-- stays running across nights, weekends, and holidays and sends a detailed SPY quant update at every exact `:00` and `:30` ET boundary;
+- sends a detailed SPY scan and plan immediately at startup, then stays running across nights, weekends, and holidays with updates at every exact `:00` and `:30` ET boundary;
 - shows the directional factor contributions and a contract execution-score breakdown for spread, volume, open interest, premium fit, strike distance, and IV;
 - considers one autonomous long call or long put entry from 9:45–10:00 AM ET;
 - buys the maximum affordable whole contracts, targeting 50–100% of available USD cash;
