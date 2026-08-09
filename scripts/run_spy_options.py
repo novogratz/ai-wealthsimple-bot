@@ -48,14 +48,26 @@ from kzer_bot.telegram import send_message
 
 TZ        = ZoneInfo("America/Toronto")
 AUTO      = ROOT / "scripts" / "wealthsimple_auto.py"
-PYTHON    = str(ROOT / ".venv" / "Scripts" / "python.exe")
+# Reuse the interpreter that launched this script. This works for both
+# .venv/bin/python on macOS/Linux and .venv\Scripts\python.exe on Windows.
+PYTHON    = sys.executable
 POS_FILE  = ROOT / "data" / "options_position.json"
 LOG_FILE  = ROOT / "data" / "options.log"
+BOT_ID    = "spy-0dte-long-v1"
+
+# Deploy the largest whole-contract amount affordable by the live USD cash.
+# With integer contracts this naturally invests 50–100% whenever a contract is
+# affordable, while the reviewed debit is still forbidden from exceeding cash.
+MIN_DEPLOY_PCT = 0.50
+PREMARKET_SCAN_HOUR = 9
+PREMARKET_SCAN_MINUTE = 0
+PREMARKET_REPORT_SECS = 5 * 60
 
 _DRY_RUN: bool = False
 _keepalive_proc: "subprocess.Popen | None" = None
 _last_report_t: float = 0.0
-REPORT_INTERVAL_SECS = 30 * 60
+REPORT_INTERVAL_SECS = 5 * 60
+POSITION_REPORT_SECS = 5 * 60
 
 
 # ── Keepalive ─────────────────────────────────────────────────────────────────
@@ -75,6 +87,17 @@ def _start_keepalive() -> None:
         log(f"[keepalive] Started (PID {_keepalive_proc.pid}) — refreshing WS session every 2 min")
     except Exception as exc:
         log(f"[keepalive] Failed to start: {exc}")
+
+
+def _stop_keepalive() -> None:
+    global _keepalive_proc
+    if _keepalive_proc is not None and _keepalive_proc.poll() is None:
+        _keepalive_proc.terminate()
+        try:
+            _keepalive_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _keepalive_proc.kill()
+    _keepalive_proc = None
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -105,6 +128,7 @@ def notify(msg: str) -> None:
 
 def save_position(pos: OptionsPosition) -> None:
     data = {
+        "bot_id":          BOT_ID,
         "symbol":          "SPY",
         "option_type":     pos.contract.option_type,
         "strike":          pos.contract.strike,
@@ -128,6 +152,9 @@ def load_position() -> OptionsPosition | None:
         return None
     try:
         d = json.loads(POS_FILE.read_text(encoding="utf-8"))
+        if d.get("bot_id") != BOT_ID or d.get("symbol") != "SPY":
+            log("[SAFETY] Position ledger is not owned by this SPY 0DTE bot")
+            return None
         contract = OptionContract(
             expiry=d["expiry"],
             strike=float(d["strike"]),
@@ -170,17 +197,58 @@ def get_available_balance() -> float:
 
 
 def calc_max_contracts(ask_price: float, balance: float) -> int:
-    """How many contracts can we buy with the available balance? Each contract = ask × 100."""
+    """Buy the maximum whole contracts without exceeding the USD cash balance."""
     if ask_price <= 0 or balance <= 0:
-        return 1
-    # Use 50% of balance per trade (risk management)
-    usable   = balance * 0.50
+        return 0
+    usable   = balance
     cost_per = ask_price * 100
     n        = int(usable // cost_per)
-    return max(n, 1)
+    return max(n, 0)
 
 
 # ── AI contract picker ────────────────────────────────────────────────────────
+
+def _contract_quant_score(contract: OptionContract, spy_price: float) -> tuple[float, dict[str, float]]:
+    """Score a bounded 0DTE contract on execution quality and convexity (0–100)."""
+    ask = contract.ask if contract.ask > 0 else contract.mid
+    spread = max(contract.ask - contract.bid, 0.0) if contract.ask > 0 and contract.bid > 0 else ask
+    spread_pct = spread / ask if ask > 0 else 1.0
+    distance = abs(contract.strike - spy_price)
+
+    # Tight spreads and real activity matter most for executable 0DTE orders.
+    spread_score = max(0.0, 30.0 * (1.0 - min(spread_pct, 1.0)))
+    volume_score = min(contract.volume / 10_000, 1.0) * 20.0
+    oi_score = min(contract.open_interest / 5_000, 1.0) * 12.0
+    premium_score = max(0.0, 18.0 - abs(ask - TARGET_PREMIUM_MID) / 0.25 * 18.0)
+    distance_score = max(0.0, 15.0 - abs(distance - 4.5) / 3.5 * 15.0)
+    iv_score = 5.0 if 0.10 <= contract.iv <= 1.50 else 1.0
+    total = max(0.0, min(100.0, spread_score + volume_score + oi_score + premium_score + distance_score + iv_score))
+    return total, {
+        "spread": spread_score, "volume": volume_score, "oi": oi_score,
+        "premium": premium_score, "distance": distance_score, "iv": iv_score,
+    }
+
+
+def _rank_contracts(candidates: list[OptionContract], spy_price: float) -> list[tuple[OptionContract, float]]:
+    return sorted(
+        ((c, _contract_quant_score(c, spy_price)[0]) for c in candidates),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+
+
+def _contract_leaderboard(candidates: list[OptionContract], spy_price: float, limit: int = 3) -> str:
+    rows = []
+    for rank, (c, score) in enumerate(_rank_contracts(candidates, spy_price)[:limit], 1):
+        ask = c.ask if c.ask > 0 else c.mid
+        spread = max(c.ask - c.bid, 0.0)
+        rows.append(
+            f"#{rank} ${c.strike:.0f} {c.option_type.upper()} | score {score:.1f}/100 | "
+            f"ask ${ask:.2f} | spread ${spread:.2f} | {abs(c.strike-spy_price):.1f}pt OTM | "
+            f"vol {c.volume:,} OI {c.open_interest:,}"
+        )
+    return "\n".join(rows)
+
 
 def _ai_pick_contract(
     bias: PreMarketBias,
@@ -188,60 +256,26 @@ def _ai_pick_contract(
     spy_price: float,
 ) -> OptionContract:
     """
-    Ask Claude to pick the best contract from the candidate list.
-    Falls back to the candidate closest to TARGET_PREMIUM_MID on failure.
+    Pick the highest deterministic quant score. The score is auditable and does
+    not depend on an LLM response at trade time.
     """
     if not candidates:
         raise ValueError("No candidates to pick from")
 
-    chain_lines = "\n".join(
-        f"  ${int(c.strike)} {c.option_type.upper()}: ask=${c.ask:.2f}  bid=${c.bid:.2f}"
-        f"  IV={c.iv:.0%}  vol={c.volume:,}  OI={c.open_interest:,}"
-        for c in candidates
-    )
-
-    prompt = (
-        f"0DTE SPY contrarian gap-fade trade. Pick the single best options contract to buy.\n\n"
-        f"Market context:\n"
-        f"- SPY pre-market: {bias.pm_pct:+.2f}% ({bias.direction}) → fading with {bias.fade_with.upper()}S\n"
-        f"- SPY live price: ${spy_price:.2f}\n"
-        f"- VIX: {bias.vix:.1f}\n"
-        f"- ES futures 1h: {bias.es_pct:+.2f}%\n\n"
-        f"Available 0DTE {bias.fade_with.upper()} contracts (ask ${TARGET_PREMIUM_MIN:.2f}–${TARGET_PREMIUM_MAX:.2f} range):\n"
-        f"{chain_lines}\n\n"
-        f"Criteria: best risk/reward, sufficient liquidity (volume > 1000 preferred), "
-        f"reasonable IV, not too deep OTM.\n"
-        f"Reply with ONLY the strike number (e.g. '726') on the first line, "
-        f"then one sentence explaining why."
-    )
-
-    try:
-        result = subprocess.run(
-            ["claude", "-p", prompt],
-            capture_output=True, text=True, timeout=30,
-        )
-        output = result.stdout.strip()
-        log(f"[AI] {output[:300]}")
-
-        m = re.search(r'\b(\d{3,4})\b', output)
-        if m:
-            ai_strike = int(m.group(1))
-            for c in candidates:
-                if int(c.strike) == ai_strike:
-                    log(f"[AI] Picked ${ai_strike}")
-                    return c
-        log("[AI] Could not parse strike from response — using algorithm fallback")
-    except Exception as e:
-        log(f"[AI] Analysis failed ({e}) — using algorithm fallback")
-
-    # Algorithm fallback: pick the candidate closest to TARGET_PREMIUM_MID
-    ask_price = lambda c: c.ask if c.ask > 0 else c.mid
-    return min(candidates, key=lambda c: abs(ask_price(c) - TARGET_PREMIUM_MID))
+    ranked = _rank_contracts(candidates, spy_price)
+    chosen, score = ranked[0]
+    log("[QUANT] Contract leaderboard:\n" + _contract_leaderboard(candidates, spy_price))
+    log(f"[QUANT] PLAN: buy ${chosen.strike:.0f} {chosen.option_type.upper()} at market | score {score:.1f}/100")
+    return chosen
 
 
 # ── Order execution ───────────────────────────────────────────────────────────
 
-def execute_buy_option(contract: OptionContract, n_contracts: int) -> bool:
+def execute_buy_option(contract: OptionContract, n_contracts: int, max_debit: float) -> bool:
+    expected_cost = contract.ask * n_contracts * 100
+    if n_contracts < 1 or expected_cost > max_debit:
+        log(f"[SAFETY] Refusing buy: {n_contracts} contract(s), expected cost ${expected_cost:.2f}")
+        return False
     if _DRY_RUN:
         log(
             f"[DRY] BUY {n_contracts}x SPY {contract.expiry} "
@@ -256,6 +290,7 @@ def execute_buy_option(contract: OptionContract, n_contracts: int) -> bool:
             "--strike",      str(int(contract.strike)),
             "--expiry",      contract.expiry,
             "--contracts",   str(n_contracts),
+            "--max-cost",    f"{max_debit:.2f}",
             "--confirm",
         ],
         capture_output=True, text=True, timeout=300,
@@ -266,6 +301,17 @@ def execute_buy_option(contract: OptionContract, n_contracts: int) -> bool:
 
 
 def execute_sell_option(contract: OptionContract, n_contracts: int) -> bool:
+    owned = load_position()
+    if (
+        owned is None
+        or owned.contract.expiry != contract.expiry
+        or owned.contract.option_type != contract.option_type
+        or owned.contract.strike != contract.strike
+        or n_contracts < 1
+        or n_contracts > owned.contracts
+    ):
+        log("[SAFETY] Refusing sell: contract/quantity is not owned in the bot ledger")
+        return False
     if _DRY_RUN:
         log(
             f"[DRY] SELL {n_contracts}x SPY {contract.expiry} "
@@ -299,13 +345,36 @@ def _plan_report_msg(bias: "PreMarketBias", today: str, mins_to_entry: int) -> s
         f"📊 <b>0DTE SPY OPTIONS | {today} | {'DRY RUN' if _DRY_RUN else 'LIVE'}</b>",
         f"{direction_emoji} <b>Playing {bias.fade_with.upper()}S today</b> (gap-fade + {regime_label} regime)",
         f"   SPY PM: {bias.pm_pct:+.2f}%  VIX: {bias.vix:.1f}  ES 1h: {bias.es_pct:+.2f}%",
-        f"   Strike range: ${TARGET_PREMIUM_MIN:.2f}–${TARGET_PREMIUM_MAX:.2f} ask | 3+ strikes OTM",
+        f"   Strike range: 4–5 SPY points OTM | ${TARGET_PREMIUM_MIN:.2f}–${TARGET_PREMIUM_MAX:.2f} ask",
+        f"   Sizing: maximum whole contracts within USD cash (target 50–100% deployed)",
+        f"   Safety: reviewed debit cannot exceed cash | no naked sells",
         f"   Entry window: 9:45–10:00 AM ET",
-        f"   Exits: +200% half close → +500% full | Noon hard close | 3:45 PM nuclear",
+        f"   Exits: +500% full close | 3:25 PM time close | 3:45 PM nuclear",
     ]
     if mins_to_entry > 0:
         lines.append(f"   ⏰ {mins_to_entry} min to entry window")
     return "\n".join(lines)
+
+
+def _scored_plan_report(bias: "PreMarketBias", today: str, mins_to_entry: int) -> str:
+    """Build the five-minute directional plan plus an indicative contract board."""
+    base = _plan_report_msg(bias, today, mins_to_entry)
+    spy_price = get_spy_price()
+    if spy_price <= 0 or bias.fade_with not in {"call", "put"}:
+        return base + "\n   Contract board: waiting for a valid SPY quote"
+    candidates = get_otm_contracts_in_range(
+        bias.fade_with, spy_price, expiry=now_et().date().isoformat()
+    )
+    if not candidates:
+        return base + "\n   Contract board: exact 0DTE quotes unavailable pre-open"
+    board = _contract_leaderboard(candidates, spy_price)
+    planned, score = _rank_contracts(candidates, spy_price)[0]
+    plan = (
+        f"PLAN → MARKET BUY ${planned.strike:.0f} {planned.option_type.upper()} "
+        f"at entry confirmation | score {score:.1f}/100"
+    )
+    log("[5-MIN PLAN]\n" + board + "\n" + plan)
+    return base + "\n\n<b>Quant contract board</b>\n" + board + "\n<b>" + plan + "</b>"
 
 
 def _position_report_msg(pos: "OptionsPosition", current_mid: float) -> str:
@@ -330,7 +399,7 @@ def _position_report_msg(pos: "OptionsPosition", current_mid: float) -> str:
         lines.append(f"   ✅ Partial close taken")
         lines.append(f"   Next target: +{PROFIT_TARGET_PCT:.0f}% (${pos.entry_premium * (1 + PROFIT_TARGET_PCT / 100):.2f}/contract)")
     else:
-        lines.append(f"   Partial at +{PARTIAL_CLOSE_PCT:.0f}% → full at +{PROFIT_TARGET_PCT:.0f}%")
+        lines.append(f"   Exit plan: full close at +{PROFIT_TARGET_PCT:.0f}% or mandatory time close")
     lines.append(f"   ⏰ Hard close {close_label} ET  ({mins_to_close} min)")
     lines.append(f"   📅 Tomorrow 9:45 AM: fade PM gap (50% allocation)")
     return "\n".join(lines)
@@ -360,6 +429,34 @@ def _sleep_until(hour: int, minute: int, label: str, period_fn=None) -> None:
         time.sleep(min(secs, 60))
 
 
+def premarket_plan_loop(today: str) -> PreMarketBias:
+    """Re-scan and publish a fresh SPY 0DTE plan every five minutes until 9:30 ET."""
+    global _last_report_t
+    latest: PreMarketBias | None = None
+    while True:
+        n = now_et()
+        if n.hour > 9 or (n.hour == 9 and n.minute >= 30):
+            break
+
+        latest = get_premarket_bias()
+        for reason in latest.reasons:
+            log(f"  {reason}")
+        mins_to_open = max(int((n.replace(hour=9, minute=30, second=0, microsecond=0) - n).total_seconds() / 60), 0)
+        if latest.fade_with == "skip":
+            notify(f"📊 <b>SPY 0DTE PREMARKET | {today}</b>\nNo-trade plan: {latest.skip_reason}\n⏰ {mins_to_open} min to open")
+        else:
+            notify(_scored_plan_report(latest, today, mins_to_open))
+        _last_report_t = time.time()
+
+        # Align scans to the next five-minute wall-clock boundary.
+        wait = PREMARKET_REPORT_SECS - (n.minute % 5) * 60 - n.second
+        time.sleep(max(1, min(wait, 300)))
+
+    # Always recalculate at/after the opening bell so the entry uses fresh data.
+    latest = get_premarket_bias()
+    return latest
+
+
 def _past_cutoff() -> bool:
     n = now_et()
     return n.hour > ENTRY_HOUR or (n.hour == ENTRY_HOUR and n.minute >= ENTRY_MINUTE_END)
@@ -387,7 +484,7 @@ def hold_loop(pos: OptionsPosition) -> None:
             continue
 
         # 30-min position update to Telegram
-        if time.time() - _last_report_t >= REPORT_INTERVAL_SECS:
+        if time.time() - _last_report_t >= POSITION_REPORT_SECS:
             notify(_position_report_msg(pos, current_mid))
             _last_report_t = time.time()
 
@@ -400,25 +497,29 @@ def hold_loop(pos: OptionsPosition) -> None:
             continue
 
         if action == "close_half":
-            half = max(1, pos.contracts // 2)
-            ok   = execute_sell_option(pos.contract, half)
-            if ok:
-                remaining       = pos.contracts - half
-                pos.cost_basis *= remaining / pos.contracts
-                pos.contracts   = remaining
-                pos.partial_closed = True
-                save_position(pos)
-                notify(
-                    f"✅ <b>PARTIAL CLOSE</b> | SPY ${int(pos.contract.strike)} "
-                    f"{pos.contract.option_type.upper()} | "
-                    f"{half} contract(s) @ ${current_mid:.2f} | "
-                    f"<b>P&L: {pnl_pct:+.0f}% / ${pnl_usd:+.0f}</b> | "
-                    f"{remaining} contracts riding free | {reason}"
-                )
-                _last_report_t = time.time()
+            if pos.contracts < 2:
+                action = "close_all"
+                reason = f"PROFIT EXIT (single contract) — {reason}"
             else:
-                log("[WARN] Partial sell failed — retrying next cycle")
-            continue
+                half = pos.contracts // 2
+                ok   = execute_sell_option(pos.contract, half)
+                if ok:
+                    remaining       = pos.contracts - half
+                    pos.cost_basis *= remaining / pos.contracts
+                    pos.contracts   = remaining
+                    pos.partial_closed = True
+                    save_position(pos)
+                    notify(
+                        f"✅ <b>PARTIAL CLOSE</b> | SPY ${int(pos.contract.strike)} "
+                        f"{pos.contract.option_type.upper()} | "
+                        f"{half} contract(s) @ ${current_mid:.2f} | "
+                        f"<b>P&L: {pnl_pct:+.0f}% / ${pnl_usd:+.0f}</b> | "
+                        f"{remaining} contracts riding free | {reason}"
+                    )
+                    _last_report_t = time.time()
+                else:
+                    log("[WARN] Partial sell failed — retrying next cycle")
+                continue
 
         if action == "close_all":
             ok = execute_sell_option(pos.contract, pos.contracts)
@@ -439,7 +540,7 @@ def hold_loop(pos: OptionsPosition) -> None:
 # ── Main run ──────────────────────────────────────────────────────────────────
 
 def run_today(now_flag: bool = False, balance_override: float | None = None) -> None:
-    today = date.today().strftime("%Y-%m-%d")
+    today = now_et().date().isoformat()
     notify(f"=== 0DTE SPY OPTIONS BOT | {today} | {'DRY RUN' if _DRY_RUN else 'LIVE'} ===")
 
     # ── Resume open position from today ──────────────────────────────────────
@@ -456,9 +557,9 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
         log(f"Stale position file from {existing.contract.expiry} — clearing")
         clear_position()
 
-    # ── Pre-market bias ───────────────────────────────────────────────────────
+    # ── Five-minute pre-market planning ──────────────────────────────────────
     log("Detecting pre-market bias...")
-    bias = get_premarket_bias()
+    bias = get_premarket_bias() if now_flag or now_et().hour >= 9 and now_et().minute >= 30 else premarket_plan_loop(today)
     for r in bias.reasons:
         log(f"  {r}")
 
@@ -467,14 +568,14 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
         return
 
     # Send initial game plan to Telegram
-    notify(_plan_report_msg(bias, today, 0))
+    notify(_scored_plan_report(bias, today, 0))
 
-    # ── Wait for 9:45 AM entry window — resend plan every 30 min ─────────────
+    # ── Wait for 9:45 AM entry window — refresh scored plan every 5 min ──────
     if not now_flag:
         _sleep_until(
             ENTRY_HOUR, ENTRY_MINUTE_START,
             "entry window 9:45 AM",
-            period_fn=lambda mins: notify(_plan_report_msg(bias, today, mins)),
+            period_fn=lambda mins: notify(_scored_plan_report(bias, today, mins)),
         )
 
     if not now_flag and _past_cutoff():
@@ -482,8 +583,16 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
         return
 
     # ── Reversal confirmation ─────────────────────────────────────────────────
-    confirmed, rev_msg = check_reversal_starting(bias)
-    log(f"Reversal check: {rev_msg}")
+    confirmed = False
+    rev_msg = ""
+    while not confirmed and not _past_cutoff():
+        confirmed, rev_msg = check_reversal_starting(bias)
+        log(f"Reversal check: {rev_msg}")
+        if not confirmed:
+            time.sleep(60)
+    if not confirmed:
+        notify(f"NO TRADE: reversal was not confirmed by 10:00 ET ({rev_msg})")
+        return
 
     # ── Live SPY price ────────────────────────────────────────────────────────
     spy_price = get_spy_price()
@@ -506,8 +615,8 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
             f"IV={c.iv:.0%}  vol={c.volume:,}  OI={c.open_interest:,}"
         )
 
-    # ── AI picks the best contract ────────────────────────────────────────────
-    log("Asking AI to pick the best contract...")
+    # ── Deterministic quant score picks the best bounded contract ─────────────
+    log("Scoring eligible contracts...")
     contract = _ai_pick_contract(bias, candidates, spy_price)
     entry_ask = contract.ask if contract.ask > 0 else contract.mid
 
@@ -534,7 +643,20 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
             return
 
     n_contracts = calc_max_contracts(entry_ask, balance)
+    if n_contracts == 0:
+        notify(
+            f"NO TRADE: SPY contract costs ${entry_ask * 100:.2f}, exceeding "
+            f"available USD cash ${balance:.2f}."
+        )
+        return
     cost_total  = entry_ask * n_contracts * 100
+    deploy_pct = cost_total / balance if balance > 0 else 0.0
+    if deploy_pct < MIN_DEPLOY_PCT:
+        notify(
+            f"NO TRADE: max affordable whole-contract sizing would deploy only "
+            f"{deploy_pct:.0%} of ${balance:.2f}; minimum is {MIN_DEPLOY_PCT:.0%}."
+        )
+        return
 
     notify(
         f"CONTRACT SELECTED: SPY ${int(contract.strike)} {contract.option_type.upper()} 0DTE | "
@@ -543,7 +665,7 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
     )
 
     # ── Place buy order ───────────────────────────────────────────────────────
-    ok = execute_buy_option(contract, n_contracts)
+    ok = execute_buy_option(contract, n_contracts, max_debit=balance)
     if not ok:
         notify("BUY FAILED — check data/options.log and data/screen_*.png for details")
         return
@@ -576,14 +698,20 @@ def main() -> None:
     if _DRY_RUN:
         log("[DRY RUN] No orders will be placed — strategy logic only")
 
-    # Keep the WS browser session alive throughout the entire options session
+    if now_et().weekday() >= 5 and not args.now:
+        log("Market is closed on weekends — no scan or orders")
+        return
+
+    # Keep the WS browser session alive throughout the entire options session.
     _start_keepalive()
+    try:
+        # Wait for 9:00 AM before starting five-minute bias scans
+        if not args.now:
+            _sleep_until(PREMARKET_SCAN_HOUR, PREMARKET_SCAN_MINUTE, "SPY pre-market scan start")
 
-    # Wait for 9:00 AM before starting bias detection
-    if not args.now:
-        _sleep_until(9, 0, "pre-market open")
-
-    run_today(now_flag=args.now, balance_override=args.balance)
+        run_today(now_flag=args.now, balance_override=args.balance)
+    finally:
+        _stop_keepalive()
 
 
 if __name__ == "__main__":

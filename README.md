@@ -62,7 +62,62 @@ Synthesized from IBKR, Minervini, CANSLIM, and LangChain quant strategies:
 
 ---
 
-## Installation
+## Installation (macOS)
+
+You can use your normal **Google Chrome** or **Microsoft Edge** installation. Chrome is
+recommended if it is already installed; no special Playwright browser download is needed.
+
+```bash
+cd /path/to/ai-wealthsimple-bot
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+
+# First-time login (opens Chrome or Edge)
+python scripts/wealthsimple_auto.py setup
+```
+
+Log in to Wealthsimple in the browser window that opens, return to Terminal, and press
+Enter. Keep that browser window open while the bot runs.
+
+Create `.env` in the project root:
+
+```dotenv
+TELEGRAM_BOT_TOKEN=xxx
+TELEGRAM_CHAT_ID=@yourchannel
+WS_EMAIL=you@gmail.com
+WS_PASSWORD=yourpassword
+```
+
+Run the bot:
+
+```bash
+source .venv/bin/activate
+python scripts/run_grinder.py
+
+# Optional: watchdog keeps the Mac awake and restarts the browser/bot if needed
+python scripts/watchdog.py
+```
+
+### Current SPY 0DTE behavior
+
+`run_grinder.py` delegates to the SPY 0DTE bot. On weekdays it:
+
+- refreshes the Wealthsimple Chrome session every two minutes;
+- recalculates and sends the SPY call/put plan every five minutes from 9:00–9:30 AM ET;
+- considers one autonomous long call or long put entry from 9:45–10:00 AM ET;
+- buys the maximum affordable whole contracts, targeting 50–100% of available USD cash;
+- refuses any expiry other than the current ET date and any strike outside 4–5 SPY points OTM; and
+- only submits sell-to-close orders matching its own local position ledger.
+
+Safe paper-mode launch (no orders):
+
+```bash
+python scripts/run_grinder.py --dry
+```
+
+## Installation (Windows)
 
 ```powershell
 python -m venv .venv

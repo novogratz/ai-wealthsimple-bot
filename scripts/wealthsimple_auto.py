@@ -6,7 +6,9 @@ Default behavior stops at the review page. Passing --confirm submits a real orde
 """
 import argparse
 import json
+import platform
 import re
+import shutil
 import sys
 from pathlib import Path
 from typing import Optional
@@ -20,8 +22,34 @@ KEEPALIVE_LOCK = DATA / "ws_busy.lock"  # held during buy/sell so keepalive back
 WS_HOME = "https://my.wealthsimple.com/app/home"
 CDP_URL = "http://localhost:9222"
 
-# Use the real system Edge — stable, familiar UI, not "Chrome for Testing"
-EDGE_EXE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+def find_browser_executable() -> str:
+    """Return an installed Chrome/Edge executable on Windows, macOS, or Linux."""
+    system = platform.system()
+    candidates = {
+        "Darwin": [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            str(Path.home() / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            str(Path.home() / "Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+        ],
+        "Windows": [
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ],
+        "Linux": ["google-chrome", "microsoft-edge", "chromium", "chromium-browser"],
+    }.get(system, [])
+    for candidate in candidates:
+        resolved = shutil.which(candidate) or (candidate if Path(candidate).is_file() else None)
+        if resolved:
+            return resolved
+    raise RuntimeError(
+        "No supported browser found. Install Google Chrome or Microsoft Edge, then retry."
+    )
+
+
+SELECT_ALL = "Meta+A" if platform.system() == "Darwin" else "Control+A"
 
 DATA.mkdir(exist_ok=True)
 
@@ -82,7 +110,7 @@ def fill_visible_input(page, index: int, value: str, timeout: int = 3000) -> Non
     box = el.bounding_box()
     if box:
         page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-        page.keyboard.press("Control+A")
+        page.keyboard.press(SELECT_ALL)
         page.keyboard.type(value, delay=50)
         return
 
@@ -106,7 +134,7 @@ def fill_order_quantity(page, shares: int) -> None:
 
     # The input is horizontally aligned to the right of the Shares label.
     page.mouse.click(box["x"] + 190, box["y"] + box["height"] / 2)
-    page.keyboard.press("Control+A")
+    page.keyboard.press(SELECT_ALL)
     page.keyboard.type(str(shares), delay=50)
     page.wait_for_timeout(500)
 
@@ -446,6 +474,7 @@ def parse_review_details(page, side: str, submitted: bool, review_text: str = ""
         r"Quantity\s+([0-9,.]+)",
     ])
     value = find_number([
+        r"Estimated cost\s+(?:\$0(?:\.00)?\s+fees\s+)?\$?([0-9,.]+)\s*USD",
         r"Estimated cost\s+\$?([0-9,.]+)",
         r"Estimated proceeds\s+\$?([0-9,.]+)",
         r"Estimated value\s+\$?([0-9,.]+)",
@@ -538,30 +567,72 @@ def get_live_balance(page) -> float | None:
     except Exception:
         pass
 
-    # Strategy 2: Available to trade (fallback — WS shows CAD for Canadian accounts, convert to USD)
-    _cad_usd = 0.73
-    try:
-        import yfinance as _yf
-        _rate = _yf.Ticker("CADUSD=X").fast_info.last_price
-        if _rate and float(_rate) > 0.50:
-            _cad_usd = float(_rate)
-    except Exception:
-        pass
-    print(f"  CAD/USD rate: {_cad_usd:.4f}")
-
+    # Do not treat CAD as spendable USD. Wealthsimple's options ticket requires
+    # USD cash and otherwise stops at an explicit conversion/funding prompt.
     for pattern in [
         r"Available to trade\s+\$?([0-9,.]+)",
-        r"Non-registered.*?\$([0-9,.]+)",
-        r"Unregistered.*?\$([0-9,.]+)",
-        r"Personal.*?\$([0-9,.]+)",
     ]:
         match = re.search(pattern, text, flags=re.DOTALL | re.IGNORECASE)
         if match:
             val = parse_money(match.group(1))
             if val is not None and val > 0:
-                usd_val = round(val * _cad_usd, 2)
-                print(f"  Found balance: CAD ${val:.2f} -> USD ${usd_val:.2f} (rate {_cad_usd:.4f})")
-                return usd_val
+                print(f"  Found explicitly available balance: ${val:.2f}")
+                return val
+
+    # The home page often hides per-currency balances. Open a harmless SPY
+    # option draft, read the account picker, then leave without clicking Next.
+    try:
+        print("  USD balance hidden on home — reading options account picker...")
+        page = navigate_to_spy_options(page)
+        clicked = page.evaluate(r"""
+            () => {
+                const strikes = [...document.querySelectorAll('*')].filter(el =>
+                    el.children.length === 0 && /^\$[0-9]{3,4}$/.test((el.textContent || '').trim())
+                );
+                for (const strike of strikes) {
+                    let row = strike.parentElement;
+                    for (let i = 0; i < 8 && row; i++, row = row.parentElement) {
+                        const prices = [...row.querySelectorAll('button')].filter(b =>
+                            /^\$[0-9]/.test((b.textContent || '').trim())
+                        );
+                        if (prices.length >= 2) {
+                            const ask = parseFloat((prices[prices.length - 1].textContent || '').replace('$', ''));
+                            if (ask >= 0.10 && ask <= 0.60) {
+                                prices[prices.length - 1].click(); return true;
+                            }
+                        }
+                    }
+                }
+                return false;
+            }
+        """)
+        if not clicked:
+            raise RuntimeError("No option Ask button found")
+        page.wait_for_timeout(1500)
+        _dismiss_options_overlays(page)
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(800)
+        account_trigger = page.get_by_text("Select an account to continue", exact=False).first
+        if not account_trigger.is_visible(timeout=1200):
+            account_trigger = page.get_by_text("Select account", exact=False).first
+        account_trigger.click(timeout=3000)
+        page.wait_for_timeout(1500)
+        picker_text = page.locator("body").inner_text(timeout=5000)
+        balances = []
+        for match in re.finditer(
+            r"(?:Non-registered|Unregistered|Personal)\s+"
+            r"\$[0-9][0-9,.]*\s*CAD\s*[·•-]\s*\$([0-9][0-9,.]*)\s*USD",
+            picker_text,
+            re.IGNORECASE,
+        ):
+            balances.append(float(match.group(1).replace(",", "")))
+        page.keyboard.press("Escape")
+        if balances and max(balances) > 0:
+            best = max(balances)
+            print(f"  Found best Non-registered USD cash: ${best:.2f}")
+            return best
+    except Exception as exc:
+        safe_print(f"  Options balance fallback failed: {exc}")
 
     return None
 
@@ -732,102 +803,57 @@ def navigate_to_stock(page, ws_symbol: str):
         page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
         page.wait_for_timeout(2000)
 
-    # Navigate directly to the trade URL — much more reliable than search UI
-    print(f"Navigating to {ws_symbol} trade page...")
+    # Wealthsimple's /app/trade/SYMBOL route currently redirects to /app/404.
+    # Always use the site's own search UI and explicitly select the US result.
+    print(f"Searching Wealthsimple for {ws_symbol}...")
     ctx = page.context
-    trade_url = f"https://my.wealthsimple.com/app/trade/{ws_symbol}"
-    page.goto(trade_url, wait_until="domcontentloaded", timeout=30_000)
+    search = first_visible(page, [
+        'button[aria-label*="search" i]',
+        '[role="button"][aria-label*="search" i]',
+        '[data-testid*="search"]',
+    ], timeout=5000)
+    if search is None:
+        snap(page, "search_not_found")
+        raise RuntimeError("Wealthsimple search button not found")
+
+    pages_before = set(id(p) for p in ctx.pages)
+    search.click(force=True)
+    page.wait_for_timeout(700)
+
+    search_input = first_visible(page, [
+        'input[placeholder*="Search" i]',
+        'input[type="search"]',
+        '[role="dialog"] input',
+        'input:visible',
+    ], timeout=5000)
+    if search_input is None:
+        snap(page, "search_input_not_found")
+        raise RuntimeError("Wealthsimple search opened but its input did not appear")
+    search_input.fill(ws_symbol)
+    page.wait_for_timeout(2200)
+    snap(page, "search_results")
+
+    # The first exact ticker label is the primary result (e.g. SPY / NYSE).
+    # Clicking the label bubbles to Wealthsimple's clickable result row.
+    clicked = False
+    try:
+        ticker = page.get_by_text(ws_symbol.upper(), exact=True).first
+        ticker.wait_for(state="visible", timeout=5000)
+        ticker.click()
+        clicked = True
+    except Exception:
+        pass
+    if not clicked:
+        snap(page, "search_result_not_found")
+        raise RuntimeError(f"No Wealthsimple search result found for {ws_symbol}")
+
     page.wait_for_timeout(3000)
 
-    # Check if we landed on a CAD/TSX listing even when the URL looks right.
-    # WS may serve the Canadian listing by default for dual-listed tickers (e.g. KEEL → KEEL.TO).
-    def _page_is_cad(pg) -> bool:
-        try:
-            txt = pg.locator("body").inner_text(timeout=3000).lower()
-            # "cad" present AND no clear USD/NASDAQ/NYSE signal
-            has_cad = " cad" in txt or "\ncad" in txt or "tsx" in txt or "neo exchange" in txt
-            has_usd = " usd" in txt or "\nusd" in txt or "nasdaq" in txt or "nyse" in txt or "new york" in txt
-            return has_cad and not has_usd
-        except Exception:
-            return False
-
-    # Fall back to search if: redirect away from symbol URL, OR page loaded a CAD listing
-    need_search = ws_symbol.upper() not in page.url.upper()
-    if not need_search and _page_is_cad(page):
-        safe_print(f"  Direct URL loaded CAD/TSX listing for {ws_symbol} — switching to USD search...")
-        need_search = True
-
-    if need_search:
-        if ws_symbol.upper() not in page.url.upper():
-            safe_print(f"  Direct URL redirected to {page.url} — trying search...")
-        page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
+    new_pages = [p for p in ctx.pages if id(p) not in pages_before]
+    if new_pages:
+        page = new_pages[-1]
+        page.bring_to_front()
         page.wait_for_timeout(2000)
-
-        search = first_visible(page, [
-            '[aria-label*="Search" i]',
-            '[placeholder*="Search" i]',
-            'input[type="search"]',
-            '[data-testid*="search"]',
-        ])
-        if search is None:
-            snap(page, "search_not_found")
-            raise RuntimeError("Search box not found")
-
-        # Track pages before so we can catch a new tab opening
-        pages_before = set(id(p) for p in ctx.pages)
-        search.click()
-        page.wait_for_timeout(400)
-        page.keyboard.type(ws_symbol, delay=90)
-        page.wait_for_timeout(2200)
-        snap(page, "search_results")
-
-        # Prefer US exchange (NYSE/NASDAQ/USD) result over TSX/CAD listing
-        clicked = False
-        us_keywords = ["nasdaq", "nyse", "usd", "new york"]
-        for sel in [
-            '[data-testid*="search-result"]',
-            '[data-testid*="result"]',
-            f'a[href*="{ws_symbol}"]',
-            'a[href*="/app/trade"]',
-            '[class*="SearchResult"]',
-            '[class*="search-result"]',
-        ]:
-            try:
-                items = page.locator(sel).all()
-                if not items:
-                    continue
-                # Prefer result whose text mentions a US exchange
-                us_hit = None
-                for item in items:
-                    try:
-                        txt = item.inner_text(timeout=500).lower()
-                        if any(kw in txt for kw in us_keywords):
-                            us_hit = item
-                            break
-                    except Exception:
-                        continue
-                target = us_hit if us_hit else items[0]
-                if target.is_visible(timeout=500):
-                    target.click()
-                    clicked = True
-                    if us_hit:
-                        safe_print(f"  Selected US-exchange result for {ws_symbol}")
-                    else:
-                        safe_print(f"  No US-exchange result found for {ws_symbol} — clicked first result")
-                    break
-            except Exception:
-                continue
-        if not clicked:
-            page.keyboard.press("Enter")
-
-        page.wait_for_timeout(3000)
-
-        # If a new tab opened, switch to it
-        new_pages = [p for p in ctx.pages if id(p) not in pages_before]
-        if new_pages:
-            page = new_pages[-1]
-            page.bring_to_front()
-            page.wait_for_timeout(2000)
 
     snap(page, "stock_page")
     return page
@@ -856,60 +882,58 @@ def choose_unregistered_account(page, side: str) -> None:
     page.wait_for_timeout(900)
     snap(page, f"{side}_acct_picker")
 
+    # Account names render before their balances. Wait for USD amounts so we
+    # never guess between several identically named Non-registered accounts.
+    try:
+        page.wait_for_function(
+            """() => /\\$[0-9][0-9,.]*\\s*USD/.test(document.body.innerText)""",
+            timeout=10_000,
+        )
+    except Exception:
+        snap(page, f"{side}_acct_balances_missing")
+        raise RuntimeError(
+            "Account balances did not load; refusing to guess between Non-registered accounts"
+        )
+
     # Pick the Non-registered / Unregistered / Personal account with the highest USD balance.
     # "USD" alone must NOT be used as a search term — every account row contains the word "USD"
     # and it would match TFSA ($0.00 USD) before the real trading account.
-    found = page.evaluate("""
-        () => {
-            const all = [
-                ...document.querySelectorAll('[role="option"]'),
-                ...document.querySelectorAll('li'),
-            ];
+    found = False
+    best_label = None
+    best_usd = 0.0
+    labels = page.get_by_text(re.compile(r"^(Non-registered|Unregistered|Personal)$", re.I)).all()
+    for label in labels:
+        try:
+            node = label
+            row_text = ""
+            for _ in range(6):
+                node = node.locator("xpath=..")
+                row_text = node.inner_text(timeout=500)
+                if re.search(r"\$[0-9][0-9,.]*\s*USD", row_text, re.I):
+                    break
+            match = re.search(r"\$([0-9][0-9,.]*)\s*USD", row_text, re.I)
+            usd = float(match.group(1).replace(",", "")) if match else 0.0
+            if usd > best_usd:
+                best_usd = usd
+                best_label = label
+        except Exception:
+            continue
 
-            let bestEl  = null;
-            let bestUsd = -1;
-
-            for (const el of all) {
-                const text = (el.textContent || el.innerText || '').trim();
-                // Skip registered accounts
-                if (/^(TFSA|RRSP|FHSA|LIRA|RESP|RDSP)/i.test(text)) continue;
-                // Must be a non-registered flavour
-                if (!/^(Non-registered|Unregistered|Personal)/i.test(text)) continue;
-
-                // Parse USD amount — e.g. "$66.52 USD" or "$102.47USD"
-                const m = text.match(/\\$([0-9][0-9,.]*)\\s*USD/);
-                const usd = m ? parseFloat(m[1].replace(/,/g, '')) : 0;
-
-                if (usd > bestUsd) { bestUsd = usd; bestEl = el; }
-            }
-
-            // If no USD found in any account, fall back to first non-registered
-            if (!bestEl) {
-                for (const el of all) {
-                    const text = (el.textContent || el.innerText || '').trim();
-                    if (/^(TFSA|RRSP|FHSA|LIRA|RESP|RDSP)/i.test(text)) continue;
-                    if (/^(Non-registered|Unregistered|Personal)/i.test(text)) {
-                        bestEl = el; break;
-                    }
-                }
-            }
-
-            if (!bestEl) return false;
-            const radio = bestEl.querySelector('input[type="radio"]');
-            if (radio) { radio.click(); return true; }
-            bestEl.click();
-            return true;
-        }
-    """)
+    if best_label is not None and best_usd > 0:
+        best_label.click(force=True)
+        found = True
 
     if found:
         page.wait_for_timeout(700)
         snap(page, f"{side}_acct_selected")
-        print("  Selected Non-registered (highest USD) account via JS click")
+        print(f"  Selected Non-registered account with ${best_usd:.2f} USD")
         return
 
     snap(page, f"{side}_acct_fail")
-    raise RuntimeError(f"Non-registered account not found - see data/screen_{side}_acct_fail.png")
+    raise RuntimeError(
+        f"Non-registered account with positive USD cash not found - "
+        f"see data/screen_{side}_acct_fail.png"
+    )
 
 
 def place_order(
@@ -969,7 +993,7 @@ def place_order(
             limit_input = page.get_by_label("Limit price", exact=False).first
             if limit_input.is_visible(timeout=1000):
                 limit_input.click()
-                page.keyboard.press("Control+A")
+                page.keyboard.press(SELECT_ALL)
                 page.keyboard.type(f"{price:.2f}", delay=50)
             else:
                 fill_visible_input(page, 0, f"{price:.2f}")
@@ -1035,6 +1059,14 @@ def place_order(
         _review_text = page.locator("body").inner_text(timeout=3000)
     except Exception:
         pass
+
+    funding_match = re.search(r"You need\s+\$?([0-9,.]+)\s+USD more", _review_text, re.IGNORECASE)
+    if funding_match:
+        needed = funding_match.group(1)
+        raise RuntimeError(
+            f"Insufficient USD cash in selected account (Wealthsimple needs ${needed} USD more). "
+            "Convert/add USD manually before running live automation."
+        )
     submitted = False
 
     if confirm:
@@ -1121,8 +1153,9 @@ def cmd_setup(_args) -> None:
         except Exception:
             pass
 
+    browser_exe = find_browser_executable()
     subprocess.Popen([
-        EDGE_EXE,
+        browser_exe,
         "--remote-debugging-port=9222",
         f"--user-data-dir={PROFILE_DIR}",
         "--no-first-run",
@@ -1134,7 +1167,7 @@ def cmd_setup(_args) -> None:
     print("=" * 55)
     print("  WEALTHSIMPLE LOGIN")
     print("=" * 55)
-    print("  1. A Microsoft Edge window just opened.")
+    print(f"  1. A browser window just opened ({Path(browser_exe).name}).")
     print("  2. Log in to Wealthsimple normally.")
     print("  3. Wait until you can see your HOME page / portfolio.")
     print("  4. Come back here and press ENTER.")
@@ -1151,8 +1184,8 @@ def cmd_setup(_args) -> None:
                 break
             except Exception:
                 time.sleep(2)
-    print("  Done. Chrome will stay open — the bot connects to it for all operations.")
-    print(f"  Keep that Chrome window running in the background.")
+    print("  Done. The browser will stay open — the bot connects to it for all operations.")
+    print("  Keep that browser window running in the background.")
 
 
 def cmd_position(args) -> None:
@@ -1271,23 +1304,33 @@ def navigate_to_spy_options(page):
     page.wait_for_timeout(2000)
     snap(page, "spy_stock_page")
 
-    # Click the Options tab (confirmed working from UI test)
-    for sel in [
-        'button:has-text("Options")',
-        '[role="tab"]:has-text("Options")',
-        'a:has-text("Options")',
-    ]:
-        try:
-            el = page.locator(sel).first
-            if el.is_visible(timeout=2000):
-                el.click()
-                page.wait_for_timeout(2500)
-                snap(page, "options_tab")
-                print(f"  Options tab clicked via: {sel}")
-                break
-        except Exception:
-            continue
-    else:
+    # The React page occasionally renders Stocks before mounting the Options
+    # tab. Retry with a full reload instead of failing the day's trade.
+    clicked_options = False
+    for attempt in range(1, 4):
+        for sel in [
+            'button:has-text("Options")',
+            '[role="tab"]:has-text("Options")',
+            'a:has-text("Options")',
+        ]:
+            try:
+                el = page.locator(sel).first
+                if el.is_visible(timeout=3000):
+                    el.click()
+                    page.wait_for_timeout(2500)
+                    snap(page, "options_tab")
+                    print(f"  Options tab clicked via: {sel}")
+                    clicked_options = True
+                    break
+            except Exception:
+                continue
+        if clicked_options:
+            break
+        print(f"  Options tab missing (attempt {attempt}/3) — navigating to SPY again...")
+        page = navigate_to_stock(page, "SPY")
+        page.wait_for_timeout(2000)
+
+    if not clicked_options:
         snap(page, "options_tab_not_found")
         raise RuntimeError(
             "Options tab not found on SPY page — "
@@ -1310,7 +1353,35 @@ def _dismiss_options_overlays(page) -> None:
       - 'Build a trade with AI' modal      → "Maybe later" button
       - Any other close/× button on screen
     """
-    # 1. 'What's your view on SPY?' panel — exact aria-label confirmed from live DOM dump
+    # 1. 'What's your view on SPY?' panel. The close button sometimes has no
+    # accessible label, so locate the panel from its heading and click the
+    # top-right button inside that same container.
+    closed_view_panel = page.evaluate("""
+        () => {
+            const heading = [...document.querySelectorAll('*')].find(el =>
+                (el.textContent || '').trim() === "What's your view on SPY?"
+            );
+            if (!heading) return false;
+            let panel = heading.parentElement;
+            for (let i = 0; i < 8 && panel; i++, panel = panel.parentElement) {
+                const rect = panel.getBoundingClientRect();
+                if (rect.width < 300 || rect.height < 300) continue;
+                const buttons = [...panel.querySelectorAll('button, [role="button"]')]
+                    .filter(b => {
+                        const r = b.getBoundingClientRect();
+                        return r.width > 0 && r.x > rect.x + rect.width * 0.7
+                            && r.y < rect.y + rect.height * 0.2;
+                    });
+                if (buttons.length) { buttons[0].click(); return true; }
+            }
+            return false;
+        }
+    """)
+    if closed_view_panel:
+        print("  Closed 'What's your view on SPY?' panel via heading container")
+        page.wait_for_timeout(500)
+
+    # Accessible-label fallback.
     for sel in [
         '[aria-label="Close chat panel"]',
         '[aria-label="close chat panel"]',
@@ -1513,7 +1584,7 @@ def find_and_click_option_contract(
     return False
 
 
-def place_option_order(page, side: str, n_contracts: int, confirm: bool) -> dict:
+def place_option_order(page, side: str, n_contracts: int, confirm: bool, max_cost: float | None = None) -> dict:
     """
     Interact with the WS options order ticket (slides up as a drawer from the bottom).
     Handles the one-time 'Writing options' consent screen if present.
@@ -1542,10 +1613,12 @@ def place_option_order(page, side: str, n_contracts: int, confirm: bool) -> dict
         except Exception:
             continue
 
-    # For sells: switch from default Limit sell to Market sell
-    if side == "sell":
+    # Live option entries and exits use market orders during regular hours.
+    # Weekend/closed-market "Queue order" remains intentionally excluded.
+    if side in {"buy", "sell"}:
+        market_label = "Market buy" if side == "buy" else "Market sell"
         switched = page.evaluate("""
-            () => {
+            (marketLabel) => {
                 const selects = [...document.querySelectorAll('select')];
                 for (const sel of selects) {
                     const opts = [...sel.options].map(o => o.text.toLowerCase());
@@ -1560,22 +1633,25 @@ def place_option_order(page, side: str, n_contracts: int, confirm: bool) -> dict
                 // Fallback: click the order type dropdown text and pick Market
                 const els = [...document.querySelectorAll('button, [role="option"], li')];
                 const mktBtn = els.find(el =>
-                    (el.textContent || '').trim().toLowerCase() === 'market sell');
+                    (el.textContent || '').trim().toLowerCase() === marketLabel.toLowerCase());
                 if (mktBtn) { mktBtn.click(); return 'click:' + mktBtn.textContent.trim(); }
                 return 'not_found';
             }
-        """)
-        print(f"  Order type -> Market sell: {switched}")
+        """, market_label)
+        print(f"  Order type -> {market_label}: {switched}")
         if switched == "not_found":
             try:
-                dd = page.locator('[data-testid*="order-type"], select').first
-                if dd.is_visible(timeout=1000):
-                    dd.click()
-                    page.wait_for_timeout(400)
-                    page.get_by_text("Market sell", exact=False).first.click(timeout=1500)
-                    print("  Switched to Market sell via Playwright click")
+                current_label = "Limit buy" if side == "buy" else "Limit sell"
+                trigger = page.get_by_text(current_label, exact=True).first
+                if not trigger.is_visible(timeout=1000):
+                    trigger = page.locator('[data-testid*="order-type"], select').first
+                trigger.click(timeout=2000)
+                page.wait_for_timeout(400)
+                page.get_by_text(market_label, exact=True).last.click(timeout=2000)
+                switched = f"click:{market_label}"
+                print(f"  Switched to {market_label} via Playwright click")
             except Exception as e:
-                print(f"  [WARN] Could not switch to Market sell: {e}")
+                raise RuntimeError(f"Could not switch option order to {market_label}: {e}")
         page.wait_for_timeout(500)
 
     # Choose non-registered account
@@ -1587,7 +1663,7 @@ def place_option_order(page, side: str, n_contracts: int, confirm: bool) -> dict
         inp = page.get_by_label("Contracts", exact=False).first
         if inp.is_visible(timeout=2000):
             inp.click()
-            page.keyboard.press("Control+A")
+            page.keyboard.press(SELECT_ALL)
             page.keyboard.type(str(n_contracts), delay=50)
         else:
             fill_visible_input(page, 0, str(n_contracts))
@@ -1613,6 +1689,30 @@ def place_option_order(page, side: str, n_contracts: int, confirm: bool) -> dict
             f"see data/screen_option_{side}_next_fail.png"
         )
     page.wait_for_timeout(3000)
+
+    # The SPY AI panel can reopen when Next is clicked. Close only that panel's
+    # own top-right cross before reading the actual order review.
+    page.evaluate("""
+        () => {
+            const heading = [...document.querySelectorAll('*')].find(el =>
+                (el.textContent || '').trim() === "What's your view on SPY?"
+            );
+            if (!heading) return false;
+            let panel = heading.parentElement;
+            for (let i = 0; i < 8 && panel; i++, panel = panel.parentElement) {
+                const rect = panel.getBoundingClientRect();
+                if (rect.width < 300 || rect.height < 300) continue;
+                const close = [...panel.querySelectorAll('button, [role="button"]')].find(b => {
+                    const r = b.getBoundingClientRect();
+                    return r.width > 0 && r.x > rect.x + rect.width * 0.7
+                        && r.y < rect.y + rect.height * 0.2;
+                });
+                if (close) { close.click(); return true; }
+            }
+            return false;
+        }
+    """)
+    page.wait_for_timeout(700)
     snap(page, f"option_{side}_review")
 
     _review_text = ""
@@ -1620,6 +1720,16 @@ def place_option_order(page, side: str, n_contracts: int, confirm: bool) -> dict
         _review_text = page.locator("body").inner_text(timeout=3000)
     except Exception:
         pass
+
+    review = parse_review_details(page, side, False, review_text=_review_text)
+    if side == "buy" and max_cost is not None:
+        estimated = review.get("estimated_value")
+        if estimated is None or estimated <= 0:
+            raise RuntimeError("Could not verify option order cost on review page — refusing submission")
+        if estimated > max_cost:
+            raise RuntimeError(
+                f"Option order estimated cost ${estimated:.2f} exceeds safety cap ${max_cost:.2f}"
+            )
 
     if confirm:
         _dismiss_options_overlays(page)  # panel often reopens on the review page
@@ -1649,13 +1759,6 @@ def place_option_order(page, side: str, n_contracts: int, confirm: bool) -> dict
                 }
                 const submitBtn = document.querySelector('button[type="submit"]');
                 if (submitBtn) { submitBtn.click(); return 'clicked:type=submit'; }
-                // Last-resort: click the first enabled non-cancel/back button in the ticket drawer
-                const skipWords = ['cancel', 'back', 'close', 'dismiss', 'skip', 'maybe', 'no'];
-                const fallback = buttons.find(b => {
-                    const t = b.textContent.trim().toLowerCase();
-                    return t.length > 0 && !skipWords.some(w => t.includes(w)) && !b.disabled;
-                });
-                if (fallback) { fallback.click(); return 'clicked:fallback:' + fallback.textContent.trim(); }
                 return 'not_found';
             }
         """)
@@ -1698,7 +1801,7 @@ def cmd_buy_option(args) -> None:
                         f"Contract not found: {args.option_type.upper()} ${args.strike} "
                         f"exp {args.expiry} — see screenshots in data/"
                     )
-                result = place_option_order(page, "buy", args.contracts, confirm=args.confirm)
+                result = place_option_order(page, "buy", args.contracts, confirm=args.confirm, max_cost=args.max_cost)
                 result.update({
                     "symbol": args.symbol, "option_type": args.option_type,
                     "strike": args.strike, "expiry": args.expiry,
@@ -1851,7 +1954,7 @@ def cmd_sell_option(args) -> None:
 def cmd_keepalive(args) -> None:
     """
     Keep the Wealthsimple browser session alive.
-    Navigates to WS home every 15 min; auto-logins if the session has expired.
+    Navigates to WS home every 2 min; auto-logins if the session has expired.
     Backs off (skips cycle) while buy/sell is in progress (ws_busy.lock exists).
     Pass --once to run a single cycle and exit (useful for testing).
     """
@@ -1878,7 +1981,7 @@ def cmd_keepalive(args) -> None:
                     if browser is not None:
                         ctx = browser.contexts[0] if browser.contexts else None
                         if ctx is None:
-                            print("[keepalive] No browser context found — is Edge running?", flush=True)
+                            print("[keepalive] No browser context found — is Chrome/Edge running?", flush=True)
                         else:
                             page = ctx.pages[0] if ctx.pages else ctx.new_page()
                             ts = datetime.now().strftime("%H:%M:%S")
@@ -1944,7 +2047,9 @@ def main() -> None:
         p.add_argument("--contracts",   required=True, type=int,  help="Number of contracts")
         p.add_argument("--confirm",     action="store_true",      help="Submit the order (default: stop at review)")
 
-    _add_option_args(sub.add_parser("buy-option",  help="Buy an options contract on Wealthsimple"))
+    option_buy = sub.add_parser("buy-option",  help="Buy an options contract on Wealthsimple")
+    _add_option_args(option_buy)
+    option_buy.add_argument("--max-cost", type=float, default=None, help="Abort if reviewed debit exceeds this amount")
     _add_option_args(sub.add_parser("sell-option", help="Sell/close an options contract on Wealthsimple"))
 
     args = parser.parse_args()

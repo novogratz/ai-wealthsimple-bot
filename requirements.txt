@@ -1,5 +1,6 @@
 yfinance>=0.2.55
 pandas>=2.2.0
 playwright>=1.44
+psutil>=5.9
 tomli>=2.0; python_version < "3.11"
 anthropic>=0.40.0

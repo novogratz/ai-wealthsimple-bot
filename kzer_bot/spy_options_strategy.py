@@ -8,11 +8,9 @@ Big money sells into the retail FOMO open; bots and algos fade the gap.
 OTM options are cheap — small account, large leverage, defined risk.
 
 Exit rules (in priority order):
-  1. +100% on premium → close all (doubled the money)
-  2. Partial at +50% → sell half, let rest run to +150%
-  3. -50% on premium → stop loss
-  4. 12:00 PM hard close (theta crushes OTM after noon)
-  5. 3:45 PM nuclear close (0DTE expiry protection)
+  1. +500% on premium → close all
+  2. 3:25 PM time close
+  3. 3:45 PM nuclear close (0DTE expiry protection)
 """
 from __future__ import annotations
 
@@ -34,11 +32,11 @@ def now_et() -> datetime:
 TARGET_PREMIUM_MIN   = 0.10   # minimum ask price
 TARGET_PREMIUM_MAX   = 0.60   # maximum ask price — AI picks best in this range
 TARGET_PREMIUM_MID   = 0.35   # fallback target when no contract is exactly in range
-MIN_OTM_STRIKES      = 3      # minimum strikes from ATM before starting the search
-MAX_OTM_STRIKES      = 8      # maximum strikes from ATM — never go further OTM than this
+MIN_OTM_STRIKES      = 4      # minimum points OTM from the live SPY price
+MAX_OTM_STRIKES      = 5      # hard maximum points OTM from the live SPY price
 MIN_PM_PCT           = 0.15   # minimum pre-market move to trade (skip flat days)
 PROFIT_TARGET_PCT    = 500.0  # +500% → close all (6x bagger — 0DTE can do 1000%+)
-PARTIAL_CLOSE_PCT    = 200.0  # +200% → sell half, let remaining half run free
+PARTIAL_CLOSE_PCT    = 500.0  # no profit-taking before the +500% objective
 PARTIAL_TARGET_PCT   = 500.0  # second target for remaining half
 # NO stop loss — 0DTE deep OTM options can go -80% before reversing violently.
 # Time-based exits (noon + 3:45 PM) are the only hard protection.
@@ -95,6 +93,12 @@ class OptionsPosition:
     entry_spy_price: float
     partial_closed: bool = False   # True once 50% partial has been taken
     cost_basis: float    = 0.0     # total dollars spent (entry_premium * contracts * 100)
+
+
+def is_strike_within_otm_bounds(option_type: str, strike: float, spy_price: float) -> bool:
+    """Require an OTM strike between 4 and 5 SPY points from the live price."""
+    distance = spy_price - strike if option_type == "put" else strike - spy_price
+    return MIN_OTM_STRIKES <= distance <= MAX_OTM_STRIKES
 
 
 # ── Pre-market direction ─────────────────────────────────────────────────────
@@ -366,17 +370,17 @@ def check_reversal_starting(bias: PreMarketBias) -> tuple[bool, str]:
             if pullback >= REVERSAL_CONFIRM_PCT:
                 return True, f"Pullback confirmed: SPY {pullback:.2f}% off session high ${session_high:.2f}"
             else:
-                return True, f"SPY still near high (${current:.2f} vs high ${session_high:.2f}) — entering anyway"
+                return False, f"SPY still near high (${current:.2f} vs high ${session_high:.2f}) — waiting"
         else:
             # Fading red: SPY should be bouncing off session low
             bounce = (current - session_low) / session_low * 100
             if bounce >= REVERSAL_CONFIRM_PCT:
                 return True, f"Bounce confirmed: SPY +{bounce:.2f}% off session low ${session_low:.2f}"
             else:
-                return True, f"SPY near session low (${current:.2f} vs low ${session_low:.2f}) — entering anyway"
+                return False, f"SPY near session low (${current:.2f} vs low ${session_low:.2f}) — waiting"
 
     except Exception as e:
-        return True, f"Reversal check failed ({e}) — entering on bias"
+        return False, f"Reversal check failed ({e}) — waiting"
 
 
 # ── Options chain ─────────────────────────────────────────────────────────────
@@ -403,9 +407,7 @@ def get_otm_contract(
         spy  = yf.Ticker("SPY")
         exps = spy.options
         if expiry not in exps:
-            from datetime import datetime as dt
-            target = dt.strptime(expiry, "%Y-%m-%d")
-            expiry = min(exps, key=lambda d: abs((dt.strptime(d, "%Y-%m-%d") - target).days))
+            return None
 
         chain = spy.option_chain(expiry)
         df    = (chain.calls if option_type == "call" else chain.puts).copy()
@@ -414,11 +416,12 @@ def get_otm_contract(
         atm_idx = (df["strike"] - spy_price).abs().argsort().iloc[0]
         atm     = float(df.iloc[atm_idx]["strike"])
 
-        # Filter to OTM only (put = below ATM, call = above ATM), skip ATM and close-to-money
+        # Bound distance against the actual live price, not the rounded ATM
+        # strike. This guarantees every contract is 4–5 SPY points OTM.
         if option_type == "put":
-            df = df[(df["strike"] <= atm - MIN_OTM_STRIKES) & (df["strike"] >= atm - MAX_OTM_STRIKES)].sort_values("strike", ascending=False)
+            df = df[(spy_price - df["strike"] >= MIN_OTM_STRIKES) & (spy_price - df["strike"] <= MAX_OTM_STRIKES)].sort_values("strike", ascending=False)
         else:
-            df = df[(df["strike"] >= atm + MIN_OTM_STRIKES) & (df["strike"] <= atm + MAX_OTM_STRIKES)].sort_values("strike", ascending=True)
+            df = df[(df["strike"] - spy_price >= MIN_OTM_STRIKES) & (df["strike"] - spy_price <= MAX_OTM_STRIKES)].sort_values("strike", ascending=True)
 
         if df.empty:
             return None
@@ -480,9 +483,7 @@ def get_otm_contracts_in_range(
         spy  = yf.Ticker("SPY")
         exps = spy.options
         if expiry not in exps:
-            from datetime import datetime as dt
-            target = dt.strptime(expiry, "%Y-%m-%d")
-            expiry = min(exps, key=lambda d: abs((dt.strptime(d, "%Y-%m-%d") - target).days))
+            return []
 
         chain = spy.option_chain(expiry)
         df    = (chain.calls if option_type == "call" else chain.puts).copy()
@@ -491,9 +492,9 @@ def get_otm_contracts_in_range(
         atm     = float(df.iloc[atm_idx]["strike"])
 
         if option_type == "put":
-            df = df[(df["strike"] <= atm - MIN_OTM_STRIKES) & (df["strike"] >= atm - MAX_OTM_STRIKES)].sort_values("strike", ascending=False)
+            df = df[(spy_price - df["strike"] >= MIN_OTM_STRIKES) & (spy_price - df["strike"] <= MAX_OTM_STRIKES)].sort_values("strike", ascending=False)
         else:
-            df = df[(df["strike"] >= atm + MIN_OTM_STRIKES) & (df["strike"] <= atm + MAX_OTM_STRIKES)].sort_values("strike", ascending=True)
+            df = df[(df["strike"] - spy_price >= MIN_OTM_STRIKES) & (df["strike"] - spy_price <= MAX_OTM_STRIKES)].sort_values("strike", ascending=True)
 
         def _ask(row) -> float:
             a = float(row.get("ask", 0) or 0)
@@ -581,20 +582,12 @@ def check_exit(
     if pnl_pct >= PROFIT_TARGET_PCT:
         return "close_all", f"PROFIT TARGET +{pnl_pct:.0f}% — massive winner, closing all"
 
-    # 2. Partial at +200% (doubled twice) — sell half, let remaining ride to +500%
-    if not position.partial_closed and pnl_pct >= PARTIAL_CLOSE_PCT:
-        return "close_half", f"PARTIAL CLOSE +{pnl_pct:.0f}% — locking half, rest runs free"
-
-    # 3. After partial, close remaining at +500%
-    if position.partial_closed and pnl_pct >= PARTIAL_TARGET_PCT:
-        return "close_all", f"SECOND TARGET +{pnl_pct:.0f}% — closing remaining half"
-
-    # 4. Hard close at NOON_CLOSE_HOUR (default 2 PM for afternoon sessions)
+    # 2. Hard time close. No profit-taking occurs below +500%.
     noon = now.replace(hour=NOON_CLOSE_HOUR, minute=NOON_CLOSE_MINUTE, second=0, microsecond=0)
     if now >= noon:
         return "close_all", f"TIME CLOSE {NOON_CLOSE_HOUR:02d}:{NOON_CLOSE_MINUTE:02d} ({pnl_pct:+.0f}%) — theta kills OTM after {NOON_CLOSE_HOUR}h"
 
-    # 5. Nuclear close 3:45 PM — never hold 0DTE into expiry
+    # 3. Nuclear close 3:45 PM — never hold 0DTE into expiry
     hard = now.replace(hour=HARD_CLOSE_HOUR, minute=HARD_CLOSE_MINUTE, second=0, microsecond=0)
     if now >= hard:
         return "close_all", "HARD CLOSE 3:45 PM — 0DTE expiry protection"

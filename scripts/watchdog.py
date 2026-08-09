@@ -6,6 +6,8 @@ Le Grinder Watchdog — keeps the bot and Edge browser alive 24/7.
 - Auto-logins if Wealthsimple session expires
 """
 import subprocess
+import platform
+import os
 import sys
 import time
 import urllib.request
@@ -14,11 +16,11 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 ROOT      = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 PYTHON    = sys.executable
 BOT       = ROOT / "scripts" / "run_grinder.py"
 AUTOLOGIN = ROOT / "scripts" / "_autologin.py"
 LOG_FILE  = ROOT / "data" / "grinder.log"
-EDGE_EXE  = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 PROFILE   = ROOT / "data" / "browser_profile"
 CDP_URL   = "http://localhost:9222"
 WS_HOME   = "https://my.wealthsimple.com/app/home"
@@ -44,9 +46,11 @@ def edge_alive() -> bool:
 
 
 def launch_edge() -> None:
-    log("Launching Edge with remote debugging on port 9222...")
+    from scripts.wealthsimple_auto import find_browser_executable
+    browser_exe = find_browser_executable()
+    log("Launching browser with remote debugging on port 9222...")
     subprocess.Popen([
-        EDGE_EXE,
+        browser_exe,
         "--remote-debugging-port=9222",
         f"--user-data-dir={PROFILE}",
         "--no-first-run",
@@ -81,15 +85,19 @@ def ensure_edge_and_session() -> None:
 
 
 def prevent_sleep() -> None:
-    """Tell Windows not to sleep while this process is running."""
+    """Keep the computer awake while this watchdog is running."""
     try:
+        if platform.system() == "Darwin":
+            subprocess.Popen(["caffeinate", "-dims", "-w", str(os.getpid())])
+            log("Sleep prevention active (caffeinate).")
+            return
         import ctypes
         ES_CONTINUOUS       = 0x80000000
         ES_SYSTEM_REQUIRED  = 0x00000001
         ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
         log("Sleep prevention active (SetThreadExecutionState).")
     except Exception as exc:
-        log(f"Could not set execution state: {exc}")
+        log(f"Could not enable sleep prevention: {exc}")
 
 
 def main() -> None:
@@ -105,7 +113,7 @@ def main() -> None:
 
         log(f"Starting bot (run #{restart_count + 1})...")
         proc = subprocess.Popen(
-            [PYTHON, str(BOT), "--yahoo"],
+            [PYTHON, str(BOT)],
             cwd=ROOT,
         )
 
