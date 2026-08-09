@@ -18,6 +18,7 @@ import json
 import re
 import subprocess
 import sys
+import threading
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -66,14 +67,15 @@ BOT_ID    = "spy-0dte-long-v1"
 MIN_DEPLOY_PCT = 0.50
 PREMARKET_SCAN_HOUR = 9
 PREMARKET_SCAN_MINUTE = 0
-PREMARKET_REPORT_SECS = 5 * 60
+PREMARKET_REPORT_SECS = 30 * 60
 
 _DRY_RUN: bool = False
 _keepalive_proc: "subprocess.Popen | None" = None
 _last_report_t: float = 0.0
-REPORT_INTERVAL_SECS = 5 * 60
-POSITION_REPORT_SECS = 5 * 60
+REPORT_INTERVAL_SECS = 30 * 60
+POSITION_REPORT_SECS = 30 * 60
 MAX_DAILY_LOSS_PCT = 0.50
+_reporter_stop = threading.Event()
 
 
 # ── Keepalive ─────────────────────────────────────────────────────────────────
@@ -511,8 +513,12 @@ def _plan_report_msg(bias: "PreMarketBias", today: str, mins_to_entry: int) -> s
 
 
 def _scored_plan_report(bias: "PreMarketBias", today: str, mins_to_entry: int) -> str:
-    """Build the five-minute directional plan plus an indicative contract board."""
+    """Build a directional plan with an auditable factor and contract board."""
     base = _plan_report_msg(bias, today, mins_to_entry)
+    factor_lines = [r.strip() for r in bias.reasons if r.strip()]
+    factors = "\n".join(f"   {line}" for line in factor_lines)
+    if factors:
+        base += "\n\n<b>Directional factor model</b>\n" + factors
     spy_price = get_spy_price()
     if spy_price <= 0 or bias.fade_with not in {"call", "put"}:
         return base + "\n   Contract board: waiting for a valid SPY quote"
@@ -527,8 +533,52 @@ def _scored_plan_report(bias: "PreMarketBias", today: str, mins_to_entry: int) -
         f"PLAN → MARKET BUY ${planned.strike:.0f} {planned.option_type.upper()} "
         f"at entry confirmation | score {score:.1f}/100"
     )
-    log("[5-MIN PLAN]\n" + board + "\n" + plan)
-    return base + "\n\n<b>Quant contract board</b>\n" + board + "\n<b>" + plan + "</b>"
+    chosen_parts = _contract_quant_score(planned, spy_price)[1]
+    breakdown = (
+        f"Execution score → spread {chosen_parts['spread']:.1f}/30 | "
+        f"volume {chosen_parts['volume']:.1f}/20 | OI {chosen_parts['oi']:.1f}/12 | "
+        f"premium fit {chosen_parts['premium']:.1f}/18 | distance {chosen_parts['distance']:.1f}/15 | "
+        f"IV sanity {chosen_parts['iv']:.1f}/5"
+    )
+    log("[30-MIN QUANT PLAN]\n" + board + "\n" + breakdown + "\n" + plan)
+    return base + "\n\n<b>Quant contract board</b>\n" + board + "\n" + breakdown + "\n<b>" + plan + "</b>"
+
+
+def _half_hour_report() -> None:
+    """Send current SPY state at an exact :00/:30 ET boundary."""
+    position = load_position()
+    if position and position.contract.expiry == now_et().date().isoformat():
+        quote = _broker_option_quote(position.contract) or get_option_mid(position.contract)
+        if quote > 0:
+            notify(_position_report_msg(position, quote))
+            return
+
+    bias = get_premarket_bias()
+    n = now_et()
+    trading = is_trading_day(n.date())
+    session = "MARKET CLOSED"
+    if trading and (n.hour, n.minute) < (9, 30):
+        session = "PREMARKET"
+    elif trading and (n.hour, n.minute) < (16, 0):
+        session = "REGULAR SESSION"
+    elif trading:
+        session = "AFTER HOURS"
+    report = _scored_plan_report(bias, n.date().isoformat(), 0)
+    notify(f"🕒 <b>HALF-HOUR QUANT UPDATE | {n:%H:%M} ET | {session}</b>\n" + report)
+
+
+def _half_hour_reporter_loop() -> None:
+    """Run forever and align reports to wall-clock :00 and :30 ET."""
+    while not _reporter_stop.is_set():
+        n = now_et()
+        minute_target = 30 if n.minute < 30 else 60
+        wait = (minute_target - n.minute) * 60 - n.second - n.microsecond / 1_000_000
+        if _reporter_stop.wait(max(wait, 0.1)):
+            return
+        try:
+            _half_hour_report()
+        except Exception as exc:
+            log(f"[reporter] Half-hour report failed: {exc}")
 
 
 def _position_report_msg(pos: "OptionsPosition", current_mid: float) -> str:
@@ -603,9 +653,9 @@ def premarket_plan_loop(today: str) -> PreMarketBias:
             log(f"  {reason}")
         mins_to_open = max(int((n.replace(hour=9, minute=30, second=0, microsecond=0) - n).total_seconds() / 60), 0)
         if latest.fade_with == "skip":
-            notify(f"📊 <b>SPY 0DTE PREMARKET | {today}</b>\nNo-trade plan: {latest.skip_reason}\n⏰ {mins_to_open} min to open")
+            log(f"PREMARKET no-trade plan: {latest.skip_reason} | {mins_to_open} min to open")
         else:
-            notify(_scored_plan_report(latest, today, mins_to_open))
+            log(_scored_plan_report(latest, today, mins_to_open))
         _last_report_t = time.time()
 
         # Align scans to the next five-minute wall-clock boundary.
@@ -651,11 +701,6 @@ def hold_loop(pos: OptionsPosition) -> None:
         if current_mid <= 0:
             log("Could not refresh option mid — retrying next cycle")
             continue
-
-        # Five-minute position and exit-plan update to Telegram.
-        if time.time() - _last_report_t >= POSITION_REPORT_SECS:
-            notify(_position_report_msg(pos, current_mid) + f"\n   Price source: {price_source}")
-            _last_report_t = time.time()
 
         action, reason = check_exit(pos, current_mid)
         if emergency == "stop":
@@ -755,12 +800,11 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
     # Send initial game plan to Telegram
     notify(_scored_plan_report(bias, today, 0))
 
-    # ── Wait for 9:45 AM entry window — refresh scored plan every 5 min ──────
+    # ── Wait for 9:45 AM entry window; reporter publishes at :00/:30 ────────
     if not now_flag:
         _sleep_until(
             ENTRY_HOUR, ENTRY_MINUTE_START,
             "entry window 9:45 AM",
-            period_fn=lambda mins: notify(_scored_plan_report(bias, today, mins)),
         )
 
     if not now_flag and _past_cutoff():
@@ -898,21 +942,40 @@ def main() -> None:
     if _DRY_RUN:
         log("[DRY RUN] No orders will be placed — strategy logic only")
 
-    if not is_trading_day(now_et().date()) and not args.now:
-        log("NYSE is closed today — no scan or orders")
-        return
-    if is_early_close(now_et().date()):
-        log("NYSE early-close session detected — mandatory exit moves to 12:45 ET")
-
-    # Keep the WS browser session alive throughout the entire options session.
+    # The normal runner is a persistent service: half-hour reports continue on
+    # nights, weekends, and holidays while trading remains NYSE-session-only.
+    reporter = threading.Thread(target=_half_hour_reporter_loop, name="spy-quant-reporter", daemon=True)
+    reporter.start()
     _start_keepalive()
     try:
-        # Wait for 9:00 AM before starting five-minute bias scans
-        if not args.now:
-            _sleep_until(PREMARKET_SCAN_HOUR, PREMARKET_SCAN_MINUTE, "SPY pre-market scan start")
+        if args.now:
+            run_today(now_flag=True, balance_override=args.balance)
+            return
 
-        run_today(now_flag=args.now, balance_override=args.balance)
+        completed_date: date | None = None
+        while True:
+            n = now_et()
+            if not is_trading_day(n.date()):
+                if completed_date != n.date():
+                    log("NYSE is closed today — reports continue; no orders")
+                    completed_date = n.date()
+                _poll_control_commands()
+                time.sleep(60)
+                continue
+
+            if completed_date == n.date():
+                _poll_control_commands()
+                time.sleep(60)
+                continue
+
+            if is_early_close(n.date()):
+                log("NYSE early-close session detected — mandatory exit moves to 12:45 ET")
+            _sleep_until(PREMARKET_SCAN_HOUR, PREMARKET_SCAN_MINUTE, "SPY pre-market scan start")
+            run_today(now_flag=False, balance_override=args.balance)
+            completed_date = n.date()
     finally:
+        _reporter_stop.set()
+        reporter.join(timeout=2)
         _stop_keepalive()
 
 

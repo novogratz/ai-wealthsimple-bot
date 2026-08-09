@@ -8,7 +8,8 @@
 - Telegram emergency stop, resume, and status commands
 - Automatic Chrome recovery and two-minute session keepalive
 - Structured JSONL score and lifecycle audit trail
-- Deterministic 4–5 point OTM quant leaderboard every five minutes
+- Persistent 24/7 Telegram reporting at exact half-hour boundaries
+- Detailed directional factors and 4–5 point OTM contract score decomposition
 - Market entry with maximum affordable whole-contract sizing
 
 0DTE options can lose the full premium. This release improves operational controls;
