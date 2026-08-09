@@ -1,3 +1,12 @@
+# v3.1.0 — Quant research and shadow execution
+
+- Independent append-only shadow ledger alongside each eligible decision
+- Half-hour shadow marking and simulated exit lifecycle
+- Hard two-sided quote, spread, volume, and open-interest quality gates
+- Chronological walk-forward evaluator with out-of-sample performance metrics
+- Broker tickets stop at final review for explicit human confirmation
+- Twenty automated tests covering research, risk, ownership, and scheduling
+
 # v3.0.1 — Immediate startup quant plan
 
 - Runs a SPY scan immediately when the service starts

@@ -46,6 +46,7 @@ from kzer_bot.spy_options_strategy import (
     now_et,
 )
 from kzer_bot.market_calendar import is_early_close, is_trading_day
+from kzer_bot.quant_research import ShadowLedger, ShadowTrade, decision_id, validate_quote
 from kzer_bot.telegram import get_commands, send_message
 
 TZ        = ZoneInfo("America/Toronto")
@@ -59,6 +60,8 @@ AUDIT_FILE = ROOT / "data" / "options_audit.jsonl"
 RISK_FILE = ROOT / "data" / "options_daily_risk.json"
 STOP_FILE = ROOT / "data" / "options_emergency_stop"
 TG_OFFSET_FILE = ROOT / "data" / "telegram_offset.json"
+SHADOW_FILE = ROOT / "data" / "options_shadow.jsonl"
+SHADOW_POS_FILE = ROOT / "data" / "options_shadow_position.json"
 BOT_ID    = "spy-0dte-long-v1"
 
 # Deploy the largest whole-contract amount affordable by the live USD cash.
@@ -238,17 +241,12 @@ def load_position() -> OptionsPosition | None:
             log("[SAFETY] Position ledger is not owned by this SPY 0DTE bot")
             return None
         contract = OptionContract(
-            expiry=d["expiry"],
-            strike=float(d["strike"]),
-            option_type=d["option_type"],
-            last_price=d.get("entry_premium", 0.0),
-            bid=0.0, ask=0.0,
-            mid=d.get("entry_premium", 0.0),
-            iv=0.0, volume=0, open_interest=0,
+            expiry=d["expiry"], strike=float(d["strike"]), option_type=d["option_type"],
+            last_price=d.get("entry_premium", 0.0), bid=0.0, ask=0.0,
+            mid=d.get("entry_premium", 0.0), iv=0.0, volume=0, open_interest=0,
         )
         return OptionsPosition(
-            contract=contract,
-            contracts=int(d["contracts"]),
+            contract=contract, contracts=int(d["contracts"]),
             entry_premium=float(d["entry_premium"]),
             entry_time=datetime.fromisoformat(d["entry_time"]),
             entry_spy_price=float(d["entry_spy_price"]),
@@ -258,6 +256,39 @@ def load_position() -> OptionsPosition | None:
         )
     except Exception as e:
         log(f"[WARN] Could not load position file: {e}")
+        return None
+
+
+def _save_shadow_position(pos: OptionsPosition, model_score: float) -> None:
+    SHADOW_POS_FILE.write_text(json.dumps({
+        "expiry": pos.contract.expiry, "option_type": pos.contract.option_type,
+        "strike": pos.contract.strike, "contracts": pos.contracts,
+        "entry_premium": pos.entry_premium, "entry_time": pos.entry_time.isoformat(),
+        "entry_spy_price": pos.entry_spy_price, "cost_basis": pos.cost_basis,
+        "bid": pos.contract.bid, "ask": pos.contract.ask, "mid": pos.contract.mid,
+        "iv": pos.contract.iv, "volume": pos.contract.volume,
+        "open_interest": pos.contract.open_interest, "model_score": model_score,
+    }, indent=2), encoding="utf-8")
+
+
+def _load_shadow_position() -> tuple[OptionsPosition, float] | None:
+    try:
+        data = json.loads(SHADOW_POS_FILE.read_text(encoding="utf-8"))
+        contract = OptionContract(
+            expiry=data["expiry"], strike=float(data["strike"]),
+            option_type=data["option_type"], last_price=float(data["mid"]),
+            bid=float(data["bid"]), ask=float(data["ask"]), mid=float(data["mid"]),
+            iv=float(data["iv"]), volume=int(data["volume"]),
+            open_interest=int(data["open_interest"]),
+        )
+        return OptionsPosition(
+            contract=contract, contracts=int(data["contracts"]),
+            entry_premium=float(data["entry_premium"]),
+            entry_time=datetime.fromisoformat(data["entry_time"]),
+            entry_spy_price=float(data["entry_spy_price"]),
+            cost_basis=float(data["cost_basis"]), reconciled=True,
+        ), float(data["model_score"])
+    except Exception:
         return None
 
 
@@ -427,17 +458,18 @@ def _ai_pick_contract(
 
 # ── Order execution ───────────────────────────────────────────────────────────
 
-def execute_buy_option(contract: OptionContract, n_contracts: int, max_debit: float) -> bool:
+def execute_buy_option(contract: OptionContract, n_contracts: int, max_debit: float) -> str:
+    """Prepare the exact ticket; securities submission requires human confirmation."""
     expected_cost = contract.ask * n_contracts * 100
     if n_contracts < 1 or expected_cost > max_debit:
         log(f"[SAFETY] Refusing buy: {n_contracts} contract(s), expected cost ${expected_cost:.2f}")
-        return False
+        return "failed"
     if _DRY_RUN:
         log(
             f"[DRY] BUY {n_contracts}x SPY {contract.expiry} "
             f"${contract.strike:.0f} {contract.option_type.upper()} @ ${contract.ask:.2f}"
         )
-        return True
+        return "dry"
     result = subprocess.run(
         [
             PYTHON, str(AUTO), "buy-option",
@@ -447,16 +479,17 @@ def execute_buy_option(contract: OptionContract, n_contracts: int, max_debit: fl
             "--expiry",      contract.expiry,
             "--contracts",   str(n_contracts),
             "--max-cost",    f"{max_debit:.2f}",
-            "--confirm",
         ],
         capture_output=True, text=True, timeout=300,
     )
     output = (result.stdout + result.stderr).strip()
     log(f"[buy-option] {output[:800]}")
-    return result.returncode == 0 and "ORDER_RESULT" in output
+    if result.returncode == 0 and "ORDER_RESULT_JSON:" in output:
+        return "review"
+    return "failed"
 
 
-def execute_sell_option(contract: OptionContract, n_contracts: int) -> bool:
+def execute_sell_option(contract: OptionContract, n_contracts: int) -> str:
     owned = load_position()
     if (
         owned is None
@@ -467,13 +500,13 @@ def execute_sell_option(contract: OptionContract, n_contracts: int) -> bool:
         or n_contracts > owned.contracts
     ):
         log("[SAFETY] Refusing sell: contract/quantity is not owned in the bot ledger")
-        return False
+        return "failed"
     if _DRY_RUN:
         log(
             f"[DRY] SELL {n_contracts}x SPY {contract.expiry} "
             f"${contract.strike:.0f} {contract.option_type.upper()}"
         )
-        return True
+        return "dry"
     result = subprocess.run(
         [
             PYTHON, str(AUTO), "sell-option",
@@ -482,13 +515,12 @@ def execute_sell_option(contract: OptionContract, n_contracts: int) -> bool:
             "--strike",      str(int(contract.strike)),
             "--expiry",      contract.expiry,
             "--contracts",   str(n_contracts),
-            "--confirm",
         ],
         capture_output=True, text=True, timeout=300,
     )
     output = (result.stdout + result.stderr).strip()
     log(f"[sell-option] {output[:800]}")
-    return result.returncode == 0
+    return "review" if result.returncode == 0 and "ORDER_RESULT_JSON:" in output else "failed"
 
 
 # ── Telegram report messages ──────────────────────────────────────────────────
@@ -498,7 +530,7 @@ def _plan_report_msg(bias: "PreMarketBias", today: str, mins_to_entry: int) -> s
     from kzer_bot.spy_options_strategy import REGIME_BIAS, TARGET_PREMIUM_MIN, TARGET_PREMIUM_MAX
     regime_label = "bearish" if REGIME_BIAS < 0 else "bullish" if REGIME_BIAS > 0 else "neutral"
     lines = [
-        f"📊 <b>0DTE SPY OPTIONS | {today} | {'DRY RUN' if _DRY_RUN else 'LIVE'}</b>",
+        f"📊 <b>0DTE SPY OPTIONS | {today} | {'DRY RUN' if _DRY_RUN else 'ORDER REVIEW'}</b>",
         f"{direction_emoji} <b>Playing {bias.fade_with.upper()}S today</b> (gap-fade + {regime_label} regime)",
         f"   SPY PM: {bias.pm_pct:+.2f}%  VIX: {bias.vix:.1f}  ES 1h: {bias.es_pct:+.2f}%",
         f"   Strike range: 4–5 SPY points OTM | ${TARGET_PREMIUM_MIN:.2f}–${TARGET_PREMIUM_MAX:.2f} ask",
@@ -551,6 +583,21 @@ def _half_hour_report() -> None:
         quote = _broker_option_quote(position.contract) or get_option_mid(position.contract)
         if quote > 0:
             notify(_position_report_msg(position, quote))
+            return
+
+    shadow = _load_shadow_position()
+    if shadow and shadow[0].contract.expiry == now_et().date().isoformat():
+        shadow_pos, model_score = shadow
+        quote = get_option_mid(shadow_pos.contract)
+        if quote > 0:
+            action, reason = check_exit(shadow_pos, quote)
+            pnl = (quote - shadow_pos.entry_premium) * shadow_pos.contracts * 100
+            notify("🧪 <b>SHADOW</b> | " + _position_report_msg(shadow_pos, quote) + f"\n   Model score: {model_score:.1f} | {reason}")
+            if action != "hold":
+                audit("shadow_exit", action=action, pnl=pnl, reason=reason)
+                with SHADOW_FILE.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps({"timestamp": now_et().isoformat(), "event": "exit", "pnl": pnl, "reason": reason}) + "\n")
+                SHADOW_POS_FILE.unlink(missing_ok=True)
             return
 
     bias = get_premarket_bias()
@@ -723,8 +770,11 @@ def hold_loop(pos: OptionsPosition) -> None:
                 reason = f"PROFIT EXIT (single contract) — {reason}"
             else:
                 half = pos.contracts // 2
-                ok   = execute_sell_option(pos.contract, half)
-                if ok:
+                sell_state = execute_sell_option(pos.contract, half)
+                if sell_state == "review":
+                    notify(f"👀 PARTIAL EXIT READY FOR MANUAL REVIEW | {half} contract(s) | {reason}")
+                    return
+                if sell_state == "dry":
                     remaining       = pos.contracts - half
                     pos.cost_basis *= remaining / pos.contracts
                     pos.contracts   = remaining
@@ -743,8 +793,11 @@ def hold_loop(pos: OptionsPosition) -> None:
                 continue
 
         if action == "close_all":
-            ok = execute_sell_option(pos.contract, pos.contracts)
-            if ok:
+            sell_state = execute_sell_option(pos.contract, pos.contracts)
+            if sell_state == "review":
+                notify(f"👀 FULL EXIT READY FOR MANUAL REVIEW | {pos.contracts} contract(s) | {reason}")
+                return
+            if sell_state == "dry":
                 result_emoji = "🚀" if pnl_pct > 100 else "✅" if pnl_pct > 0 else "🔻"
                 notify(
                     f"{result_emoji} <b>CLOSED</b> | SPY ${int(pos.contract.strike)} "
@@ -765,7 +818,7 @@ def hold_loop(pos: OptionsPosition) -> None:
 
 def run_today(now_flag: bool = False, balance_override: float | None = None) -> None:
     today = now_et().date().isoformat()
-    notify(f"=== 0DTE SPY OPTIONS BOT | {today} | {'DRY RUN' if _DRY_RUN else 'LIVE'} ===")
+    notify(f"=== 0DTE SPY OPTIONS BOT | {today} | {'DRY RUN' if _DRY_RUN else 'ORDER REVIEW'} ===")
     if STOP_FILE.exists():
         notify("NO TRADE: emergency stop is active. Send /resume to clear it.")
         return
@@ -904,9 +957,42 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
     )
 
     # ── Place buy order ───────────────────────────────────────────────────────
-    ok = execute_buy_option(contract, n_contracts, max_debit=balance)
-    if not ok:
+    quality = validate_quote(
+        bid=contract.bid, ask=contract.ask, volume=contract.volume,
+        open_interest=contract.open_interest,
+    )
+    if not quality.valid:
+        notify("NO TRADE: contract failed execution-quality gates — " + "; ".join(quality.reasons))
+        audit("contract_quality_rejected", strike=contract.strike, reasons=quality.reasons)
+        return
+
+    model_score = _contract_quant_score(contract, spy_price)[0]
+    ShadowLedger(SHADOW_FILE).append(ShadowTrade(
+        timestamp=now_et().isoformat(),
+        decision_id=decision_id(now_et(), contract.option_type, contract.strike),
+        expiry=contract.expiry, option_type=contract.option_type, strike=contract.strike,
+        contracts=n_contracts, entry_bid=contract.bid, entry_ask=contract.ask,
+        assumed_entry=contract.ask, model_score=model_score,
+        live_mode="dry" if _DRY_RUN else "review",
+    ))
+    audit("shadow_entry", strike=contract.strike, contracts=n_contracts, score=model_score)
+
+    order_state = execute_buy_option(contract, n_contracts, max_debit=balance)
+    if order_state == "failed":
         notify("BUY FAILED — check data/options.log and data/screen_*.png for details")
+        return
+    if order_state == "review":
+        _save_shadow_position(OptionsPosition(
+            contract=contract, contracts=n_contracts, entry_premium=entry_ask,
+            entry_time=now_et(), entry_spy_price=spy_price, cost_basis=cost_total,
+            reconciled=True,
+        ), model_score)
+        notify(
+            f"👀 <b>ORDER READY FOR MANUAL REVIEW</b> | SPY ${contract.strike:.0f} "
+            f"{contract.option_type.upper()} 0DTE | {n_contracts} contract(s). "
+            "Verify the live debit and confirm in Wealthsimple if you choose to proceed."
+        )
+        audit("order_review_ready", strike=contract.strike, contracts=n_contracts)
         return
 
     pos = OptionsPosition(

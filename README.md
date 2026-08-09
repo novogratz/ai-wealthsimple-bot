@@ -107,10 +107,10 @@ python scripts/watchdog.py
 - refreshes the Wealthsimple Chrome session every two minutes;
 - sends a detailed SPY scan and plan immediately at startup, then stays running across nights, weekends, and holidays with updates at every exact `:00` and `:30` ET boundary;
 - shows the directional factor contributions and a contract execution-score breakdown for spread, volume, open interest, premium fit, strike distance, and IV;
-- considers one autonomous long call or long put entry from 9:45–10:00 AM ET;
+- considers one long call or long put ticket from 9:45–10:00 AM ET;
 - buys the maximum affordable whole contracts, targeting 50–100% of available USD cash;
 - refuses any expiry other than the current ET date and any strike outside 4–5 SPY points OTM; and
-- only submits sell-to-close orders matching its own local position ledger.
+- only prepares sell-to-close tickets matching its own local position ledger.
 
 Production safeguards in v3.0.0:
 
@@ -123,8 +123,33 @@ Production safeguards in v3.0.0:
 - writes every contract score and lifecycle decision to `data/options_audit.jsonl`; and
 - accepts Telegram `/status`, `/stop`, and `/resume` from the configured chat.
 
-`/stop` prevents new entries. If the bot owns a reconciled position, it submits a
-sell-to-close for that exact contract and quantity. It never issues a naked sell.
+`/stop` prevents new entries. If the bot owns a reconciled position, it prepares a
+sell-to-close ticket for that exact contract and quantity for manual confirmation. It
+never issues a naked sell.
+
+### Quant research and shadow mode (v3.1.0)
+
+Every eligible decision is written independently to `data/options_shadow.jsonl`, even
+when the Wealthsimple ticket is prepared for review. The shadow position is marked at
+each half-hour update and evaluated with the same exit rules. A live browser workflow
+stops at Wealthsimple's final review screen; the user must verify and confirm any
+securities order.
+
+Contracts must have a valid two-sided quote, a spread no wider than 25%, at least 100
+same-day contracts of volume, and at least 250 contracts of open interest. Rejections
+and their reasons are written to the structured audit log.
+
+Walk-forward research accepts an outcome CSV containing `timestamp`, `score`, and
+`return`. Each test window uses a threshold selected exclusively from its preceding
+training window:
+
+```bash
+python scripts/run_walk_forward.py data/spy_outcomes.csv --train 60 --test 20
+```
+
+The report includes trade count, win rate, expectancy, profit factor, maximum drawdown,
+and an annualized trade-level Sharpe estimate. This framework is for validation; it does
+not establish that the current strategy has positive expected value.
 
 Safe paper-mode launch (no orders):
 
@@ -177,4 +202,4 @@ python scripts/run_grinder.py --balance 95.50
 
 ## Disclaimer
 
-High-risk autonomous trading tool. Past performance is not indicative of future results.
+High-risk options research and order-review tool. Past performance is not indicative of future results.

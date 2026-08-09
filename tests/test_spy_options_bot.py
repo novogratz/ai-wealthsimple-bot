@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from subprocess import CompletedProcess
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -55,6 +56,12 @@ class PositionSizingTests(unittest.TestCase):
         bad, _ = bot._contract_quant_score(illiquid, 773.0)
         self.assertGreater(good, bad)
 
+    def test_live_buy_stops_at_manual_review(self):
+        result = CompletedProcess([], 0, stdout='ORDER_RESULT_JSON:{"submitted": false}', stderr="")
+        with patch.object(bot, "_DRY_RUN", False), patch.object(bot.subprocess, "run", return_value=result) as run:
+            self.assertEqual(bot.execute_buy_option(contract(), 1, 100), "review")
+            self.assertNotIn("--confirm", run.call_args.args[0])
+
 
 class OwnershipLedgerTests(unittest.TestCase):
     def test_rejects_position_without_bot_ownership_marker(self):
@@ -78,10 +85,10 @@ class OwnershipLedgerTests(unittest.TestCase):
             ledger = Path(tmp) / "position.json"
             with patch.object(bot, "POS_FILE", ledger), patch.object(bot, "_DRY_RUN", True):
                 bot.save_position(owned)
-                self.assertTrue(bot.execute_sell_option(owned_contract, 1))
+                self.assertEqual(bot.execute_sell_option(owned_contract, 1), "dry")
                 wrong = contract()
                 wrong.strike = 641.0
-                self.assertFalse(bot.execute_sell_option(wrong, 1))
+                self.assertEqual(bot.execute_sell_option(wrong, 1), "failed")
 
 
 if __name__ == "__main__":
