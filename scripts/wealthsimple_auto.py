@@ -780,7 +780,25 @@ def open_browser(p):
         return ctx, page
     except Exception:
         pass
-    print("No running browser found. Run first: python scripts/wealthsimple_auto.py setup")
+    # Recover a crashed browser with the existing persistent profile.
+    import subprocess
+    import time
+    browser_exe = find_browser_executable()
+    safe_print("Browser unavailable — relaunching with the persistent Wealthsimple profile...")
+    subprocess.Popen([
+        browser_exe, "--remote-debugging-port=9222", f"--user-data-dir={PROFILE_DIR}",
+        "--no-first-run", "--no-default-browser-check", WS_HOME,
+    ])
+    for _ in range(20):
+        time.sleep(1)
+        try:
+            browser = p.chromium.connect_over_cdp(CDP_URL)
+            ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            return ctx, page
+        except Exception:
+            continue
+    print("No running browser found. Run: python scripts/wealthsimple_auto.py setup")
     sys.exit(1)
 
 
@@ -1584,6 +1602,117 @@ def find_and_click_option_contract(
     return False
 
 
+def read_option_chain_quote(page, option_type: str, strike: float, expiry: str) -> dict:
+    """Read Wealthsimple's displayed bid/ask for one exact contract without ordering."""
+    page = navigate_to_spy_options(page)
+    select_option_expiry(page, expiry)
+    type_label = "Call" if option_type.lower() == "call" else "Put"
+    page.get_by_text(type_label, exact=True).first.click(timeout=3000)
+    page.wait_for_timeout(900)
+    label = f"${int(strike)}"
+    quote = page.evaluate(r"""(strikeLabel) => {
+        const strike = [...document.querySelectorAll('*')].find(el =>
+            el.children.length === 0 && (el.textContent || '').trim() === strikeLabel
+        );
+        if (!strike) return null;
+        let row = strike.parentElement;
+        for (let i = 0; i < 10 && row; i++, row = row.parentElement) {
+            const prices = [...row.querySelectorAll('button')].filter(b =>
+                /^\$[0-9]/.test((b.textContent || '').trim())
+            );
+            if (prices.length >= 2) {
+                const value = b => parseFloat((b.textContent || '').replace('$', ''));
+                return {bid: value(prices[0]), ask: value(prices[prices.length - 1])};
+            }
+        }
+        return null;
+    }""", label)
+    if not quote:
+        raise RuntimeError(f"Broker quote not found for {label} {option_type.upper()} {expiry}")
+    quote["mid"] = round((quote["bid"] + quote["ask"]) / 2, 4)
+    return quote
+
+
+def cmd_option_quote(args) -> None:
+    from playwright.sync_api import sync_playwright
+    result = {}
+    _acquire_busy_lock()
+    try:
+        with sync_playwright() as p:
+            _, page = open_browser(p)
+            result = read_option_chain_quote(page, args.option_type, args.strike, args.expiry)
+            print("OPTION_QUOTE_JSON:" + json.dumps(result, sort_keys=True))
+    except Exception as exc:
+        safe_print(f"[ERROR] option quote failed: {exc}")
+    finally:
+        _release_busy_lock()
+    if not result:
+        sys.exit(1)
+
+
+def cmd_option_position(args) -> None:
+    """Best-effort broker reconciliation from Holdings/Activity text."""
+    from playwright.sync_api import sync_playwright
+    result = {}
+    _acquire_busy_lock()
+    try:
+        with sync_playwright() as p:
+            _, page = open_browser(p)
+            page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
+            page.wait_for_timeout(4000)
+            text = page.locator("body").inner_text(timeout=5000)
+            marker = rf"(?:SPY\s+)?(?:{re.escape(args.expiry)}|[A-Z][a-z]{{2}}\s+\d{{1,2}}).*?\${args.strike}.*?{args.option_type}"
+            if not re.search(marker, text, re.IGNORECASE | re.DOTALL):
+                # Activity often exposes fills even before Holdings updates.
+                activity = first_visible(page, ['a[href*="activity"]', '[aria-label*="Activity" i]'], timeout=2000)
+                if activity:
+                    activity.click()
+                    page.wait_for_timeout(3000)
+                    text = page.locator("body").inner_text(timeout=5000)
+            contract_match = re.search(marker, text, re.IGNORECASE | re.DOTALL)
+            if not contract_match:
+                raise RuntimeError("Exact contract is not visible in Holdings or Activity")
+            start = max(contract_match.start() - 300, 0)
+            text = text[start:contract_match.end() + 700]
+            qty = None
+            premium = None
+            for pat in [r"([0-9]+)\s+contracts?", r"Contracts?\s+([0-9]+)"]:
+                m = re.search(pat, text, re.IGNORECASE)
+                if m: qty = int(m.group(1)); break
+            for pat in [r"(?:Average|Avg\.?|Filled at|Fill price)\s*(?:price|cost)?\s*\$([0-9,.]+)", r"Price\s*\$([0-9,.]+)"]:
+                m = re.search(pat, text, re.IGNORECASE)
+                if m: premium = float(m.group(1).replace(",", "")); break
+            if qty and premium:
+                result = {"contracts": qty, "fill_price": premium, "fill_value": qty * premium * 100}
+                print("OPTION_POSITION_JSON:" + json.dumps(result, sort_keys=True))
+    except Exception as exc:
+        safe_print(f"[ERROR] option position reconciliation failed: {exc}")
+    finally:
+        _release_busy_lock()
+    if not result:
+        sys.exit(1)
+
+
+def cmd_cancel_option(args) -> None:
+    """Cancel a pending SPY option order from the SPY options surface."""
+    from playwright.sync_api import sync_playwright
+    cancelled = 0
+    _acquire_busy_lock()
+    try:
+        with sync_playwright() as p:
+            _, page = open_browser(p)
+            page = navigate_to_spy_options(page)
+            select_option_expiry(page, args.expiry)
+            cancelled = cancel_pending_on_stock_page(page)
+            print(f"OPTION_CANCELLED:{cancelled}")
+    except Exception as exc:
+        safe_print(f"[ERROR] pending option cancellation failed: {exc}")
+    finally:
+        _release_busy_lock()
+    if cancelled < 1:
+        sys.exit(1)
+
+
 def place_option_order(page, side: str, n_contracts: int, confirm: bool, max_cost: float | None = None) -> dict:
     """
     Interact with the WS options order ticket (slides up as a drawer from the bottom).
@@ -2051,6 +2180,9 @@ def main() -> None:
     _add_option_args(option_buy)
     option_buy.add_argument("--max-cost", type=float, default=None, help="Abort if reviewed debit exceeds this amount")
     _add_option_args(sub.add_parser("sell-option", help="Sell/close an options contract on Wealthsimple"))
+    _add_option_args(sub.add_parser("option-quote", help="Read broker bid/ask for an option"))
+    _add_option_args(sub.add_parser("option-position", help="Reconcile an option fill from broker state"))
+    _add_option_args(sub.add_parser("cancel-option", help="Cancel pending SPY option order"))
 
     args = parser.parse_args()
     if args.cmd == "buy" and not args.max_dollars and args.shares is None:
@@ -2062,6 +2194,8 @@ def main() -> None:
         "balance": cmd_balance, "position": cmd_position,
         "keepalive": cmd_keepalive, "quote": cmd_quote,
         "buy-option": cmd_buy_option, "sell-option": cmd_sell_option,
+        "option-quote": cmd_option_quote, "option-position": cmd_option_position,
+        "cancel-option": cmd_cancel_option,
     }[args.cmd](args)
 
 

@@ -18,6 +18,7 @@ import json
 import re
 import subprocess
 import sys
+import threading
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -44,7 +45,8 @@ from kzer_bot.spy_options_strategy import (
     get_spy_price,
     now_et,
 )
-from kzer_bot.telegram import send_message
+from kzer_bot.market_calendar import is_early_close, is_trading_day
+from kzer_bot.telegram import get_commands, send_message
 
 TZ        = ZoneInfo("America/Toronto")
 AUTO      = ROOT / "scripts" / "wealthsimple_auto.py"
@@ -53,6 +55,10 @@ AUTO      = ROOT / "scripts" / "wealthsimple_auto.py"
 PYTHON    = sys.executable
 POS_FILE  = ROOT / "data" / "options_position.json"
 LOG_FILE  = ROOT / "data" / "options.log"
+AUDIT_FILE = ROOT / "data" / "options_audit.jsonl"
+RISK_FILE = ROOT / "data" / "options_daily_risk.json"
+STOP_FILE = ROOT / "data" / "options_emergency_stop"
+TG_OFFSET_FILE = ROOT / "data" / "telegram_offset.json"
 BOT_ID    = "spy-0dte-long-v1"
 
 # Deploy the largest whole-contract amount affordable by the live USD cash.
@@ -61,13 +67,15 @@ BOT_ID    = "spy-0dte-long-v1"
 MIN_DEPLOY_PCT = 0.50
 PREMARKET_SCAN_HOUR = 9
 PREMARKET_SCAN_MINUTE = 0
-PREMARKET_REPORT_SECS = 5 * 60
+PREMARKET_REPORT_SECS = 30 * 60
 
 _DRY_RUN: bool = False
 _keepalive_proc: "subprocess.Popen | None" = None
 _last_report_t: float = 0.0
-REPORT_INTERVAL_SECS = 5 * 60
-POSITION_REPORT_SECS = 5 * 60
+REPORT_INTERVAL_SECS = 30 * 60
+POSITION_REPORT_SECS = 30 * 60
+MAX_DAILY_LOSS_PCT = 0.50
+_reporter_stop = threading.Event()
 
 
 # ── Keepalive ─────────────────────────────────────────────────────────────────
@@ -116,12 +124,85 @@ def log(msg: str) -> None:
         pass
 
 
+def audit(event: str, **fields) -> None:
+    record = {"ts": now_et().isoformat(), "event": event, **fields}
+    try:
+        with AUDIT_FILE.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+    except Exception:
+        pass
+
+
 def notify(msg: str) -> None:
     log(msg)
+    audit("notification", message=msg)
     try:
         send_message(msg)
     except Exception:
         pass
+
+
+def _load_risk_state() -> dict:
+    today = now_et().date().isoformat()
+    try:
+        state = json.loads(RISK_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        state = {}
+    if state.get("date") != today:
+        state = {"date": today, "entries": 0, "realized_pnl": 0.0, "starting_balance": None}
+    return state
+
+
+def _save_risk_state(state: dict) -> None:
+    RISK_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def _entry_allowed(balance: float) -> tuple[bool, str]:
+    state = _load_risk_state()
+    if int(state.get("entries", 0)) >= 1:
+        return False, "one-trade-per-day lockout is active"
+    starting = float(state.get("starting_balance") or balance or 0)
+    if starting > 0 and float(state.get("realized_pnl", 0)) <= -starting * MAX_DAILY_LOSS_PCT:
+        return False, "daily loss lockout is active"
+    return True, ""
+
+
+def _mark_entry(balance: float) -> None:
+    state = _load_risk_state()
+    state["entries"] = int(state.get("entries", 0)) + 1
+    state["starting_balance"] = state.get("starting_balance") or balance
+    _save_risk_state(state)
+    audit("entry_lock", state=state)
+
+
+def _mark_realized_pnl(pnl: float) -> None:
+    state = _load_risk_state()
+    state["realized_pnl"] = float(state.get("realized_pnl", 0)) + pnl
+    _save_risk_state(state)
+    audit("realized_pnl", pnl=pnl, state=state)
+
+
+def _poll_control_commands(position: OptionsPosition | None = None) -> str | None:
+    try:
+        offset = json.loads(TG_OFFSET_FILE.read_text()).get("offset", 0) if TG_OFFSET_FILE.exists() else 0
+        commands, next_offset = get_commands(int(offset))
+        TG_OFFSET_FILE.write_text(json.dumps({"offset": next_offset}), encoding="utf-8")
+    except Exception:
+        return "stop" if STOP_FILE.exists() else None
+    action = None
+    for command in commands:
+        if command == "/stop":
+            STOP_FILE.write_text(now_et().isoformat(), encoding="utf-8")
+            action = "stop"
+            notify("🛑 <b>EMERGENCY STOP ENABLED</b> — no new entries; bot-owned position will close")
+        elif command == "/resume":
+            STOP_FILE.unlink(missing_ok=True)
+            action = "resume"
+            notify("▶️ <b>Emergency stop cleared</b>")
+        elif command == "/status":
+            status = "IN POSITION" if position else "FLAT"
+            notify(f"ℹ️ <b>SPY bot status:</b> {status} | stop={'ON' if STOP_FILE.exists() else 'OFF'}")
+    return action or ("stop" if STOP_FILE.exists() else None)
 
 
 # ── Position persistence ──────────────────────────────────────────────────────
@@ -139,6 +220,7 @@ def save_position(pos: OptionsPosition) -> None:
         "entry_spy_price": pos.entry_spy_price,
         "partial_closed":  pos.partial_closed,
         "cost_basis":      pos.cost_basis,
+        "reconciled":      pos.reconciled,
     }
     POS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -172,6 +254,7 @@ def load_position() -> OptionsPosition | None:
             entry_spy_price=float(d["entry_spy_price"]),
             partial_closed=bool(d.get("partial_closed", False)),
             cost_basis=float(d.get("cost_basis", 0.0)),
+            reconciled=bool(d.get("reconciled", False)),
         )
     except Exception as e:
         log(f"[WARN] Could not load position file: {e}")
@@ -204,6 +287,73 @@ def calc_max_contracts(ask_price: float, balance: float) -> int:
     cost_per = ask_price * 100
     n        = int(usable // cost_per)
     return max(n, 0)
+
+
+def _broker_option_quote(contract: OptionContract) -> float:
+    """Prefer Wealthsimple bid/mid for exits; return 0 to trigger Yahoo fallback."""
+    try:
+        result = subprocess.run([
+            PYTHON, str(AUTO), "option-quote", "--symbol", "SPY",
+            "--option-type", contract.option_type, "--strike", str(int(contract.strike)),
+            "--expiry", contract.expiry, "--contracts", "1",
+        ], capture_output=True, text=True, timeout=120)
+        match = re.search(r"OPTION_QUOTE_JSON:(\{.*\})", result.stdout + result.stderr)
+        if match:
+            quote = json.loads(match.group(1))
+            audit("broker_quote", contract=contract.strike, quote=quote)
+            return float(quote.get("bid") or quote.get("mid") or 0)
+    except Exception as exc:
+        log(f"[WARN] Broker quote failed: {exc}")
+    return 0.0
+
+
+def _reconcile_position(pos: OptionsPosition, attempts: int = 6) -> OptionsPosition:
+    """Replace estimated entry/quantity with broker-confirmed fill details."""
+    for attempt in range(1, attempts + 1):
+        try:
+            result = subprocess.run([
+                PYTHON, str(AUTO), "option-position", "--symbol", "SPY",
+                "--option-type", pos.contract.option_type,
+                "--strike", str(int(pos.contract.strike)), "--expiry", pos.contract.expiry,
+                "--contracts", str(pos.contracts),
+            ], capture_output=True, text=True, timeout=120)
+            match = re.search(r"OPTION_POSITION_JSON:(\{.*\})", result.stdout + result.stderr)
+            if match:
+                fill = json.loads(match.group(1))
+                pos.contracts = int(fill["contracts"])
+                pos.entry_premium = float(fill["fill_price"])
+                pos.cost_basis = float(fill["fill_value"])
+                pos.reconciled = True
+                save_position(pos)
+                audit("fill_reconciled", attempt=attempt, fill=fill)
+                notify(
+                    f"✅ <b>FILL CONFIRMED</b> | {pos.contracts}x SPY "
+                    f"${pos.contract.strike:.0f} {pos.contract.option_type.upper()} @ ${pos.entry_premium:.2f}"
+                )
+                return pos
+        except Exception as exc:
+            log(f"[WARN] Fill reconciliation attempt {attempt}: {exc}")
+        if attempt < attempts:
+            time.sleep(10)
+    audit("fill_unreconciled", strike=pos.contract.strike, contracts=pos.contracts)
+    notify("⚠️ Fill not yet visible at broker; keeping provisional ledger and retrying during monitoring")
+    return pos
+
+
+def _cancel_pending_option(pos: OptionsPosition) -> bool:
+    try:
+        result = subprocess.run([
+            PYTHON, str(AUTO), "cancel-option", "--symbol", "SPY",
+            "--option-type", pos.contract.option_type,
+            "--strike", str(int(pos.contract.strike)), "--expiry", pos.contract.expiry,
+            "--contracts", str(pos.contracts),
+        ], capture_output=True, text=True, timeout=120)
+        ok = result.returncode == 0 and "OPTION_CANCELLED:" in result.stdout
+        audit("pending_cancel", success=ok, output=(result.stdout + result.stderr)[-500:])
+        return ok
+    except Exception as exc:
+        audit("pending_cancel", success=False, error=str(exc))
+        return False
 
 
 # ── AI contract picker ────────────────────────────────────────────────────────
@@ -246,6 +396,12 @@ def _contract_leaderboard(candidates: list[OptionContract], spy_price: float, li
             f"#{rank} ${c.strike:.0f} {c.option_type.upper()} | score {score:.1f}/100 | "
             f"ask ${ask:.2f} | spread ${spread:.2f} | {abs(c.strike-spy_price):.1f}pt OTM | "
             f"vol {c.volume:,} OI {c.open_interest:,}"
+        )
+        audit(
+            "contract_score", rank=rank, strike=c.strike, option_type=c.option_type,
+            score=score, bid=c.bid, ask=c.ask, spread=spread,
+            distance=abs(c.strike-spy_price), volume=c.volume,
+            open_interest=c.open_interest, iv=c.iv, spy_price=spy_price,
         )
     return "\n".join(rows)
 
@@ -357,8 +513,12 @@ def _plan_report_msg(bias: "PreMarketBias", today: str, mins_to_entry: int) -> s
 
 
 def _scored_plan_report(bias: "PreMarketBias", today: str, mins_to_entry: int) -> str:
-    """Build the five-minute directional plan plus an indicative contract board."""
+    """Build a directional plan with an auditable factor and contract board."""
     base = _plan_report_msg(bias, today, mins_to_entry)
+    factor_lines = [r.strip() for r in bias.reasons if r.strip()]
+    factors = "\n".join(f"   {line}" for line in factor_lines)
+    if factors:
+        base += "\n\n<b>Directional factor model</b>\n" + factors
     spy_price = get_spy_price()
     if spy_price <= 0 or bias.fade_with not in {"call", "put"}:
         return base + "\n   Contract board: waiting for a valid SPY quote"
@@ -373,8 +533,52 @@ def _scored_plan_report(bias: "PreMarketBias", today: str, mins_to_entry: int) -
         f"PLAN → MARKET BUY ${planned.strike:.0f} {planned.option_type.upper()} "
         f"at entry confirmation | score {score:.1f}/100"
     )
-    log("[5-MIN PLAN]\n" + board + "\n" + plan)
-    return base + "\n\n<b>Quant contract board</b>\n" + board + "\n<b>" + plan + "</b>"
+    chosen_parts = _contract_quant_score(planned, spy_price)[1]
+    breakdown = (
+        f"Execution score → spread {chosen_parts['spread']:.1f}/30 | "
+        f"volume {chosen_parts['volume']:.1f}/20 | OI {chosen_parts['oi']:.1f}/12 | "
+        f"premium fit {chosen_parts['premium']:.1f}/18 | distance {chosen_parts['distance']:.1f}/15 | "
+        f"IV sanity {chosen_parts['iv']:.1f}/5"
+    )
+    log("[30-MIN QUANT PLAN]\n" + board + "\n" + breakdown + "\n" + plan)
+    return base + "\n\n<b>Quant contract board</b>\n" + board + "\n" + breakdown + "\n<b>" + plan + "</b>"
+
+
+def _half_hour_report() -> None:
+    """Send current SPY state at an exact :00/:30 ET boundary."""
+    position = load_position()
+    if position and position.contract.expiry == now_et().date().isoformat():
+        quote = _broker_option_quote(position.contract) or get_option_mid(position.contract)
+        if quote > 0:
+            notify(_position_report_msg(position, quote))
+            return
+
+    bias = get_premarket_bias()
+    n = now_et()
+    trading = is_trading_day(n.date())
+    session = "MARKET CLOSED"
+    if trading and (n.hour, n.minute) < (9, 30):
+        session = "PREMARKET"
+    elif trading and (n.hour, n.minute) < (16, 0):
+        session = "REGULAR SESSION"
+    elif trading:
+        session = "AFTER HOURS"
+    report = _scored_plan_report(bias, n.date().isoformat(), 0)
+    notify(f"🕒 <b>HALF-HOUR QUANT UPDATE | {n:%H:%M} ET | {session}</b>\n" + report)
+
+
+def _half_hour_reporter_loop() -> None:
+    """Run forever and align reports to wall-clock :00 and :30 ET."""
+    while not _reporter_stop.is_set():
+        n = now_et()
+        minute_target = 30 if n.minute < 30 else 60
+        wait = (minute_target - n.minute) * 60 - n.second - n.microsecond / 1_000_000
+        if _reporter_stop.wait(max(wait, 0.1)):
+            return
+        try:
+            _half_hour_report()
+        except Exception as exc:
+            log(f"[reporter] Half-hour report failed: {exc}")
 
 
 def _position_report_msg(pos: "OptionsPosition", current_mid: float) -> str:
@@ -434,6 +638,12 @@ def premarket_plan_loop(today: str) -> PreMarketBias:
     global _last_report_t
     latest: PreMarketBias | None = None
     while True:
+        if _poll_control_commands() == "stop":
+            return PreMarketBias(
+                direction="skip", fade_with="skip", pm_pct=0.0, vix=0.0,
+                spy_prev_close=0.0, spy_pm_price=0.0, es_pct=0.0,
+                skip_reason="Telegram emergency stop is active",
+            )
         n = now_et()
         if n.hour > 9 or (n.hour == 9 and n.minute >= 30):
             break
@@ -443,9 +653,9 @@ def premarket_plan_loop(today: str) -> PreMarketBias:
             log(f"  {reason}")
         mins_to_open = max(int((n.replace(hour=9, minute=30, second=0, microsecond=0) - n).total_seconds() / 60), 0)
         if latest.fade_with == "skip":
-            notify(f"📊 <b>SPY 0DTE PREMARKET | {today}</b>\nNo-trade plan: {latest.skip_reason}\n⏰ {mins_to_open} min to open")
+            log(f"PREMARKET no-trade plan: {latest.skip_reason} | {mins_to_open} min to open")
         else:
-            notify(_scored_plan_report(latest, today, mins_to_open))
+            log(_scored_plan_report(latest, today, mins_to_open))
         _last_report_t = time.time()
 
         # Align scans to the next five-minute wall-clock boundary.
@@ -478,17 +688,23 @@ def hold_loop(pos: OptionsPosition) -> None:
     while True:
         time.sleep(60)
 
-        current_mid = get_option_mid(pos.contract)
+        emergency = _poll_control_commands(pos)
+
+        if not pos.reconciled:
+            pos = _reconcile_position(pos, attempts=1)
+
+        current_mid = _broker_option_quote(pos.contract)
+        price_source = "Wealthsimple bid"
+        if current_mid <= 0:
+            current_mid = get_option_mid(pos.contract)
+            price_source = "Yahoo fallback"
         if current_mid <= 0:
             log("Could not refresh option mid — retrying next cycle")
             continue
 
-        # 30-min position update to Telegram
-        if time.time() - _last_report_t >= POSITION_REPORT_SECS:
-            notify(_position_report_msg(pos, current_mid))
-            _last_report_t = time.time()
-
         action, reason = check_exit(pos, current_mid)
+        if emergency == "stop":
+            action, reason = "close_all", "TELEGRAM EMERGENCY STOP"
         pnl_pct = (current_mid - pos.entry_premium) / pos.entry_premium * 100
         pnl_usd = (current_mid - pos.entry_premium) * pos.contracts * 100
 
@@ -532,6 +748,9 @@ def hold_loop(pos: OptionsPosition) -> None:
                     f"<b>P&L: {pnl_pct:+.0f}% / ${pnl_usd:+.0f}</b> | {reason}"
                 )
                 clear_position()
+                _mark_realized_pnl(pnl_usd)
+                audit("position_closed", strike=pos.contract.strike, option_type=pos.contract.option_type,
+                      contracts=pos.contracts, exit_mid=current_mid, pnl_usd=pnl_usd, reason=reason)
                 return
             else:
                 log(f"[WARN] Full sell failed for: {reason} — retrying next cycle")
@@ -542,6 +761,9 @@ def hold_loop(pos: OptionsPosition) -> None:
 def run_today(now_flag: bool = False, balance_override: float | None = None) -> None:
     today = now_et().date().isoformat()
     notify(f"=== 0DTE SPY OPTIONS BOT | {today} | {'DRY RUN' if _DRY_RUN else 'LIVE'} ===")
+    if STOP_FILE.exists():
+        notify("NO TRADE: emergency stop is active. Send /resume to clear it.")
+        return
 
     # ── Resume open position from today ──────────────────────────────────────
     existing = load_position()
@@ -551,6 +773,14 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
             f"{existing.contract.option_type.upper()} | entry ${existing.entry_premium:.2f} | "
             f"{existing.contracts} contract(s)"
         )
+        if not existing.reconciled:
+            existing = _reconcile_position(existing)
+            if not existing.reconciled:
+                cancelled = _cancel_pending_option(existing)
+                notify(f"Unconfirmed pending order {'cancelled' if cancelled else 'requires manual cancellation'}")
+                if cancelled:
+                    clear_position()
+                return
         hold_loop(existing)
         return
     elif existing:
@@ -570,12 +800,11 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
     # Send initial game plan to Telegram
     notify(_scored_plan_report(bias, today, 0))
 
-    # ── Wait for 9:45 AM entry window — refresh scored plan every 5 min ──────
+    # ── Wait for 9:45 AM entry window; reporter publishes at :00/:30 ────────
     if not now_flag:
         _sleep_until(
             ENTRY_HOUR, ENTRY_MINUTE_START,
             "entry window 9:45 AM",
-            period_fn=lambda mins: notify(_scored_plan_report(bias, today, mins)),
         )
 
     if not now_flag and _past_cutoff():
@@ -642,6 +871,11 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
             notify("ERROR: Could not fetch balance from Wealthsimple — aborting. Use --balance X to override.")
             return
 
+    allowed, lock_reason = _entry_allowed(balance)
+    if not allowed:
+        notify(f"NO TRADE: {lock_reason}")
+        return
+
     n_contracts = calc_max_contracts(entry_ask, balance)
     if n_contracts == 0:
         notify(
@@ -679,8 +913,18 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
         cost_basis=cost_total,
     )
     save_position(pos)
+    _mark_entry(balance)
+    audit("position_recorded", strike=contract.strike, option_type=contract.option_type,
+          contracts=n_contracts, entry_premium=entry_ask, cost_basis=cost_total)
 
     # ── Hold loop until exit condition ────────────────────────────────────────
+    pos = _reconcile_position(pos)
+    if not pos.reconciled:
+        cancelled = _cancel_pending_option(pos)
+        notify(f"Unconfirmed order {'cancelled automatically' if cancelled else 'must be checked manually in Activity'}")
+        if cancelled:
+            clear_position()
+        return
     hold_loop(pos)
     notify(f"=== 0DTE SESSION DONE | {today} ===")
 
@@ -698,19 +942,40 @@ def main() -> None:
     if _DRY_RUN:
         log("[DRY RUN] No orders will be placed — strategy logic only")
 
-    if now_et().weekday() >= 5 and not args.now:
-        log("Market is closed on weekends — no scan or orders")
-        return
-
-    # Keep the WS browser session alive throughout the entire options session.
+    # The normal runner is a persistent service: half-hour reports continue on
+    # nights, weekends, and holidays while trading remains NYSE-session-only.
+    reporter = threading.Thread(target=_half_hour_reporter_loop, name="spy-quant-reporter", daemon=True)
+    reporter.start()
     _start_keepalive()
     try:
-        # Wait for 9:00 AM before starting five-minute bias scans
-        if not args.now:
-            _sleep_until(PREMARKET_SCAN_HOUR, PREMARKET_SCAN_MINUTE, "SPY pre-market scan start")
+        if args.now:
+            run_today(now_flag=True, balance_override=args.balance)
+            return
 
-        run_today(now_flag=args.now, balance_override=args.balance)
+        completed_date: date | None = None
+        while True:
+            n = now_et()
+            if not is_trading_day(n.date()):
+                if completed_date != n.date():
+                    log("NYSE is closed today — reports continue; no orders")
+                    completed_date = n.date()
+                _poll_control_commands()
+                time.sleep(60)
+                continue
+
+            if completed_date == n.date():
+                _poll_control_commands()
+                time.sleep(60)
+                continue
+
+            if is_early_close(n.date()):
+                log("NYSE early-close session detected — mandatory exit moves to 12:45 ET")
+            _sleep_until(PREMARKET_SCAN_HOUR, PREMARKET_SCAN_MINUTE, "SPY pre-market scan start")
+            run_today(now_flag=False, balance_override=args.balance)
+            completed_date = n.date()
     finally:
+        _reporter_stop.set()
+        reporter.join(timeout=2)
         _stop_keepalive()
 
 

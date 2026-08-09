@@ -20,6 +20,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 import yfinance as yf
+from .market_calendar import market_close_time
 
 TZ = ZoneInfo("America/Toronto")
 
@@ -93,6 +94,7 @@ class OptionsPosition:
     entry_spy_price: float
     partial_closed: bool = False   # True once 50% partial has been taken
     cost_basis: float    = 0.0     # total dollars spent (entry_premium * contracts * 100)
+    reconciled: bool     = False   # True after broker confirms actual fill details
 
 
 def is_strike_within_otm_bounds(option_type: str, strike: float, spy_price: float) -> bool:
@@ -583,9 +585,11 @@ def check_exit(
         return "close_all", f"PROFIT TARGET +{pnl_pct:.0f}% — massive winner, closing all"
 
     # 2. Hard time close. No profit-taking occurs below +500%.
-    noon = now.replace(hour=NOON_CLOSE_HOUR, minute=NOON_CLOSE_MINUTE, second=0, microsecond=0)
+    close_hour, _ = market_close_time(now.date())
+    time_exit_hour, time_exit_minute = (12, 45) if close_hour == 13 else (NOON_CLOSE_HOUR, NOON_CLOSE_MINUTE)
+    noon = now.replace(hour=time_exit_hour, minute=time_exit_minute, second=0, microsecond=0)
     if now >= noon:
-        return "close_all", f"TIME CLOSE {NOON_CLOSE_HOUR:02d}:{NOON_CLOSE_MINUTE:02d} ({pnl_pct:+.0f}%) — theta kills OTM after {NOON_CLOSE_HOUR}h"
+        return "close_all", f"TIME CLOSE {time_exit_hour:02d}:{time_exit_minute:02d} ({pnl_pct:+.0f}%) — expiry risk"
 
     # 3. Nuclear close 3:45 PM — never hold 0DTE into expiry
     hard = now.replace(hour=HARD_CLOSE_HOUR, minute=HARD_CLOSE_MINUTE, second=0, microsecond=0)

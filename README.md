@@ -105,11 +105,26 @@ python scripts/watchdog.py
 `run_grinder.py` delegates to the SPY 0DTE bot. On weekdays it:
 
 - refreshes the Wealthsimple Chrome session every two minutes;
-- recalculates and sends the SPY call/put plan every five minutes from 9:00–9:30 AM ET;
+- stays running across nights, weekends, and holidays and sends a detailed SPY quant update at every exact `:00` and `:30` ET boundary;
+- shows the directional factor contributions and a contract execution-score breakdown for spread, volume, open interest, premium fit, strike distance, and IV;
 - considers one autonomous long call or long put entry from 9:45–10:00 AM ET;
 - buys the maximum affordable whole contracts, targeting 50–100% of available USD cash;
 - refuses any expiry other than the current ET date and any strike outside 4–5 SPY points OTM; and
 - only submits sell-to-close orders matching its own local position ledger.
+
+Production safeguards in v3.0.0:
+
+- confirms actual fills from Wealthsimple before trusting entry premium or quantity;
+- uses Wealthsimple's displayed bid for exits, with Yahoo only as a fallback;
+- cancels an unconfirmed pending bot order automatically;
+- enforces one entry per trading day plus a persistent daily-loss lockout;
+- handles NYSE holidays and 1:00 PM early closes;
+- relaunches Chrome automatically with the persistent trusted profile;
+- writes every contract score and lifecycle decision to `data/options_audit.jsonl`; and
+- accepts Telegram `/status`, `/stop`, and `/resume` from the configured chat.
+
+`/stop` prevents new entries. If the bot owns a reconciled position, it submits a
+sell-to-close for that exact contract and quantity. It never issues a naked sell.
 
 Safe paper-mode launch (no orders):
 
