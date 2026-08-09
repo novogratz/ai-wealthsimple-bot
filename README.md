@@ -16,7 +16,8 @@ its hand-set weights and exit thresholds do not constitute proven positive expec
 3. A negative score proposes puts; a positive score proposes calls. Ambiguous flat sessions
    are skipped.
 4. Between 9:45 and 10:00 ET, require a 0.05% reversal away from the opening extreme.
-5. Rank exact-0DTE contracts 7–8 SPY points OTM with asks between $0.10 and $0.60.
+5. Rank strictly OTM exact-0DTE contracts with asks between $0.25 and $0.70. Strike
+   distance is informational and is not an eligibility rule.
 6. Reject contracts without a valid two-sided quote, spread ≤25%, volume ≥100, and open
    interest ≥250.
 7. Size the largest affordable whole-contract quantity, using as close to 100% of available
@@ -105,8 +106,7 @@ Eligible contracts receive a 0–100 execution/convexity score:
 | Relative bid/ask tightness | 30 |
 | Same-day volume | 20 |
 | Open interest | 12 |
-| Fit to $0.35 target premium | 18 |
-| Fit to 7.5-point OTM center | 15 |
+| Fit to $0.475 target premium | 33 |
 | IV sanity range | 5 |
 
 The leaderboard explains every component in Telegram and `data/options_audit.jsonl`.
@@ -131,11 +131,13 @@ weekends and its built-in NYSE holiday calendar.
 - `data/options_position.json`: broker-reconciled, bot-owned position ledger.
 - `data/options_shadow.jsonl`: append-only shadow decisions and exits.
 - `data/options_shadow_position.json`: currently open shadow position.
+- `data/options_shadow_marks.jsonl`: half-hour P&L, MFE, MAE and exit levels.
 - `data/options_daily_risk.json`: one-entry/day and daily-loss state.
 - `data/options_audit.jsonl`: structured decisions and lifecycle events.
 - `data/options.log`: human-readable runtime log.
 - `data/browser_profile/`: persistent Chrome profile; never commit it.
 - `data/options_emergency_stop`: local emergency-stop flag.
+- `data/options_runner.lock` / `data/watchdog.lock`: duplicate-instance protection.
 
 Telegram accepts `/status`, `/stop`, and `/resume` only from the configured chat. `/stop`
 blocks new entries and prepares an exact close ticket for a reconciled bot-owned position.
@@ -173,10 +175,27 @@ no stable public trading API in this project.
 - The directional weights and +500% exit are hypotheses requiring historical and forward
   validation.
 - Yahoo/yfinance quotes can be delayed, stale, incomplete, or unavailable.
-- A fixed 7–8-point strike distance does not normalize exposure by delta or volatility.
+- Premium-based selection still does not normalize exposure by delta or volatility.
 - Market orders have uncertain execution prices; always inspect the final broker debit.
 - Full-account 0DTE sizing can lose the entire premium in one session.
 - Browser UI automation can break when Wealthsimple changes its interface.
 
 This repository is an options research and order-review tool, not a promise of returns or
 personalized financial advice.
+
+## Professional research controls
+
+`config/spy_0dte.toml` is the versioned source for premium, liquidity, signal, schedule,
+exit, event and promotion parameters. Every audit record includes its configuration hash.
+
+`config/market_events.json` accepts ISO-8601 ET timestamps for operator-selected high-impact
+events. Tickets are blocked during the configured window. An empty calendar is reported and
+does not imply event risk was checked online.
+
+Quotes carry source and retrieval time. Startup health reports Chrome/CDP, Telegram state,
+emergency stop, event count, configuration hash and mode. File locks prevent duplicate
+watchdogs and runners.
+
+Probability remains uncalibrated until `data/spy_outcomes.csv` has at least 60 outcomes.
+Walk-forward output includes a promotion decision based on trade count, profitable windows,
+profit factor and drawdown. Shadow marks record P&L, MFE, MAE and alternative exit levels.

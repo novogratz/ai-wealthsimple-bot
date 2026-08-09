@@ -75,12 +75,18 @@ is logged but does not authorize bypassing safety gates.
 | `data/options_position.json` | Broker-reconciled bot-owned position |
 | `data/options_shadow.jsonl` | Append-only simulated decisions/exits |
 | `data/options_shadow_position.json` | Open simulated position |
+| `data/options_shadow_marks.jsonl` | Shadow marks, excursions and exit levels |
 | `data/options_daily_risk.json` | Daily entry/loss lockout |
 | `data/options_emergency_stop` | Stop flag |
+| `data/options_runner.lock`, `data/watchdog.lock` | Single-instance locks |
 | `data/telegram_offset.json` | Telegram polling cursor |
 | `data/browser_profile/` | Persistent trusted browser profile |
 
 Never commit runtime state, screenshots, credentials, cookies, `.env`, or authentication JSON.
+
+Strategy parameters live in `config/spy_0dte.toml`; high-impact event timestamps live in
+`config/market_events.json`. Parameter changes require tests, documentation, a version
+increment and review of the new configuration hash.
 
 ## 6. Diagnostics
 

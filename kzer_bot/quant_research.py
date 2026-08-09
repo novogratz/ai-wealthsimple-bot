@@ -16,11 +16,15 @@ class QuoteQuality:
     valid: bool
     reasons: tuple[str, ...]
     spread_pct: float
+    quote_age_seconds: float | None = None
+    source: str = "unknown"
 
 
 def validate_quote(
     *, bid: float, ask: float, volume: int, open_interest: int,
     max_spread_pct: float = 0.25, min_volume: int = 100, min_open_interest: int = 250,
+    quote_age_seconds: float | None = None, max_quote_age_seconds: float = 30.0,
+    source: str = "unknown",
 ) -> QuoteQuality:
     reasons: list[str] = []
     if bid <= 0 or ask <= 0 or ask < bid:
@@ -32,7 +36,9 @@ def validate_quote(
         reasons.append(f"volume {volume} below {min_volume}")
     if open_interest < min_open_interest:
         reasons.append(f"open interest {open_interest} below {min_open_interest}")
-    return QuoteQuality(not reasons, tuple(reasons), spread_pct)
+    if quote_age_seconds is not None and quote_age_seconds > max_quote_age_seconds:
+        reasons.append(f"quote age {quote_age_seconds:.0f}s exceeds {max_quote_age_seconds:.0f}s")
+    return QuoteQuality(not reasons, tuple(reasons), spread_pct, quote_age_seconds, source)
 
 
 @dataclass(frozen=True)
@@ -71,6 +77,50 @@ class Performance:
     profit_factor: float
     max_drawdown: float
     sharpe: float
+
+
+@dataclass(frozen=True)
+class Calibration:
+    calibrated: bool
+    probability: float | None
+    samples: int
+    reason: str
+
+
+def calibrated_probability(rows: list[dict], score: float, minimum_samples: int = 60) -> Calibration:
+    """Laplace-smoothed empirical probability from nearby historical score observations."""
+    usable = [r for r in rows if "score" in r and "return" in r]
+    if len(usable) < minimum_samples:
+        return Calibration(False, None, len(usable), f"need {minimum_samples} outcomes")
+    ranked = sorted(usable, key=lambda r: abs(abs(float(r["score"])) - abs(score)))
+    neighborhood = ranked[:max(30, len(ranked) // 5)]
+    wins = sum(float(r["return"]) > 0 for r in neighborhood)
+    probability = (wins + 1) / (len(neighborhood) + 2)
+    return Calibration(True, probability, len(neighborhood), "empirical local-score calibration")
+
+
+@dataclass(frozen=True)
+class PromotionDecision:
+    promoted: bool
+    reasons: tuple[str, ...]
+
+
+def promotion_decision(windows: list[dict], config: dict) -> PromotionDecision:
+    reasons: list[str] = []
+    trades = sum(int(w.get("trades", 0)) for w in windows)
+    if trades < int(config["minimum_trades"]):
+        reasons.append(f"only {trades} out-of-sample trades")
+    active = [w for w in windows if int(w.get("trades", 0)) > 0]
+    profitable = sum(float(w.get("expectancy", 0)) > float(config["minimum_expectancy"]) for w in active)
+    profitable_pct = profitable / len(active) if active else 0.0
+    if profitable_pct < float(config["minimum_profitable_windows_pct"]):
+        reasons.append(f"profitable windows {profitable_pct:.0%}")
+    finite_pf = [float(w["profit_factor"]) for w in active if w.get("profit_factor") not in (None, math.inf)]
+    if finite_pf and mean(finite_pf) < float(config["minimum_profit_factor"]):
+        reasons.append(f"profit factor {mean(finite_pf):.2f}")
+    if active and max(float(w.get("max_drawdown", 0)) for w in active) > float(config["maximum_drawdown"]):
+        reasons.append("maximum drawdown exceeded")
+    return PromotionDecision(not reasons, tuple(reasons))
 
 
 def performance(returns: Iterable[float]) -> Performance:

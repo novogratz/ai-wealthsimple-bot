@@ -33,6 +33,7 @@ delegation in `scripts/run_grinder.py` is inactive.
 - Maintain independent audit and shadow ledgers.
 - Fail closed on missing, crossed, stale-looking, wide, or illiquid quotes.
 - Keep NYSE holiday and early-close behavior intact.
+- Preserve versioned configuration hashing and formal research-promotion gates.
 
 ## Validate changes
 

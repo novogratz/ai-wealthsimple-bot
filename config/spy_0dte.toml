@@ -1,0 +1,43 @@
+schema_version = 1
+strategy_version = "3.2.0"
+
+[contract]
+premium_min = 0.25
+premium_max = 0.70
+premium_mid = 0.475
+max_spread_pct = 0.25
+min_volume = 100
+min_open_interest = 250
+max_quote_age_seconds = 30
+
+[signal]
+minimum_spy_move_pct = 0.15
+maximum_vix = 40.0
+reversal_confirmation_pct = 0.05
+regime_bias = 0.0
+
+[schedule]
+entry_hour = 9
+entry_minute_start = 45
+entry_minute_end = 60
+time_close_hour = 15
+time_close_minute = 25
+hard_close_hour = 15
+hard_close_minute = 45
+
+[exit]
+profit_target_pct = 500.0
+shadow_loss_levels_pct = [-25.0, -50.0, -75.0]
+shadow_profit_levels_pct = [50.0, 100.0, 200.0, 500.0]
+
+[promotion]
+minimum_trades = 60
+minimum_expectancy = 0.0
+minimum_profit_factor = 1.10
+maximum_drawdown = 5.0
+minimum_profitable_windows_pct = 0.60
+
+[events]
+blackout_minutes_before = 30
+blackout_minutes_after = 30
+calendar_file = "config/market_events.json"

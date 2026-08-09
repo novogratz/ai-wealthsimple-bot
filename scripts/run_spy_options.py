@@ -14,12 +14,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import re
 import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -46,7 +48,12 @@ from kzer_bot.spy_options_strategy import (
     now_et,
 )
 from kzer_bot.market_calendar import is_early_close, is_trading_day
-from kzer_bot.quant_research import ShadowLedger, ShadowTrade, decision_id, validate_quote
+from kzer_bot.market_events import event_blackout, load_events
+from kzer_bot.quant_research import (
+    ShadowLedger, ShadowTrade, calibrated_probability, decision_id,
+    load_replay_csv, validate_quote,
+)
+from kzer_bot.strategy_config import config_summary, load_strategy_config
 from kzer_bot.telegram import get_commands, send_message
 
 TZ        = ZoneInfo("America/Toronto")
@@ -62,7 +69,10 @@ STOP_FILE = ROOT / "data" / "options_emergency_stop"
 TG_OFFSET_FILE = ROOT / "data" / "telegram_offset.json"
 SHADOW_FILE = ROOT / "data" / "options_shadow.jsonl"
 SHADOW_POS_FILE = ROOT / "data" / "options_shadow_position.json"
+SHADOW_MARKS_FILE = ROOT / "data" / "options_shadow_marks.jsonl"
+OUTCOMES_FILE = ROOT / "data" / "spy_outcomes.csv"
 BOT_ID    = "spy-0dte-long-v1"
+STRATEGY_CONFIG = load_strategy_config()
 
 # Deploy the largest whole-contract amount affordable by the live USD cash.
 # Always model the maximum affordable whole-contract quantity. Utilization is
@@ -79,6 +89,37 @@ REPORT_INTERVAL_SECS = 30 * 60
 POSITION_REPORT_SECS = 30 * 60
 MAX_DAILY_LOSS_PCT = 0.50
 _reporter_stop = threading.Event()
+_instance_lock_handle = None
+
+
+def _acquire_instance_lock() -> None:
+    """Fail fast when another SPY runner owns the workspace."""
+    global _instance_lock_handle
+    import fcntl
+    path = ROOT / "data" / "options_runner.lock"
+    _instance_lock_handle = path.open("w", encoding="utf-8")
+    try:
+        fcntl.flock(_instance_lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        raise RuntimeError("another SPY options runner is already active") from exc
+    _instance_lock_handle.write(str(os.getpid()))
+    _instance_lock_handle.flush()
+
+
+def _startup_health() -> str:
+    checks: list[str] = []
+    try:
+        urllib.request.urlopen("http://localhost:9222/json", timeout=3)
+        checks.append("Chrome/CDP: connected")
+    except Exception:
+        checks.append("Chrome/CDP: unavailable")
+    checks.append(f"Telegram: {'configured' if os.environ.get('TELEGRAM_BOT_TOKEN') else 'loaded on send'}")
+    checks.append(f"Emergency stop: {'ON' if STOP_FILE.exists() else 'off'}")
+    event_path = ROOT / str(STRATEGY_CONFIG.get("events", "calendar_file"))
+    checks.append(f"Economic events: {len(load_events(event_path))} configured")
+    checks.append(f"Config: {STRATEGY_CONFIG.raw.get('strategy_version')} / {STRATEGY_CONFIG.hash}")
+    checks.append(f"Mode: {'dry' if _DRY_RUN else 'order review'}")
+    return "🩺 <b>STARTUP HEALTH</b>\n" + "\n".join(f"• {item}" for item in checks)
 
 
 # ── Keepalive ─────────────────────────────────────────────────────────────────
@@ -128,7 +169,7 @@ def log(msg: str) -> None:
 
 
 def audit(event: str, **fields) -> None:
-    record = {"ts": now_et().isoformat(), "event": event, **fields}
+    record = {"ts": now_et().isoformat(), "event": event, "config_hash": STRATEGY_CONFIG.hash, **fields}
     try:
         with AUDIT_FILE.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
@@ -268,6 +309,7 @@ def _save_shadow_position(pos: OptionsPosition, model_score: float) -> None:
         "bid": pos.contract.bid, "ask": pos.contract.ask, "mid": pos.contract.mid,
         "iv": pos.contract.iv, "volume": pos.contract.volume,
         "open_interest": pos.contract.open_interest, "model_score": model_score,
+        "max_favorable_pct": 0.0, "max_adverse_pct": 0.0, "levels_hit": [],
     }, indent=2), encoding="utf-8")
 
 
@@ -290,6 +332,29 @@ def _load_shadow_position() -> tuple[OptionsPosition, float] | None:
         ), float(data["model_score"])
     except Exception:
         return None
+
+
+def _record_shadow_mark(pos: OptionsPosition, quote: float, reason: str) -> dict:
+    data = json.loads(SHADOW_POS_FILE.read_text(encoding="utf-8"))
+    pnl_pct = (quote - pos.entry_premium) / pos.entry_premium * 100 if pos.entry_premium else 0.0
+    data["max_favorable_pct"] = max(float(data.get("max_favorable_pct", 0)), pnl_pct)
+    data["max_adverse_pct"] = min(float(data.get("max_adverse_pct", 0)), pnl_pct)
+    levels = set(data.get("levels_hit", []))
+    configured = list(STRATEGY_CONFIG.get("exit", "shadow_loss_levels_pct")) + list(STRATEGY_CONFIG.get("exit", "shadow_profit_levels_pct"))
+    for level in configured:
+        if (level >= 0 and pnl_pct >= level) or (level < 0 and pnl_pct <= level):
+            levels.add(float(level))
+    data["levels_hit"] = sorted(levels)
+    SHADOW_POS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    mark = {
+        "timestamp": now_et().isoformat(), "event": "mark", "quote": quote,
+        "pnl_pct": pnl_pct, "max_favorable_pct": data["max_favorable_pct"],
+        "max_adverse_pct": data["max_adverse_pct"], "levels_hit": data["levels_hit"],
+        "reason": reason, "config_hash": STRATEGY_CONFIG.hash,
+    }
+    with SHADOW_MARKS_FILE.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(mark, sort_keys=True) + "\n")
+    return mark
 
 
 # ── Balance ───────────────────────────────────────────────────────────────────
@@ -394,19 +459,17 @@ def _contract_quant_score(contract: OptionContract, spy_price: float) -> tuple[f
     ask = contract.ask if contract.ask > 0 else contract.mid
     spread = max(contract.ask - contract.bid, 0.0) if contract.ask > 0 and contract.bid > 0 else ask
     spread_pct = spread / ask if ask > 0 else 1.0
-    distance = abs(contract.strike - spy_price)
 
     # Tight spreads and real activity matter most for executable 0DTE orders.
     spread_score = max(0.0, 30.0 * (1.0 - min(spread_pct, 1.0)))
     volume_score = min(contract.volume / 10_000, 1.0) * 20.0
     oi_score = min(contract.open_interest / 5_000, 1.0) * 12.0
-    premium_score = max(0.0, 18.0 - abs(ask - TARGET_PREMIUM_MID) / 0.25 * 18.0)
-    distance_score = max(0.0, 15.0 - abs(distance - 7.5) / 3.5 * 15.0)
+    premium_score = max(0.0, 33.0 - abs(ask - TARGET_PREMIUM_MID) / 0.225 * 33.0)
     iv_score = 5.0 if 0.10 <= contract.iv <= 1.50 else 1.0
-    total = max(0.0, min(100.0, spread_score + volume_score + oi_score + premium_score + distance_score + iv_score))
+    total = max(0.0, min(100.0, spread_score + volume_score + oi_score + premium_score + iv_score))
     return total, {
         "spread": spread_score, "volume": volume_score, "oi": oi_score,
-        "premium": premium_score, "distance": distance_score, "iv": iv_score,
+        "premium": premium_score, "iv": iv_score,
     }
 
 
@@ -533,7 +596,7 @@ def _plan_report_msg(bias: "PreMarketBias", today: str, mins_to_entry: int) -> s
         f"📊 <b>0DTE SPY OPTIONS | {today} | {'DRY RUN' if _DRY_RUN else 'ORDER REVIEW'}</b>",
         f"{direction_emoji} <b>Playing {bias.fade_with.upper()}S today</b> (gap-fade + {regime_label} regime)",
         f"   SPY PM: {bias.pm_pct:+.2f}%  VIX: {bias.vix:.1f}  ES 1h: {bias.es_pct:+.2f}%",
-        f"   Strike range: 7–8 SPY points OTM | ${TARGET_PREMIUM_MIN:.2f}–${TARGET_PREMIUM_MAX:.2f} ask",
+        f"   Contract rule: strictly OTM | ${TARGET_PREMIUM_MIN:.2f}–${TARGET_PREMIUM_MAX:.2f} ask",
         f"   Sizing: maximum affordable whole contracts (up to 100% of USD cash)",
         f"   Safety: reviewed debit cannot exceed cash | no naked sells",
         f"   Entry window: 9:45–10:00 AM ET",
@@ -565,15 +628,21 @@ def _scored_plan_report(bias: "PreMarketBias", today: str, mins_to_entry: int) -
         f"PLAN → MARKET BUY ${planned.strike:.0f} {planned.option_type.upper()} "
         f"at entry confirmation | score {score:.1f}/100"
     )
+    calibration = calibrated_probability(load_replay_csv(OUTCOMES_FILE), score) if OUTCOMES_FILE.exists() else None
+    probability_line = (
+        f"Empirical P(profit): {calibration.probability:.0%} from {calibration.samples} nearby outcomes"
+        if calibration and calibration.calibrated
+        else "Empirical P(profit): uncalibrated — insufficient historical outcomes"
+    )
     chosen_parts = _contract_quant_score(planned, spy_price)[1]
     breakdown = (
         f"Execution score → spread {chosen_parts['spread']:.1f}/30 | "
         f"volume {chosen_parts['volume']:.1f}/20 | OI {chosen_parts['oi']:.1f}/12 | "
-        f"premium fit {chosen_parts['premium']:.1f}/18 | distance {chosen_parts['distance']:.1f}/15 | "
+        f"premium fit {chosen_parts['premium']:.1f}/33 | "
         f"IV sanity {chosen_parts['iv']:.1f}/5"
     )
-    log("[30-MIN QUANT PLAN]\n" + board + "\n" + breakdown + "\n" + plan)
-    return base + "\n\n<b>Quant contract board</b>\n" + board + "\n" + breakdown + "\n<b>" + plan + "</b>"
+    log("[30-MIN QUANT PLAN]\n" + board + "\n" + breakdown + "\n" + probability_line + "\n" + plan)
+    return base + "\n\n<b>Quant contract board</b>\n" + board + "\n" + breakdown + "\n" + probability_line + "\n<b>" + plan + "</b>"
 
 
 def _half_hour_report() -> None:
@@ -592,9 +661,12 @@ def _half_hour_report() -> None:
         if quote > 0:
             action, reason = check_exit(shadow_pos, quote)
             pnl = (quote - shadow_pos.entry_premium) * shadow_pos.contracts * 100
+            mark = _record_shadow_mark(shadow_pos, quote, reason)
             notify("🧪 <b>SHADOW</b> | " + _position_report_msg(shadow_pos, quote) + f"\n   Model score: {model_score:.1f} | {reason}")
             if action != "hold":
-                audit("shadow_exit", action=action, pnl=pnl, reason=reason)
+                audit("shadow_exit", action=action, pnl=pnl, reason=reason,
+                      max_favorable_pct=mark["max_favorable_pct"],
+                      max_adverse_pct=mark["max_adverse_pct"], levels_hit=mark["levels_hit"])
                 with SHADOW_FILE.open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps({"timestamp": now_et().isoformat(), "event": "exit", "pnl": pnl, "reason": reason}) + "\n")
                 SHADOW_POS_FILE.unlink(missing_ok=True)
@@ -818,6 +890,16 @@ def hold_loop(pos: OptionsPosition) -> None:
 
 def run_today(now_flag: bool = False, balance_override: float | None = None) -> None:
     today = now_et().date().isoformat()
+    event_path = ROOT / str(STRATEGY_CONFIG.get("events", "calendar_file"))
+    blocked, event_reason = event_blackout(
+        now_et(), event_path,
+        int(STRATEGY_CONFIG.get("events", "blackout_minutes_before")),
+        int(STRATEGY_CONFIG.get("events", "blackout_minutes_after")),
+    )
+    if blocked:
+        notify(f"NO TRADE: {event_reason}")
+        audit("event_blackout", reason=event_reason)
+        return
     notify(f"=== 0DTE SPY OPTIONS BOT | {today} | {'DRY RUN' if _DRY_RUN else 'ORDER REVIEW'} ===")
     if STOP_FILE.exists():
         notify("NO TRADE: emergency stop is active. Send /resume to clear it.")
@@ -881,6 +963,16 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
         notify(f"NO TRADE: reversal was not confirmed by 10:00 ET ({rev_msg})")
         return
 
+    blocked, event_reason = event_blackout(
+        now_et(), event_path,
+        int(STRATEGY_CONFIG.get("events", "blackout_minutes_before")),
+        int(STRATEGY_CONFIG.get("events", "blackout_minutes_after")),
+    )
+    if blocked:
+        notify(f"NO TRADE: {event_reason}")
+        audit("event_blackout", reason=event_reason)
+        return
+
     # ── Live SPY price ────────────────────────────────────────────────────────
     spy_price = get_spy_price()
     if spy_price <= 0:
@@ -888,7 +980,7 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
         return
     log(f"SPY live: ${spy_price:.2f}")
 
-    # ── Get contract candidates in $0.30–$0.60 range ─────────────────────────
+    # ── Get strictly OTM contract candidates in $0.25–$0.70 range ────────────
     candidates = get_otm_contracts_in_range(bias.fade_with, spy_price, expiry=today)
     if not candidates:
         notify(f"ERROR: No SPY {bias.fade_with.upper()} candidates found for {today} — aborting")
@@ -960,6 +1052,12 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
     quality = validate_quote(
         bid=contract.bid, ask=contract.ask, volume=contract.volume,
         open_interest=contract.open_interest,
+        max_spread_pct=float(STRATEGY_CONFIG.get("contract", "max_spread_pct")),
+        min_volume=int(STRATEGY_CONFIG.get("contract", "min_volume")),
+        min_open_interest=int(STRATEGY_CONFIG.get("contract", "min_open_interest")),
+        quote_age_seconds=(now_et() - contract.quote_time).total_seconds() if contract.quote_time else None,
+        max_quote_age_seconds=float(STRATEGY_CONFIG.get("contract", "max_quote_age_seconds")),
+        source=contract.quote_source,
     )
     if not quality.valid:
         notify("NO TRADE: contract failed execution-quality gates — " + "; ".join(quality.reasons))
@@ -1029,9 +1127,17 @@ def main() -> None:
     ap.add_argument("--balance", type=float,           help="Override available cash (skips WS fetch)")
     args = ap.parse_args()
 
+    try:
+        _acquire_instance_lock()
+    except RuntimeError as exc:
+        log(f"[SAFETY] {exc}")
+        raise SystemExit(2)
+
     _DRY_RUN = args.dry
     if _DRY_RUN:
         log("[DRY RUN] No orders will be placed — strategy logic only")
+    log(f"Strategy config: {config_summary(STRATEGY_CONFIG)}")
+    notify(_startup_health())
 
     # The normal runner is a persistent service: half-hour reports continue on
     # nights, weekends, and holidays while trading remains NYSE-session-only.

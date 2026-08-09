@@ -22,10 +22,13 @@ Read these sources before changing behavior:
 - SPY only; exact current ET expiration only.
 - Long calls or puts only; never open a short option.
 - A sell ticket must match the bot-owned ledger by expiry, type, strike, and quantity.
-- Contract distance must remain 7–8 SPY points OTM unless tests and documentation change.
+- Contract eligibility must remain strictly OTM with a $0.25–$0.70 ask; do not restore a
+  fixed strike-distance rule without explicit requirements and validation.
 - Expected debit must never exceed observed USD cash.
 - Live browser workflows stop at final review; do not add `--confirm` to automated calls.
 - Preserve the independent append-only shadow and audit trails.
+- Load tunable values from `config/spy_0dte.toml` and preserve configuration hashing.
+- Do not call probability calibrated or strategy promoted unless evidence gates pass.
 - Do not commit `.env`, auth state, browser profiles, screenshots, or runtime ledgers.
 - Keep macOS interpreter paths based on `sys.executable`; never restore `.venv/Scripts/python.exe`.
 

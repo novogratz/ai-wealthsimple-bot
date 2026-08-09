@@ -1,3 +1,14 @@
+# v3.2.0 — Professional research controls
+
+- Replaced fixed strike distance with strict OTM $0.25–$0.70 premium eligibility
+- Rebalanced contract scoring around a $0.475 premium center
+- Added validated TOML configuration and audit configuration hashes
+- Added quote source/retrieval timestamps and maximum quote-age checks
+- Added operator-maintained high-impact economic-event blackouts
+- Added startup health reporting and single-instance locks
+- Added empirical probability calibration and formal promotion gates
+- Added shadow MFE, MAE, half-hour marks and alternative exit observations
+
 # v3.1.3 — Deterministic Wealthsimple startup refresh
 
 - Refreshes Wealthsimple synchronously before the startup SPY scan

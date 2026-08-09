@@ -116,8 +116,8 @@ Candidate requirements:
 
 - SPY only.
 - Expiration equals today in ET.
-- Put strike is 7–8 points below SPY; call strike is 7–8 points above SPY.
-- Ask is normally $0.10–$0.60, centered on $0.35.
+- Put strike is below SPY and call strike is above SPY; there is no fixed distance band.
+- Ask must be $0.25–$0.70, centered on $0.475.
 - Bid and ask are positive and not crossed.
 - Relative spread `(ask − bid) / ask` is at most 25%.
 - Same-day volume is at least 100.
@@ -131,8 +131,7 @@ Eligible candidates receive a bounded 0–100 score:
 spread    = 30 × (1 − min(relative_spread, 1))
 volume    = 20 × min(volume / 10,000, 1)
 OI        = 12 × min(open_interest / 5,000, 1)
-premium   = max(0, 18 − abs(ask − 0.35) / 0.25 × 18)
-distance  = max(0, 15 − abs(OTM_distance − 7.5) / 3.5 × 15)
+premium   = max(0, 33 − abs(ask − 0.475) / 0.225 × 33)
 IV        = 5 when 0.10 ≤ IV ≤ 1.50, otherwise 1
 total     = clamp(sum, 0, 100)
 ```
@@ -180,11 +179,18 @@ Metrics include trade count, win rate, expectancy, profit factor, maximum additi
 and annualized trade-level Sharpe estimate. Historical data must use contemporaneous quotes;
 using later-known or end-of-bar values introduces lookahead bias.
 
+The promotion gate requires minimum out-of-sample trade count, profitable-window share,
+profit factor and bounded drawdown. Empirical probability uses a Laplace-smoothed
+neighborhood of historical scores and remains uncalibrated below the minimum sample count.
+
+Each half-hour shadow mark records P&L, maximum favorable excursion, maximum adverse
+excursion and configured profit/loss levels crossed for later exit-policy comparison.
+
 ## 10. Known limitations
 
 - Hand-selected thresholds are not statistically validated edge.
 - Yahoo option data may be delayed or incomplete.
-- Fixed-dollar strike distance ignores delta and changing implied volatility.
+- Premium selection does not fully normalize delta or changing implied volatility.
 - The +500% target and absence of loss stop create a tail-heavy payoff distribution.
 - Open/close periods contain elevated jump and execution risk.
 - Browser selectors and text parsing are fragile broker integrations.

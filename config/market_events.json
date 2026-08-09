@@ -1,0 +1,4 @@
+{
+  "events": [],
+  "note": "Add high-impact timestamps as ISO-8601 ET values, for example 2026-09-16T14:00:00-04:00. Empty means no event blackout data is configured."
+}
