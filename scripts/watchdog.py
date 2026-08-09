@@ -129,6 +129,16 @@ def prevent_sleep() -> None:
 
 
 def main() -> None:
+    import fcntl
+    lock_path = ROOT / "data" / "watchdog.lock"
+    lock_handle = lock_path.open("w", encoding="utf-8")
+    try:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        log("Another watchdog is already active — exiting")
+        raise SystemExit(2)
+    lock_handle.write(str(os.getpid()))
+    lock_handle.flush()
     log("=" * 50)
     log("Le Grinder Watchdog — STARTING")
     log("=" * 50)

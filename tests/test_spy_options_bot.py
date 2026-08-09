@@ -2,11 +2,13 @@ import json
 import tempfile
 import unittest
 from subprocess import CompletedProcess
+from types import SimpleNamespace
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
 import scripts.run_spy_options as bot
+import kzer_bot.spy_options_strategy as option_strategy
 from kzer_bot.spy_options_strategy import OptionContract, OptionsPosition, is_strike_within_otm_bounds
 
 
@@ -36,19 +38,19 @@ class PositionSizingTests(unittest.TestCase):
         self.assertEqual(bot.calc_max_contracts(1.01, 500.0), 4)
 
     def test_strikes_are_bounded_by_live_spy_price(self):
-        self.assertTrue(is_strike_within_otm_bounds("put", 765.0, 773.0))
-        self.assertFalse(is_strike_within_otm_bounds("put", 766.5, 773.0))
-        self.assertTrue(is_strike_within_otm_bounds("call", 780.0, 773.0))
-        self.assertFalse(is_strike_within_otm_bounds("call", 781.5, 773.0))
+        self.assertTrue(is_strike_within_otm_bounds("put", 772.0, 773.0))
+        self.assertFalse(is_strike_within_otm_bounds("put", 774.0, 773.0))
+        self.assertTrue(is_strike_within_otm_bounds("call", 774.0, 773.0))
+        self.assertFalse(is_strike_within_otm_bounds("call", 772.0, 773.0))
 
     def test_quant_score_prefers_tight_liquid_contract(self):
         liquid = contract(0.35)
-        liquid.strike = 765.5
+        liquid.strike = 775.0
         liquid.bid = 0.34
         liquid.volume = 10_000
         liquid.open_interest = 5_000
         illiquid = contract(0.35)
-        illiquid.strike = 765.5
+        illiquid.strike = 775.0
         illiquid.bid = 0.05
         illiquid.volume = 1
         illiquid.open_interest = 1
@@ -61,6 +63,18 @@ class PositionSizingTests(unittest.TestCase):
         with patch.object(bot, "_DRY_RUN", False), patch.object(bot.subprocess, "run", return_value=result) as run:
             self.assertEqual(bot.execute_buy_option(contract(), 1, 100), "review")
             self.assertNotIn("--confirm", run.call_args.args[0])
+
+    def test_contract_candidates_are_strictly_otm_and_in_premium_band(self):
+        import pandas as pd
+        calls = pd.DataFrame([
+            {"strike": 772, "bid": .39, "ask": .40, "lastPrice": .40, "impliedVolatility": .2, "volume": 1000, "openInterest": 1000},
+            {"strike": 774, "bid": .19, "ask": .20, "lastPrice": .20, "impliedVolatility": .2, "volume": 1000, "openInterest": 1000},
+            {"strike": 775, "bid": .39, "ask": .40, "lastPrice": .40, "impliedVolatility": .2, "volume": 1000, "openInterest": 1000},
+        ])
+        fake = SimpleNamespace(options=["2026-08-10"], option_chain=lambda expiry: SimpleNamespace(calls=calls, puts=calls))
+        with patch.object(option_strategy.yf, "Ticker", return_value=fake):
+            candidates = option_strategy.get_otm_contracts_in_range("call", 773, "2026-08-10")
+        self.assertEqual([c.strike for c in candidates], [775])
 
 
 class OwnershipLedgerTests(unittest.TestCase):

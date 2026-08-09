@@ -21,8 +21,10 @@ from zoneinfo import ZoneInfo
 
 import yfinance as yf
 from .market_calendar import market_close_time
+from .strategy_config import load_strategy_config
 
 TZ = ZoneInfo("America/Toronto")
+CONFIG = load_strategy_config()
 
 
 def now_et() -> datetime:
@@ -30,32 +32,30 @@ def now_et() -> datetime:
 
 
 # ── Strategy parameters ──────────────────────────────────────────────────────
-TARGET_PREMIUM_MIN   = 0.10   # minimum ask price
-TARGET_PREMIUM_MAX   = 0.60   # maximum ask price — AI picks best in this range
-TARGET_PREMIUM_MID   = 0.35   # fallback target when no contract is exactly in range
-MIN_OTM_STRIKES      = 7      # target band begins seven SPY points OTM
-MAX_OTM_STRIKES      = 8      # hard maximum: eight SPY points OTM
-MIN_PM_PCT           = 0.15   # minimum pre-market move to trade (skip flat days)
-PROFIT_TARGET_PCT    = 500.0  # +500% → close all (6x bagger — 0DTE can do 1000%+)
-PARTIAL_CLOSE_PCT    = 500.0  # no profit-taking before the +500% objective
-PARTIAL_TARGET_PCT   = 500.0  # second target for remaining half
+TARGET_PREMIUM_MIN   = float(CONFIG.get("contract", "premium_min"))
+TARGET_PREMIUM_MAX   = float(CONFIG.get("contract", "premium_max"))
+TARGET_PREMIUM_MID   = float(CONFIG.get("contract", "premium_mid"))
+MIN_PM_PCT           = float(CONFIG.get("signal", "minimum_spy_move_pct"))
+PROFIT_TARGET_PCT    = float(CONFIG.get("exit", "profit_target_pct"))
+PARTIAL_CLOSE_PCT    = PROFIT_TARGET_PCT
+PARTIAL_TARGET_PCT   = PROFIT_TARGET_PCT
 # NO stop loss — 0DTE deep OTM options can go -80% before reversing violently.
 # Time-based exits (noon + 3:45 PM) are the only hard protection.
-NOON_CLOSE_HOUR      = 15     # hard close at 3:25 PM
-NOON_CLOSE_MINUTE    = 25
-HARD_CLOSE_HOUR      = 15     # nuclear close 3:45 PM
-HARD_CLOSE_MINUTE    = 45
-ENTRY_HOUR           = 9      # entry window: 9:45–10:00 AM ET
-ENTRY_MINUTE_START   = 45
-ENTRY_MINUTE_END     = 60     # if no entry by 10:00 → skip today
-MAX_VIX              = 40.0   # skip if market is panic-mode (VIX > 40)
-REVERSAL_CONFIRM_PCT = 0.05   # SPY must be pulling back this much from the open high/low to confirm fade
+NOON_CLOSE_HOUR      = int(CONFIG.get("schedule", "time_close_hour"))
+NOON_CLOSE_MINUTE    = int(CONFIG.get("schedule", "time_close_minute"))
+HARD_CLOSE_HOUR      = int(CONFIG.get("schedule", "hard_close_hour"))
+HARD_CLOSE_MINUTE    = int(CONFIG.get("schedule", "hard_close_minute"))
+ENTRY_HOUR           = int(CONFIG.get("schedule", "entry_hour"))
+ENTRY_MINUTE_START   = int(CONFIG.get("schedule", "entry_minute_start"))
+ENTRY_MINUTE_END     = int(CONFIG.get("schedule", "entry_minute_end"))
+MAX_VIX              = float(CONFIG.get("signal", "maximum_vix"))
+REVERSAL_CONFIRM_PCT = float(CONFIG.get("signal", "reversal_confirmation_pct"))
 
 # Regime bias: negative = lean bearish (prefer puts), positive = lean bullish (prefer calls).
 # Applied as an additive score offset. On flat/ambiguous gap days this is the deciding factor.
 # Magnitude guide: ±10 is a gentle tilt; ±20 overrides all but the largest gap signals.
 # Current: 0 → neutral (direction driven entirely by intraday SPY move vs open).
-REGIME_BIAS          = 0
+REGIME_BIAS          = float(CONFIG.get("signal", "regime_bias"))
 
 
 @dataclass
@@ -83,6 +83,8 @@ class OptionContract:
     iv: float
     volume: int
     open_interest: int
+    quote_time: datetime | None = None
+    quote_source: str = "unknown"
 
 
 @dataclass
@@ -98,9 +100,8 @@ class OptionsPosition:
 
 
 def is_strike_within_otm_bounds(option_type: str, strike: float, spy_price: float) -> bool:
-    """Require an OTM strike between 4 and 5 SPY points from the live price."""
-    distance = spy_price - strike if option_type == "put" else strike - spy_price
-    return MIN_OTM_STRIKES <= distance <= MAX_OTM_STRIKES
+    """Compatibility helper: require strictly OTM; premium now defines eligibility."""
+    return strike < spy_price if option_type == "put" else strike > spy_price
 
 
 # ── Pre-market direction ─────────────────────────────────────────────────────
@@ -394,11 +395,7 @@ def get_otm_contract(
 ) -> Optional[OptionContract]:
     """
     Pull today's SPY 0DTE chain from yfinance and find the contract whose ask
-    price falls in [TARGET_PREMIUM_MIN, TARGET_PREMIUM_MAX] ($0.20–$0.40).
-
-    We start at least MIN_OTM_STRIKES away from ATM and scan further OTM until
-    we find a contract in the target range. If none found, we return the contract
-    closest to TARGET_PREMIUM_MID ($0.30) as a best-effort pick.
+    price falls strictly in [TARGET_PREMIUM_MIN, TARGET_PREMIUM_MAX].
 
     option_type: "call" or "put"
     """
@@ -414,16 +411,10 @@ def get_otm_contract(
         chain = spy.option_chain(expiry)
         df    = (chain.calls if option_type == "call" else chain.puts).copy()
 
-        # ATM strike = nearest strike to current SPY price
-        atm_idx = (df["strike"] - spy_price).abs().argsort().iloc[0]
-        atm     = float(df.iloc[atm_idx]["strike"])
-
-        # Bound distance against the actual live price, not the rounded ATM
-        # strike. This guarantees every contract is 7–8 SPY points OTM.
         if option_type == "put":
-            df = df[(spy_price - df["strike"] >= MIN_OTM_STRIKES) & (spy_price - df["strike"] <= MAX_OTM_STRIKES)].sort_values("strike", ascending=False)
+            df = df[df["strike"] < spy_price].sort_values("strike", ascending=False)
         else:
-            df = df[(df["strike"] - spy_price >= MIN_OTM_STRIKES) & (df["strike"] - spy_price <= MAX_OTM_STRIKES)].sort_values("strike", ascending=True)
+            df = df[df["strike"] > spy_price].sort_values("strike", ascending=True)
 
         if df.empty:
             return None
@@ -438,14 +429,10 @@ def get_otm_contract(
         df = df.copy()
         df["_ask"] = df.apply(_ask, axis=1)
 
-        # Prefer contracts with ask in the $0.20–$0.40 target window
         in_range = df[(df["_ask"] >= TARGET_PREMIUM_MIN) & (df["_ask"] <= TARGET_PREMIUM_MAX)]
-        if not in_range.empty:
-            # Among in-range contracts, pick the one closest to TARGET_PREMIUM_MID ($0.30)
-            row = in_range.iloc[(in_range["_ask"] - TARGET_PREMIUM_MID).abs().argsort().iloc[0]]
-        else:
-            # Best-effort: pick the contract whose ask is closest to $0.30
-            row = df.iloc[(df["_ask"] - TARGET_PREMIUM_MID).abs().argsort().iloc[0]]
+        if in_range.empty:
+            return None
+        row = in_range.iloc[(in_range["_ask"] - TARGET_PREMIUM_MID).abs().argsort().iloc[0]]
 
         bid  = float(row.get("bid", 0) or 0)
         ask  = float(row.get("ask", 0) or 0)
@@ -463,6 +450,7 @@ def get_otm_contract(
             iv=float(row.get("impliedVolatility", 0) or 0),
             volume=int(row.get("volume", 0) or 0),
             open_interest=int(row.get("openInterest", 0) or 0),
+            quote_time=now_et(), quote_source="yfinance",
         )
     except Exception:
         return None
@@ -476,8 +464,7 @@ def get_otm_contracts_in_range(
 ) -> list[OptionContract]:
     """
     Return up to `n` OTM contracts in the $TARGET_PREMIUM_MIN–$TARGET_PREMIUM_MAX range,
-    sorted by ask price (closest to TARGET_PREMIUM_MID first). Used by the LLM picker.
-    Falls back to closest-to-mid contracts if fewer than n are in range.
+    sorted by ask price (closest to TARGET_PREMIUM_MID first). No out-of-band fallback.
     """
     if expiry is None:
         expiry = date.today().strftime("%Y-%m-%d")
@@ -490,13 +477,10 @@ def get_otm_contracts_in_range(
         chain = spy.option_chain(expiry)
         df    = (chain.calls if option_type == "call" else chain.puts).copy()
 
-        atm_idx = (df["strike"] - spy_price).abs().argsort().iloc[0]
-        atm     = float(df.iloc[atm_idx]["strike"])
-
         if option_type == "put":
-            df = df[(spy_price - df["strike"] >= MIN_OTM_STRIKES) & (spy_price - df["strike"] <= MAX_OTM_STRIKES)].sort_values("strike", ascending=False)
+            df = df[df["strike"] < spy_price].sort_values("strike", ascending=False)
         else:
-            df = df[(df["strike"] - spy_price >= MIN_OTM_STRIKES) & (df["strike"] - spy_price <= MAX_OTM_STRIKES)].sort_values("strike", ascending=True)
+            df = df[df["strike"] > spy_price].sort_values("strike", ascending=True)
 
         def _ask(row) -> float:
             a = float(row.get("ask", 0) or 0)
@@ -508,10 +492,9 @@ def get_otm_contracts_in_range(
         df["_ask"] = df.apply(_ask, axis=1)
         df         = df[df["_ask"] > 0]
 
-        # Candidates in range, sorted by closeness to mid
         in_range = df[(df["_ask"] >= TARGET_PREMIUM_MIN) & (df["_ask"] <= TARGET_PREMIUM_MAX)]
         if in_range.empty:
-            in_range = df
+            return []
 
         in_range = in_range.copy()
         in_range["_dist"] = (in_range["_ask"] - TARGET_PREMIUM_MID).abs()
@@ -534,6 +517,7 @@ def get_otm_contracts_in_range(
                 iv=float(row.get("impliedVolatility", 0) or 0),
                 volume=int(row.get("volume", 0) or 0),
                 open_interest=int(row.get("openInterest", 0) or 0),
+                quote_time=now_et(), quote_source="yfinance",
             ))
         return contracts
     except Exception:

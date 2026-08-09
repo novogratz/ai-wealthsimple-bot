@@ -19,11 +19,13 @@ implementation below the early delegation is inactive.
 - One potential SPY call/put ticket per NYSE day during 9:45–10:00 ET.
 - Contrarian directional score: SPY gap, RSI, weekly extension, ES, VIX, regime bias.
 - Reversal confirmation of 0.05% away from the opening extreme.
-- Exact 0DTE, 7–8 points OTM, $0.10–$0.60 ask.
-- Contract ranking by spread, volume, OI, premium fit, distance and IV.
+- Exact 0DTE, strictly OTM, $0.25–$0.70 ask; no fixed strike-distance filter.
+- Contract ranking by spread, volume, OI, premium fit and IV.
 - Hard liquidity gates: two-sided quote, ≤25% spread, volume ≥100, OI ≥250.
 - Largest affordable whole-contract modeled sizing and parallel shadow ledger.
 - Wealthsimple buy and sell tickets stop at final review for manual confirmation.
+- Versioned TOML configuration, event blackouts, quote provenance/freshness,
+  duplicate-instance locks, startup health, calibration and promotion gates.
 
 ## Start and test
 
