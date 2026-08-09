@@ -65,9 +65,9 @@ SHADOW_POS_FILE = ROOT / "data" / "options_shadow_position.json"
 BOT_ID    = "spy-0dte-long-v1"
 
 # Deploy the largest whole-contract amount affordable by the live USD cash.
-# With integer contracts this naturally invests 50–100% whenever a contract is
-# affordable, while the reviewed debit is still forbidden from exceeding cash.
-MIN_DEPLOY_PCT = 0.50
+# Always model the maximum affordable whole-contract quantity. Utilization is
+# as close to 100% as the option's indivisible 100-share multiplier permits.
+MIN_DEPLOY_PCT = 0.0
 PREMARKET_SCAN_HOUR = 9
 PREMARKET_SCAN_MINUTE = 0
 PREMARKET_REPORT_SECS = 30 * 60
@@ -401,7 +401,7 @@ def _contract_quant_score(contract: OptionContract, spy_price: float) -> tuple[f
     volume_score = min(contract.volume / 10_000, 1.0) * 20.0
     oi_score = min(contract.open_interest / 5_000, 1.0) * 12.0
     premium_score = max(0.0, 18.0 - abs(ask - TARGET_PREMIUM_MID) / 0.25 * 18.0)
-    distance_score = max(0.0, 15.0 - abs(distance - 4.5) / 3.5 * 15.0)
+    distance_score = max(0.0, 15.0 - abs(distance - 7.5) / 3.5 * 15.0)
     iv_score = 5.0 if 0.10 <= contract.iv <= 1.50 else 1.0
     total = max(0.0, min(100.0, spread_score + volume_score + oi_score + premium_score + distance_score + iv_score))
     return total, {
@@ -533,8 +533,8 @@ def _plan_report_msg(bias: "PreMarketBias", today: str, mins_to_entry: int) -> s
         f"📊 <b>0DTE SPY OPTIONS | {today} | {'DRY RUN' if _DRY_RUN else 'ORDER REVIEW'}</b>",
         f"{direction_emoji} <b>Playing {bias.fade_with.upper()}S today</b> (gap-fade + {regime_label} regime)",
         f"   SPY PM: {bias.pm_pct:+.2f}%  VIX: {bias.vix:.1f}  ES 1h: {bias.es_pct:+.2f}%",
-        f"   Strike range: 4–5 SPY points OTM | ${TARGET_PREMIUM_MIN:.2f}–${TARGET_PREMIUM_MAX:.2f} ask",
-        f"   Sizing: maximum whole contracts within USD cash (target 50–100% deployed)",
+        f"   Strike range: 7–8 SPY points OTM | ${TARGET_PREMIUM_MIN:.2f}–${TARGET_PREMIUM_MAX:.2f} ask",
+        f"   Sizing: maximum affordable whole contracts (up to 100% of USD cash)",
         f"   Safety: reviewed debit cannot exceed cash | no naked sells",
         f"   Entry window: 9:45–10:00 AM ET",
         f"   Exits: +500% full close | 3:25 PM time close | 3:45 PM nuclear",

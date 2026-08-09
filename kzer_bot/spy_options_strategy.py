@@ -33,8 +33,8 @@ def now_et() -> datetime:
 TARGET_PREMIUM_MIN   = 0.10   # minimum ask price
 TARGET_PREMIUM_MAX   = 0.60   # maximum ask price — AI picks best in this range
 TARGET_PREMIUM_MID   = 0.35   # fallback target when no contract is exactly in range
-MIN_OTM_STRIKES      = 4      # minimum points OTM from the live SPY price
-MAX_OTM_STRIKES      = 5      # hard maximum points OTM from the live SPY price
+MIN_OTM_STRIKES      = 7      # target band begins seven SPY points OTM
+MAX_OTM_STRIKES      = 8      # hard maximum: eight SPY points OTM
 MIN_PM_PCT           = 0.15   # minimum pre-market move to trade (skip flat days)
 PROFIT_TARGET_PCT    = 500.0  # +500% → close all (6x bagger — 0DTE can do 1000%+)
 PARTIAL_CLOSE_PCT    = 500.0  # no profit-taking before the +500% objective
@@ -419,7 +419,7 @@ def get_otm_contract(
         atm     = float(df.iloc[atm_idx]["strike"])
 
         # Bound distance against the actual live price, not the rounded ATM
-        # strike. This guarantees every contract is 4–5 SPY points OTM.
+        # strike. This guarantees every contract is 7–8 SPY points OTM.
         if option_type == "put":
             df = df[(spy_price - df["strike"] >= MIN_OTM_STRIKES) & (spy_price - df["strike"] <= MAX_OTM_STRIKES)].sort_values("strike", ascending=False)
         else:

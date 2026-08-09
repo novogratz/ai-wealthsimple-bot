@@ -116,7 +116,7 @@ Candidate requirements:
 
 - SPY only.
 - Expiration equals today in ET.
-- Put strike is 4–5 points below SPY; call strike is 4–5 points above SPY.
+- Put strike is 7–8 points below SPY; call strike is 7–8 points above SPY.
 - Ask is normally $0.10–$0.60, centered on $0.35.
 - Bid and ask are positive and not crossed.
 - Relative spread `(ask − bid) / ask` is at most 25%.
@@ -132,7 +132,7 @@ spread    = 30 × (1 − min(relative_spread, 1))
 volume    = 20 × min(volume / 10,000, 1)
 OI        = 12 × min(open_interest / 5,000, 1)
 premium   = max(0, 18 − abs(ask − 0.35) / 0.25 × 18)
-distance  = max(0, 15 − abs(OTM_distance − 4.5) / 3.5 × 15)
+distance  = max(0, 15 − abs(OTM_distance − 7.5) / 3.5 × 15)
 IV        = 5 when 0.10 ≤ IV ≤ 1.50, otherwise 1
 total     = clamp(sum, 0, 100)
 ```
@@ -146,9 +146,9 @@ quality; it does not estimate probability of profit.
 contracts = floor(USD_cash / (ask × 100))
 ```
 
-The expected debit cannot exceed observed USD cash. If no whole contract is affordable, or
-the maximum whole-contract deployment is below 50% of cash, the system skips. This modeled
-full-size allocation is highly concentrated and can lose its entire premium.
+The expected debit cannot exceed observed USD cash. The model selects the maximum affordable
+whole-contract count, so it uses as close to 100% as the contract multiplier permits. Exact
+100% utilization is often impossible. This concentration can lose its entire premium.
 
 ## 8. Exit model
 

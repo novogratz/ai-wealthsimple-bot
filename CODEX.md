@@ -2,9 +2,10 @@
 
 ## Active system
 
-The active entry point is `scripts/run_grinder.py`, which immediately delegates to
-`scripts/run_spy_options.py`. The old multi-ticker stock grinder remains in the file for
-history but is unreachable after delegation and must not be described as production logic.
+The production watchdog starts `scripts/run_spy_options.py` directly. The compatibility entry
+point `scripts/run_grinder.py` also delegates immediately to the SPY runner. The old
+multi-ticker stock grinder remains below that delegation for history but is unreachable and
+must not be described as production logic.
 
 Read these sources before changing behavior:
 
@@ -21,7 +22,7 @@ Read these sources before changing behavior:
 - SPY only; exact current ET expiration only.
 - Long calls or puts only; never open a short option.
 - A sell ticket must match the bot-owned ledger by expiry, type, strike, and quantity.
-- Contract distance must remain 4–5 SPY points OTM unless tests and documentation change.
+- Contract distance must remain 7–8 SPY points OTM unless tests and documentation change.
 - Expected debit must never exceed observed USD cash.
 - Live browser workflows stop at final review; do not add `--confirm` to automated calls.
 - Preserve the independent append-only shadow and audit trails.

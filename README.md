@@ -16,11 +16,11 @@ its hand-set weights and exit thresholds do not constitute proven positive expec
 3. A negative score proposes puts; a positive score proposes calls. Ambiguous flat sessions
    are skipped.
 4. Between 9:45 and 10:00 ET, require a 0.05% reversal away from the opening extreme.
-5. Rank exact-0DTE contracts 4–5 SPY points OTM with asks between $0.10 and $0.60.
+5. Rank exact-0DTE contracts 7–8 SPY points OTM with asks between $0.10 and $0.60.
 6. Reject contracts without a valid two-sided quote, spread ≤25%, volume ≥100, and open
    interest ≥250.
-7. Size the largest affordable whole-contract quantity. The modeled target is 50–100% of
-   available USD cash, but the browser stops at final review for human confirmation.
+7. Size the largest affordable whole-contract quantity, using as close to 100% of available
+   USD cash as indivisible contracts permit, without exceeding cash.
 8. Maintain a separate shadow position and evaluate +500% and mandatory time exits.
 
 The complete equations and lifecycle are in [strategy.md](.codex/skills/spy-0dte-operator/references/strategy.md).
@@ -103,7 +103,7 @@ Eligible contracts receive a 0–100 execution/convexity score:
 | Same-day volume | 20 |
 | Open interest | 12 |
 | Fit to $0.35 target premium | 18 |
-| Fit to 4.5-point OTM center | 15 |
+| Fit to 7.5-point OTM center | 15 |
 | IV sanity range | 5 |
 
 The leaderboard explains every component in Telegram and `data/options_audit.jsonl`.
@@ -143,8 +143,7 @@ All securities tickets require final human confirmation in Wealthsimple.
 ```text
 watchdog.py
   ├─ Chrome health/recovery + caffeinate
-  └─ run_grinder.py
-       └─ run_spy_options.py
+  └─ run_spy_options.py
             ├─ spy_options_strategy.py   directional signal and exits
             ├─ quant_research.py         quality gates, shadow ledger, metrics
             ├─ market_calendar.py        NYSE sessions and early closes
@@ -171,7 +170,7 @@ no stable public trading API in this project.
 - The directional weights and +500% exit are hypotheses requiring historical and forward
   validation.
 - Yahoo/yfinance quotes can be delayed, stale, incomplete, or unavailable.
-- A fixed 4–5-point strike distance does not normalize exposure by delta or volatility.
+- A fixed 7–8-point strike distance does not normalize exposure by delta or volatility.
 - Market orders have uncertain execution prices; always inspect the final broker debit.
 - Full-account 0DTE sizing can lose the entire premium in one session.
 - Browser UI automation can break when Wealthsimple changes its interface.

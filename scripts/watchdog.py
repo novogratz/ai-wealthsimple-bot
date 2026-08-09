@@ -17,8 +17,16 @@ from zoneinfo import ZoneInfo
 
 ROOT      = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+# macOS commonly has only `python3` on PATH. If watchdog was launched outside
+# the project virtualenv, restart it with the interpreter that owns the bot's
+# dependencies. This makes `python3 scripts/watchdog.py` a reliable command.
+VENV_PYTHON = ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+if VENV_PYTHON.exists() and Path(sys.executable).resolve() != VENV_PYTHON.resolve():
+    os.execv(str(VENV_PYTHON), [str(VENV_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]])
+
 PYTHON    = sys.executable
-BOT       = ROOT / "scripts" / "run_grinder.py"
+BOT       = ROOT / "scripts" / "run_spy_options.py"
 AUTOLOGIN = ROOT / "scripts" / "_autologin.py"
 LOG_FILE  = ROOT / "data" / "grinder.log"
 PROFILE   = ROOT / "data" / "browser_profile"

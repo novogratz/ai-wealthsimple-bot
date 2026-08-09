@@ -1,9 +1,9 @@
 # CLAUDE.md — Project context
 
 This repository now runs a persistent macOS SPY 0DTE quant research and Wealthsimple
-order-review service. `scripts/run_grinder.py` delegates directly to
-`scripts/run_spy_options.py`; the legacy stock-rotation implementation below that delegation
-is inactive.
+order-review service. `scripts/watchdog.py` starts `scripts/run_spy_options.py` directly;
+`scripts/run_grinder.py` remains a compatibility delegate. Its legacy stock-rotation
+implementation below the early delegation is inactive.
 
 ## Required context
 
@@ -19,7 +19,7 @@ is inactive.
 - One potential SPY call/put ticket per NYSE day during 9:45–10:00 ET.
 - Contrarian directional score: SPY gap, RSI, weekly extension, ES, VIX, regime bias.
 - Reversal confirmation of 0.05% away from the opening extreme.
-- Exact 0DTE, 4–5 points OTM, $0.10–$0.60 ask.
+- Exact 0DTE, 7–8 points OTM, $0.10–$0.60 ask.
 - Contract ranking by spread, volume, OI, premium fit, distance and IV.
 - Hard liquidity gates: two-sided quote, ≤25% spread, volume ≥100, OI ≥250.
 - Largest affordable whole-contract modeled sizing and parallel shadow ledger.

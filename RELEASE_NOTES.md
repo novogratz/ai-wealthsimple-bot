@@ -1,3 +1,10 @@
+# v3.1.2 — Eight-point contracts and resilient macOS launch
+
+- Moved the SPY contract band to 7–8 points OTM, capped at eight points
+- Models maximum affordable whole-contract sizing up to 100% of available USD cash
+- Watchdog automatically restarts itself under `.venv/bin/python` when launched with `python3`
+- Watchdog starts the active SPY runner directly instead of importing the legacy stock engine
+
 # v3.1.1 — Documentation and operator skill
 
 - Replaced all stale stock-grinder and Windows documentation with the active SPY 0DTE system

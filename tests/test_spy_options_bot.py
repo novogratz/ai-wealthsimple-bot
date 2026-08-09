@@ -36,19 +36,19 @@ class PositionSizingTests(unittest.TestCase):
         self.assertEqual(bot.calc_max_contracts(1.01, 500.0), 4)
 
     def test_strikes_are_bounded_by_live_spy_price(self):
-        self.assertTrue(is_strike_within_otm_bounds("put", 768.0, 773.0))
-        self.assertFalse(is_strike_within_otm_bounds("put", 767.0, 773.0))
-        self.assertTrue(is_strike_within_otm_bounds("call", 777.0, 773.0))
-        self.assertFalse(is_strike_within_otm_bounds("call", 779.0, 773.0))
+        self.assertTrue(is_strike_within_otm_bounds("put", 765.0, 773.0))
+        self.assertFalse(is_strike_within_otm_bounds("put", 766.5, 773.0))
+        self.assertTrue(is_strike_within_otm_bounds("call", 780.0, 773.0))
+        self.assertFalse(is_strike_within_otm_bounds("call", 781.5, 773.0))
 
     def test_quant_score_prefers_tight_liquid_contract(self):
         liquid = contract(0.35)
-        liquid.strike = 768.5
+        liquid.strike = 765.5
         liquid.bid = 0.34
         liquid.volume = 10_000
         liquid.open_interest = 5_000
         illiquid = contract(0.35)
-        illiquid.strike = 768.5
+        illiquid.strike = 765.5
         illiquid.bid = 0.05
         illiquid.volume = 1
         illiquid.open_interest = 1
