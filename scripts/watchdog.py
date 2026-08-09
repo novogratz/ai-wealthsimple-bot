@@ -28,6 +28,7 @@ if VENV_PYTHON.exists() and Path(sys.executable).resolve() != VENV_PYTHON.resolv
 PYTHON    = sys.executable
 BOT       = ROOT / "scripts" / "run_spy_options.py"
 AUTOLOGIN = ROOT / "scripts" / "_autologin.py"
+WS_AUTO   = ROOT / "scripts" / "wealthsimple_auto.py"
 LOG_FILE  = ROOT / "data" / "grinder.log"
 PROFILE   = ROOT / "data" / "browser_profile"
 CDP_URL   = "http://localhost:9222"
@@ -92,6 +93,25 @@ def ensure_edge_and_session() -> None:
         log(f"Auto-login error: {exc}")
 
 
+def refresh_wealthsimple_once() -> bool:
+    """Synchronously refresh WS before the bot performs its startup scan."""
+    try:
+        result = subprocess.run(
+            [PYTHON, str(WS_AUTO), "keepalive", "--once"],
+            cwd=ROOT, capture_output=True, text=True, timeout=60,
+        )
+        output = (result.stdout + result.stderr).strip()
+        if output:
+            log(f"Startup refresh: {output.splitlines()[-1]}")
+        if result.returncode != 0 or "Session active OK" not in output:
+            log("WARNING: startup Wealthsimple refresh was not confirmed")
+            return False
+        return True
+    except Exception as exc:
+        log(f"Startup refresh error: {exc}")
+        return False
+
+
 def prevent_sleep() -> None:
     """Keep the computer awake while this watchdog is running."""
     try:
@@ -118,6 +138,7 @@ def main() -> None:
 
     while True:
         ensure_edge_and_session()
+        refresh_wealthsimple_once()
 
         log(f"Starting bot (run #{restart_count + 1})...")
         proc = subprocess.Popen(

@@ -40,9 +40,9 @@ source .venv/bin/activate
 python scripts/watchdog.py
 ```
 
-`watchdog.py` enables `caffeinate`, restores Chrome/CDP and the Wealthsimple session, starts
-`run_grinder.py`, and restarts it after abnormal exit. `run_grinder.py` delegates to the SPY
-runner. Run one instance only.
+`watchdog.py` enables `caffeinate`, restores Chrome/CDP, synchronously refreshes Wealthsimple
+and verifies the session, starts the SPY runner, and restarts it after abnormal exit. The
+runner's background keepalive refreshes Wealthsimple every two minutes. Run one instance only.
 
 `--now` bypasses timing for diagnostics and should not be used as a routine launch mode.
 

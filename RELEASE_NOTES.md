@@ -1,3 +1,9 @@
+# v3.1.3 — Deterministic Wealthsimple startup refresh
+
+- Refreshes Wealthsimple synchronously before the startup SPY scan
+- Confirms the browser session and logs the startup refresh result
+- Continues the existing background refresh every two minutes
+
 # v3.1.2 — Eight-point contracts and resilient macOS launch
 
 - Moved the SPY contract band to 7–8 points OTM, capped at eight points

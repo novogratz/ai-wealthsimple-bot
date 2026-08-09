@@ -68,6 +68,9 @@ Run only one watchdog. The normal service stays alive overnight, on weekends, an
 holidays; recurring reports continue, while order consideration remains restricted to valid
 NYSE sessions.
 
+At startup, watchdog synchronously opens or refreshes Wealthsimple home and verifies the session
+before launching the first SPY scan. The bot then refreshes Wealthsimple every two minutes.
+
 Walk-forward evaluation of exported outcomes:
 
 ```bash
