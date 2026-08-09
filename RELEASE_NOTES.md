@@ -1,3 +1,11 @@
+# v3.1.1 — Documentation and operator skill
+
+- Replaced all stale stock-grinder and Windows documentation with the active SPY 0DTE system
+- Added complete directional, contract-scoring, sizing, exit, shadow, and validation reference
+- Added macOS setup, launch, Telegram, state, incident, and release runbook
+- Added validated `spy-0dte-operator` Codex skill with UI metadata and progressive references
+- Documented the manual broker-confirmation boundary and known model limitations consistently
+
 # v3.1.0 — Quant research and shadow execution
 
 - Independent append-only shadow ledger alongside each eligible decision

@@ -1,0 +1,135 @@
+# Operations and incident reference
+
+## Contents
+
+1. Setup
+2. Launch modes
+3. Expected schedule
+4. Telegram controls
+5. Runtime state
+6. Diagnostics
+7. Incident response
+8. Release procedure
+
+## 1. Setup
+
+```bash
+cd /Users/benoitfloch/ai-wealthsimple-bot
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python scripts/wealthsimple_auto.py setup
+```
+
+Use Chrome or Edge discovered by `wealthsimple_auto.py`. The persistent profile is
+`data/browser_profile`, and CDP listens on port 9222. Keep secrets only in gitignored `.env`.
+
+## 2. Launch modes
+
+No-order research:
+
+```bash
+source .venv/bin/activate
+python scripts/run_spy_options.py --dry
+```
+
+Persistent service:
+
+```bash
+source .venv/bin/activate
+python scripts/watchdog.py
+```
+
+`watchdog.py` enables `caffeinate`, restores Chrome/CDP and the Wealthsimple session, starts
+`run_grinder.py`, and restarts it after abnormal exit. `run_grinder.py` delegates to the SPY
+runner. Run one instance only.
+
+`--now` bypasses timing for diagnostics and should not be used as a routine launch mode.
+
+## 3. Expected schedule
+
+- Startup: immediate scan/report.
+- Exact `:00` and `:30` ET: recurring Telegram state.
+- 09:00: trading-day planning begins.
+- 09:45–10:00: reversal check and potential review ticket.
+- 15:25: regular modeled time exit.
+- 15:45: fallback exit.
+- Nights/weekends/holidays: reporting continues, ordering remains disabled.
+
+## 4. Telegram controls
+
+- `/status`: report flat/in-position and emergency-stop state.
+- `/stop`: create `data/options_emergency_stop`, prevent entry, and prepare an exact close
+  review ticket for a reconciled bot-owned position.
+- `/resume`: remove the stop flag.
+
+Commands from any chat other than `TELEGRAM_CHAT_ID` are ignored. Telegram delivery failure
+is logged but does not authorize bypassing safety gates.
+
+## 5. Runtime state
+
+| Path | Purpose |
+|---|---|
+| `data/options.log` | Timestamped operator log |
+| `data/options_audit.jsonl` | Structured notifications, scores and lifecycle events |
+| `data/options_position.json` | Broker-reconciled bot-owned position |
+| `data/options_shadow.jsonl` | Append-only simulated decisions/exits |
+| `data/options_shadow_position.json` | Open simulated position |
+| `data/options_daily_risk.json` | Daily entry/loss lockout |
+| `data/options_emergency_stop` | Stop flag |
+| `data/telegram_offset.json` | Telegram polling cursor |
+| `data/browser_profile/` | Persistent trusted browser profile |
+
+Never commit runtime state, screenshots, credentials, cookies, `.env`, or authentication JSON.
+
+## 6. Diagnostics
+
+```bash
+python scripts/wealthsimple_auto.py keepalive --once
+python -m unittest discover -s tests -v
+tail -n 100 data/options.log
+tail -n 20 data/options_audit.jsonl
+git status --short --branch
+```
+
+Confirm one watchdog process:
+
+```bash
+pgrep -af 'scripts/watchdog.py|scripts/run_spy_options.py'
+```
+
+Do not print `.env` while debugging. Redact any Telegram token exposed outside the local file
+and rotate it through BotFather.
+
+## 7. Incident response
+
+### Prevent new activity
+
+Send `/stop` from the configured Telegram group or create the local stop file. Inspect
+Wealthsimple directly for actual orders and positions; local ledgers are not broker truth.
+
+### Browser disconnected
+
+Leave the persistent profile intact. Let watchdog relaunch Chrome. If login recovery fails,
+run `python scripts/wealthsimple_auto.py setup` and authenticate in the opened window.
+
+### Suspected duplicate process
+
+Inspect PIDs before stopping anything. Stop only the explicit duplicate PID; do not use broad
+process-kill patterns that could terminate unrelated Chrome or Python work.
+
+### Uncertain fill
+
+Treat Wealthsimple Activity/Holdings as authoritative. Do not infer a fill from a clicked
+button, local screenshot, Yahoo quote, or shadow record.
+
+## 8. Release procedure
+
+1. Update code, tests, `README.md`, `RELEASE_NOTES.md`, and affected skill references.
+2. Run compilation, unit tests, skill validation, and `git diff --check`.
+3. Verify no secret or runtime file is staged.
+4. Commit and push `main` through the configured SSH remote.
+5. Create an annotated semantic-version tag and push it.
+6. Publish the GitHub Release only from an authenticated session.
+
+Do not move an existing public tag; increment the patch/minor version instead.

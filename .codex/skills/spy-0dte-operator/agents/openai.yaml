@@ -1,0 +1,4 @@
+interface:
+  display_name: "SPY 0DTE Operator"
+  short_description: "Operate and audit the SPY 0DTE research service"
+  default_prompt: "Use $spy-0dte-operator to explain, inspect, or safely operate the SPY 0DTE service."

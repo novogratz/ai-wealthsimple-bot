@@ -1,205 +1,180 @@
-# Le Grinder v5.0
+# SPY 0DTE Quant Research Service
 
-**Autonomous 24/7 momentum rotation bot for Wealthsimple US (NYSE / NASDAQ).**
+This macOS service researches one intraday SPY option setup per NYSE trading day,
+publishes its reasoning to Telegram, maintains an independent shadow ledger, and prepares
+an exact Wealthsimple order ticket for manual review. It never sells an option that is not
+represented by its bot-owned position ledger.
 
-Le Grinder scans ~350 liquid US tickers, picks the highest-conviction momentum setup, buys it, and rotates on profit or at market close — all without manual intervention. Every 30 minutes it also sends a watchlist alert with the top 3 picks you can trade manually in your own account.
+The current model is a contrarian opening-gap fade. It is deterministic and auditable, but
+its hand-set weights and exit thresholds do not constitute proven positive expectancy.
 
----
+## Strategy in one minute
 
-## What it does
+1. At startup and every `:00`/`:30` ET, refresh the SPY plan and Telegram report.
+2. From 9:00 ET, calculate a directional score using the SPY opening gap, RSI(14),
+   five-session extension, one-hour ES move, VIX level, and configured regime bias.
+3. A negative score proposes puts; a positive score proposes calls. Ambiguous flat sessions
+   are skipped.
+4. Between 9:45 and 10:00 ET, require a 0.05% reversal away from the opening extreme.
+5. Rank exact-0DTE contracts 4–5 SPY points OTM with asks between $0.10 and $0.60.
+6. Reject contracts without a valid two-sided quote, spread ≤25%, volume ≥100, and open
+   interest ≥250.
+7. Size the largest affordable whole-contract quantity. The modeled target is 50–100% of
+   available USD cash, but the browser stops at final review for human confirmation.
+8. Maintain a separate shadow position and evaluate +500% and mandatory time exits.
 
-- **Always deployed** — buys pre-market, intraday, or after-hours. Never sits in cash during market or extended hours.
-- **Rotates aggressively** — sells at +10% profit target or trailing stop, immediately re-scans and re-buys. No fees on Wealthsimple.
-- **Hard exits** — 3:55 PM sell for all daytime positions. AH/PM positions always sell at 9:35 AM market open.
-- **Watchlist for you** — every 30 min, Telegram sends the top 3 picks the bot would buy with more cash, with score and reasons, so you can trade them manually.
+The complete equations and lifecycle are in [strategy.md](.codex/skills/spy-0dte-operator/references/strategy.md).
 
----
-
-## The 12-Signal Engine (0–125 pts)
-
-Synthesized from IBKR, Minervini, CANSLIM, and LangChain quant strategies:
-
-| # | Signal | Max pts |
-|---|---|---|
-| A | Momentum cascade — 1d/5d/20d alignment | 25 |
-| B | MACD(12,26,9) — bullish crossover | 12 |
-| C | RSI(14) — momentum zone 45–70 | 10 |
-| D | Stage 2 MA alignment — Price > SMA50 > SMA150 > SMA200 | 12 |
-| E | Volume conviction — RVOL + trend + 1-year volume record | 18 |
-| F | 52-week high proximity — within 20% of high (CANSLIM "N") | 10 |
-| G | Relative strength vs SPY — outperforms 5d return | 8 |
-| H | OBV smart money — volume-weighted direction | 5 |
-| I | Bonuses — close quality + ATR + Yahoo trending | 10 |
-| J | Sector alignment — stock in top-performing sector (XLK/XLF/XLE…) | 5 |
-| K | **Earnings blackout** — hard filter: skip if earnings within 3 days | — |
-| L | **Short squeeze radar** — short float > 20% + momentum | 8 |
-
-**Market regime gate:** SPY below SMA200 → all scores × 0.70
-
----
-
-## Daily Schedule (ET)
-
-| Time | Action |
-|---|---|
-| 5:00 AM | Futures check + full scan + AI analysis → Telegram game plan |
-| 7:00 AM | Pre-market scan → limit buy top < $10 mover |
-| 9:31 AM | Morning hold-or-rotate decision (regular overnight positions only) |
-| **9:35 AM** | AH/PM positions: market sell + rotate. Regular buy: market order |
-| Every 30 min | Position update + **top 3 watchlist picks** (for manual trading) |
-| 3:30 PM | Last intraday entry cutoff |
-| **3:55 PM** | Hard sell all daytime positions |
-| 4:00 PM | After-hours scan → limit buy top < $10 mover |
-| 5:00 PM | Next-day preview scan |
-
----
-
-## Extended Hours Rules
-
-- **Pre-market (7–9:29 AM) / After-hours (4–7:57 PM):** limit buy only, stocks under $10, price set 5% above current to ensure fill
-- **NEVER limit sell** outside market hours — all sells happen at 9:35 AM market open
-- AH/PM positions skip the morning hold decision and always sell at 9:35 AM then rotate
-
----
-
-## Installation (macOS)
-
-You can use your normal **Google Chrome** or **Microsoft Edge** installation. Chrome is
-recommended if it is already installed; no special Playwright browser download is needed.
+## macOS setup
 
 ```bash
-cd /path/to/ai-wealthsimple-bot
+cd /Users/benoitfloch/ai-wealthsimple-bot
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
-
-# First-time login (opens Chrome or Edge)
 python scripts/wealthsimple_auto.py setup
 ```
 
-Log in to Wealthsimple in the browser window that opens, return to Terminal, and press
-Enter. Keep that browser window open while the bot runs.
-
-Create `.env` in the project root:
+Use the Chrome window opened by setup, sign into Wealthsimple, and leave it open. Store
+credentials locally in `.env`; this file is gitignored:
 
 ```dotenv
-TELEGRAM_BOT_TOKEN=xxx
-TELEGRAM_CHAT_ID=@yourchannel
-WS_EMAIL=you@gmail.com
-WS_PASSWORD=yourpassword
+TELEGRAM_BOT_TOKEN=<BotFather token>
+TELEGRAM_CHAT_ID=<numeric group id>
+WS_EMAIL=<Wealthsimple email>
+WS_PASSWORD=<Wealthsimple password>
 ```
 
-Run the bot:
+Rotate any token that has appeared in chat, terminal history, screenshots, or logs.
+
+## Commands
+
+Safe research mode:
 
 ```bash
 source .venv/bin/activate
-python scripts/run_grinder.py
+python scripts/run_spy_options.py --dry
+```
 
-# Optional: watchdog keeps the Mac awake and restarts the browser/bot if needed
+Persistent order-review service with browser recovery and macOS sleep prevention:
+
+```bash
+source .venv/bin/activate
 python scripts/watchdog.py
 ```
 
-### Current SPY 0DTE behavior
+Run only one watchdog. The normal service stays alive overnight, on weekends, and on
+holidays; recurring reports continue, while order consideration remains restricted to valid
+NYSE sessions.
 
-`run_grinder.py` delegates to the SPY 0DTE bot. On weekdays it:
-
-- refreshes the Wealthsimple Chrome session every two minutes;
-- sends a detailed SPY scan and plan immediately at startup, then stays running across nights, weekends, and holidays with updates at every exact `:00` and `:30` ET boundary;
-- shows the directional factor contributions and a contract execution-score breakdown for spread, volume, open interest, premium fit, strike distance, and IV;
-- considers one long call or long put ticket from 9:45–10:00 AM ET;
-- buys the maximum affordable whole contracts, targeting 50–100% of available USD cash;
-- refuses any expiry other than the current ET date and any strike outside 4–5 SPY points OTM; and
-- only prepares sell-to-close tickets matching its own local position ledger.
-
-Production safeguards in v3.0.0:
-
-- confirms actual fills from Wealthsimple before trusting entry premium or quantity;
-- uses Wealthsimple's displayed bid for exits, with Yahoo only as a fallback;
-- cancels an unconfirmed pending bot order automatically;
-- enforces one entry per trading day plus a persistent daily-loss lockout;
-- handles NYSE holidays and 1:00 PM early closes;
-- relaunches Chrome automatically with the persistent trusted profile;
-- writes every contract score and lifecycle decision to `data/options_audit.jsonl`; and
-- accepts Telegram `/status`, `/stop`, and `/resume` from the configured chat.
-
-`/stop` prevents new entries. If the bot owns a reconciled position, it prepares a
-sell-to-close ticket for that exact contract and quantity for manual confirmation. It
-never issues a naked sell.
-
-### Quant research and shadow mode (v3.1.0)
-
-Every eligible decision is written independently to `data/options_shadow.jsonl`, even
-when the Wealthsimple ticket is prepared for review. The shadow position is marked at
-each half-hour update and evaluated with the same exit rules. A live browser workflow
-stops at Wealthsimple's final review screen; the user must verify and confirm any
-securities order.
-
-Contracts must have a valid two-sided quote, a spread no wider than 25%, at least 100
-same-day contracts of volume, and at least 250 contracts of open interest. Rejections
-and their reasons are written to the structured audit log.
-
-Walk-forward research accepts an outcome CSV containing `timestamp`, `score`, and
-`return`. Each test window uses a threshold selected exclusively from its preceding
-training window:
+Walk-forward evaluation of exported outcomes:
 
 ```bash
 python scripts/run_walk_forward.py data/spy_outcomes.csv --train 60 --test 20
 ```
 
-The report includes trade count, win rate, expectancy, profit factor, maximum drawdown,
-and an annualized trade-level Sharpe estimate. This framework is for validation; it does
-not establish that the current strategy has positive expected value.
+The CSV requires `timestamp`, `score`, and `return` columns.
 
-Safe paper-mode launch (no orders):
+## Directional score
+
+Positive contributions lean toward calls; negative contributions lean toward puts.
+
+| Factor | Rule |
+|---|---|
+| Opening gap/intraday move | `-25 × SPY move %` |
+| RSI(14) | −20 to +20 at overbought/oversold bands |
+| Five-session return | −15 to +15 for directional extension |
+| ES one-hour move | `-5 × ES move %` |
+| VIX | +5 below 12; −5 above 20; −10 above 25; skip above 40 |
+| Regime bias | Configured additive constant; currently 0 |
+
+The 9:45 reversal gate prevents an entry proposal while SPY remains pinned at the opening
+high for puts or opening low for calls. When market data cannot validate that reversal, the
+system waits rather than assuming success.
+
+## Contract score
+
+Eligible contracts receive a 0–100 execution/convexity score:
+
+| Component | Maximum |
+|---|---:|
+| Relative bid/ask tightness | 30 |
+| Same-day volume | 20 |
+| Open interest | 12 |
+| Fit to $0.35 target premium | 18 |
+| Fit to 4.5-point OTM center | 15 |
+| IV sanity range | 5 |
+
+The leaderboard explains every component in Telegram and `data/options_audit.jsonl`.
+The score ranks contracts; it is not a calibrated probability of profit.
+
+## Timing and exits
+
+| Time ET | Behavior |
+|---|---|
+| Startup | Immediate quant scan and Telegram plan |
+| Every `:00`/`:30` | Plan, market state, or position/shadow update |
+| 9:00 | Begin premarket planning loop |
+| 9:45–10:00 | Reversal confirmation and potential ticket preparation |
+| 3:25 | Mandatory modeled close |
+| 3:45 | Nuclear fallback close |
+
+On NYSE early-close sessions, the mandatory close moves to 12:45 ET. The service observes
+weekends and its built-in NYSE holiday calendar.
+
+## Safety and state
+
+- `data/options_position.json`: broker-reconciled, bot-owned position ledger.
+- `data/options_shadow.jsonl`: append-only shadow decisions and exits.
+- `data/options_shadow_position.json`: currently open shadow position.
+- `data/options_daily_risk.json`: one-entry/day and daily-loss state.
+- `data/options_audit.jsonl`: structured decisions and lifecycle events.
+- `data/options.log`: human-readable runtime log.
+- `data/browser_profile/`: persistent Chrome profile; never commit it.
+- `data/options_emergency_stop`: local emergency-stop flag.
+
+Telegram accepts `/status`, `/stop`, and `/resume` only from the configured chat. `/stop`
+blocks new entries and prepares an exact close ticket for a reconciled bot-owned position.
+All securities tickets require final human confirmation in Wealthsimple.
+
+## Architecture
+
+```text
+watchdog.py
+  ├─ Chrome health/recovery + caffeinate
+  └─ run_grinder.py
+       └─ run_spy_options.py
+            ├─ spy_options_strategy.py   directional signal and exits
+            ├─ quant_research.py         quality gates, shadow ledger, metrics
+            ├─ market_calendar.py        NYSE sessions and early closes
+            ├─ telegram.py               reports and control commands
+            ├─ yfinance                  SPY/ES/VIX and option-chain research data
+            └─ wealthsimple_auto.py      balance, quotes, reconciliation, review tickets
+```
+
+## Validation status
+
+Run:
 
 ```bash
-python scripts/run_grinder.py --dry
+python -m unittest discover -s tests -v
 ```
 
-## Installation (Windows)
+Unit tests cover scheduling, ownership checks, affordability, contract scoring, quote
+quality, Telegram authorization, shadow persistence, and chronological walk-forward logic.
+Browser selectors and actual broker fills remain integration risks because Wealthsimple has
+no stable public trading API in this project.
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-playwright install msedge
+## Limitations
 
-# First-time login (opens Edge, log in manually, press ENTER)
-python scripts/wealthsimple_auto.py setup
-```
+- The directional weights and +500% exit are hypotheses requiring historical and forward
+  validation.
+- Yahoo/yfinance quotes can be delayed, stale, incomplete, or unavailable.
+- A fixed 4–5-point strike distance does not normalize exposure by delta or volatility.
+- Market orders have uncertain execution prices; always inspect the final broker debit.
+- Full-account 0DTE sizing can lose the entire premium in one session.
+- Browser UI automation can break when Wealthsimple changes its interface.
 
-Create `.env` in the project root:
-```
-TELEGRAM_BOT_TOKEN=xxx
-TELEGRAM_CHAT_ID=@yourchannel
-WS_EMAIL=you@gmail.com
-WS_PASSWORD=yourpassword
-```
-
-```powershell
-# Run 24/7
-python scripts/run_grinder.py
-
-# Debug: skip overnight wait and buy immediately
-python scripts/run_grinder.py --now
-
-# Override balance
-python scripts/run_grinder.py --balance 95.50
-```
-
----
-
-## Stack
-
-- **Execution:** Playwright → Edge → Wealthsimple Trade (no API, browser automation)
-- **Data:** yfinance batch download with in-memory + disk cache
-- **Signals:** Custom quant engine (12 signals) + earnings/short-interest enrichment
-- **Intelligence:** Claude Code CLI for qualitative pick analysis at each scan
-- **Reporting:** Telegram (position updates, watchlist alerts, trade results, daily report)
-
----
-
-## Disclaimer
-
-High-risk options research and order-review tool. Past performance is not indicative of future results.
+This repository is an options research and order-review tool, not a promise of returns or
+personalized financial advice.
