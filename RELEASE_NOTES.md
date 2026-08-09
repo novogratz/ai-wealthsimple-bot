@@ -1,3 +1,9 @@
+# v3.0.1 — Immediate startup quant plan
+
+- Runs a SPY scan immediately when the service starts
+- Sends the complete directional rationale and proposed contract plan to Telegram
+- Continues detailed updates at exact `:00` and `:30` ET boundaries, 24/7
+
 # v3.0.0 — SPY 0DTE production hardening
 
 - Broker-confirmed option fill reconciliation
