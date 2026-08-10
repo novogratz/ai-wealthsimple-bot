@@ -24,7 +24,7 @@ class StrategyConfig:
 def load_strategy_config(path: Path = DEFAULT_PATH) -> StrategyConfig:
     raw_bytes = path.read_bytes()
     raw = tomllib.loads(raw_bytes.decode("utf-8"))
-    required = {"contract", "signal", "schedule", "exit", "promotion", "events"}
+    required = {"contract", "signal", "schedule", "exit", "promotion", "events", "execution"}
     missing = required - raw.keys()
     if missing:
         raise ValueError(f"Missing strategy config sections: {sorted(missing)}")
@@ -35,6 +35,9 @@ def load_strategy_config(path: Path = DEFAULT_PATH) -> StrategyConfig:
         raise ValueError("Contract premium bounds must satisfy 0 < min <= mid <= max")
     if not (0 < float(raw["contract"]["max_spread_pct"]) <= 1):
         raise ValueError("max_spread_pct must be in (0, 1]")
+    mode = str(raw["execution"]["execution_mode"]).strip().lower()
+    if mode not in {"auto", "review", "shadow"}:
+        raise ValueError("execution_mode must be one of: auto, review, shadow")
     digest = hashlib.sha256(raw_bytes).hexdigest()[:12]
     return StrategyConfig(raw=raw, path=path, hash=digest)
 
@@ -43,5 +46,6 @@ def config_summary(config: StrategyConfig) -> str:
     return json.dumps({
         "strategy_version": config.raw.get("strategy_version"),
         "config_hash": config.hash,
+        "execution_mode": config.raw.get("execution", {}).get("execution_mode"),
         "path": str(config.path),
     }, sort_keys=True)

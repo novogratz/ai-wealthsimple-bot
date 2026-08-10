@@ -1,3 +1,15 @@
+# v3.4.0 — Fully autonomous Wealthsimple execution
+
+- New `execution_mode` in `config/spy_0dte.toml` (schema v2):
+  - `auto` (default): the prepared order ticket is submitted automatically
+  - `review`: fills the ticket and stops at the final review screen (previous behavior)
+  - `shadow`: never opens a Wealthsimple ticket (simulation only)
+- Buy and sell subprocesses pass `--confirm` in auto mode and now return `submitted`
+- `_parse_order_result`/`_order_state` decode the broker `ORDER_RESULT_JSON` payload
+- New `BUY SUBMITTED`/`SELL SUBMITTED` notifications, partial and full closes
+- Auto mode never auto-cancels a real submitted order; sells are blocked until the fill reconciles
+- Mode labels surfaced in the session banner, plan reports and startup health
+
 # v3.3.0 — Five-minute named contract targets
 
 - Sends a named SPY contract target and rationale every five minutes

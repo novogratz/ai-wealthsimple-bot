@@ -43,6 +43,12 @@ source .venv/bin/activate
 python scripts/watchdog.py
 ```
 
+Execution behavior is selected by `execution_mode` in `config/spy_0dte.toml`:
+
+- `auto` (default): buys and sells are submitted automatically; no human clicks required.
+- `review`: tickets are filled and stop at the final review screen for a human confirm.
+- `shadow`: the bot models the trade but never opens a Wealthsimple ticket.
+
 `watchdog.py` enables `caffeinate`, restores Chrome/CDP, synchronously refreshes Wealthsimple
 and verifies the session, starts the SPY runner, and restarts it after abnormal exit. The
 runner's background keepalive refreshes Wealthsimple every two minutes. Run one instance only.
@@ -55,7 +61,7 @@ runner's background keepalive refreshes Wealthsimple every two minutes. Run one 
 - Every five minutes: concise live or theoretical named contract target and rationale.
 - Exact `:00` and `:30` ET: full Telegram state instead of a duplicate target message.
 - 09:00: trading-day planning begins.
-- 09:45–10:00: reversal check and potential review ticket.
+- 09:45–10:00: reversal check and potential auto-submitted ticket (review mode stops for a human).
 - 15:25: regular modeled time exit.
 - 15:45: fallback exit.
 - Nights/weekends/holidays: reporting continues, ordering remains disabled.
@@ -64,7 +70,7 @@ runner's background keepalive refreshes Wealthsimple every two minutes. Run one 
 
 - `/status`: report flat/in-position and emergency-stop state.
 - `/stop`: create `data/options_emergency_stop`, prevent entry, and prepare an exact close
-  review ticket for a reconciled bot-owned position.
+  ticket for a reconciled bot-owned position (submitted automatically in auto mode).
 - `/resume`: remove the stop flag.
 
 Commands from any chat other than `TELEGRAM_CHAT_ID` are ignored. Telegram delivery failure

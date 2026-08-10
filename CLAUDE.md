@@ -25,7 +25,9 @@ implementation below the early delegation is inactive.
 - Contract ranking by spread, volume, OI, premium fit and IV.
 - Hard liquidity gates: two-sided quote, ≤25% spread, volume ≥100, OI ≥250.
 - Largest affordable whole-contract modeled sizing and parallel shadow ledger.
-- Wealthsimple buy and sell tickets stop at final review for manual confirmation.
+- `execution_mode` in `config/spy_0dte.toml`: `auto` (default) submits the prepared
+  ticket automatically; `review` stops at the final review screen for a human click;
+  `shadow` never opens a broker ticket.
 - Versioned TOML configuration, event blackouts, quote provenance/freshness,
   duplicate-instance locks, startup health, calibration and promotion gates.
 

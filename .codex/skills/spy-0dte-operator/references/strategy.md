@@ -17,8 +17,10 @@
 
 The system evaluates at most one long SPY call or put setup per NYSE trading day. The option
 must expire on the current ET date. The implementation does not open short-option positions.
-It prepares Wealthsimple tickets for manual confirmation and independently records the
-hypothetical decision in a shadow ledger.
+In `execution_mode = "auto"` (default) it submits the prepared Wealthsimple ticket and monitors
+the fill; `review` prepares the ticket and stops at the final review screen for a human click;
+`shadow` never opens a broker ticket. In every mode it independently records the hypothetical
+decision in a shadow ledger.
 
 Primary sources:
 
@@ -39,7 +41,7 @@ startup
   → quote/liquidity gates
   → contract ranking and affordability
   → append shadow entry
-  → prepare broker ticket for manual review
+  → prepare broker ticket (auto-submit or manual review per execution_mode)
   → shadow marking at each half hour
   → modeled profit/time exit
 ```
@@ -160,7 +162,8 @@ Yahoo midpoint fallback otherwise.
 - Early-close mandatory exit: 12:45 ET.
 
 There is no premium stop-loss. That choice materially increases drawdown and requires
-out-of-sample validation. Live close tickets require manual broker confirmation.
+out-of-sample validation. In `auto` mode live close tickets submit automatically; in `review`
+mode they require manual broker confirmation.
 
 ## 9. Shadow and validation model
 

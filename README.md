@@ -65,7 +65,7 @@ source .venv/bin/activate
 python scripts/run_spy_options.py --dry
 ```
 
-Persistent order-review service with browser recovery and macOS sleep prevention:
+Persistent service (auto-executes by default; see `execution_mode` in `config/spy_0dte.toml`):
 
 ```bash
 source .venv/bin/activate
@@ -149,7 +149,9 @@ weekends and its built-in NYSE holiday calendar.
 
 Telegram accepts `/status`, `/stop`, and `/resume` only from the configured chat. `/stop`
 blocks new entries and prepares an exact close ticket for a reconciled bot-owned position.
-All securities tickets require final human confirmation in Wealthsimple.
+Execution is controlled by `execution_mode` in `config/spy_0dte.toml`: `auto` (default)
+submits buy and sell tickets automatically; `review` stops at the final review screen for a
+human click; `shadow` models the trade without opening a broker ticket.
 
 Outside market hours, the target is a Black–Scholes preview for the next NYSE session using
 the last SPY price, current VIX as volatility, a 9:45 ET entry assumption and unchanged market

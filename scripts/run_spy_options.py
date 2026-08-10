@@ -74,6 +74,12 @@ SHADOW_MARKS_FILE = ROOT / "data" / "options_shadow_marks.jsonl"
 OUTCOMES_FILE = ROOT / "data" / "spy_outcomes.csv"
 BOT_ID    = "spy-0dte-long-v1"
 STRATEGY_CONFIG = load_strategy_config()
+EXECUTION_MODE = str(STRATEGY_CONFIG.get("execution", "execution_mode")).strip().lower()
+EXECUTION_LABEL = {
+    "auto": "AUTO EXECUTION",
+    "review": "ORDER REVIEW",
+    "shadow": "SHADOW ONLY",
+}.get(EXECUTION_MODE, EXECUTION_MODE.upper())
 
 # Deploy the largest whole-contract amount affordable by the live USD cash.
 # Always model the maximum affordable whole-contract quantity. Utilization is
@@ -120,7 +126,7 @@ def _startup_health() -> str:
     event_path = ROOT / str(STRATEGY_CONFIG.get("events", "calendar_file"))
     checks.append(f"Economic events: {len(load_events(event_path))} configured")
     checks.append(f"Config: {STRATEGY_CONFIG.raw.get('strategy_version')} / {STRATEGY_CONFIG.hash}")
-    checks.append(f"Mode: {'dry' if _DRY_RUN else 'order review'}")
+    checks.append(f"Mode: {'dry' if _DRY_RUN else EXECUTION_LABEL}")
     return "🩺 <b>STARTUP HEALTH</b>\n" + "\n".join(f"• {item}" for item in checks)
 
 
@@ -523,8 +529,25 @@ def _ai_pick_contract(
 
 # ── Order execution ───────────────────────────────────────────────────────────
 
+def _parse_order_result(output: str) -> dict:
+    """Pull the ORDER_RESULT_JSON line out of a wealthsimple_auto subprocess."""
+    marker = "ORDER_RESULT_JSON:"
+    if marker not in output:
+        return {}
+    _, payload = output.rsplit(marker, 1)
+    try:
+        return json.loads(payload.strip().splitlines()[0])
+    except Exception:
+        return {}
+
+
+def _order_state(result: dict) -> str:
+    """'submitted' when the broker confirmed submission, else 'review'."""
+    return "submitted" if result.get("submitted") else "review"
+
+
 def execute_buy_option(contract: OptionContract, n_contracts: int, max_debit: float) -> str:
-    """Prepare the exact ticket; securities submission requires human confirmation."""
+    """Place the buy ticket; in auto mode it clicks the broker submit button."""
     expected_cost = contract.ask * n_contracts * 100
     if n_contracts < 1 or expected_cost > max_debit:
         log(f"[SAFETY] Refusing buy: {n_contracts} contract(s), expected cost ${expected_cost:.2f}")
@@ -535,23 +558,23 @@ def execute_buy_option(contract: OptionContract, n_contracts: int, max_debit: fl
             f"${contract.strike:.0f} {contract.option_type.upper()} @ ${contract.ask:.2f}"
         )
         return "dry"
-    result = subprocess.run(
-        [
-            PYTHON, str(AUTO), "buy-option",
-            "--symbol",      "SPY",
-            "--option-type", contract.option_type,
-            "--strike",      str(int(contract.strike)),
-            "--expiry",      contract.expiry,
-            "--contracts",   str(n_contracts),
-            "--max-cost",    f"{max_debit:.2f}",
-        ],
-        capture_output=True, text=True, timeout=300,
-    )
+    cmd = [
+        PYTHON, str(AUTO), "buy-option",
+        "--symbol",      "SPY",
+        "--option-type", contract.option_type,
+        "--strike",      str(int(contract.strike)),
+        "--expiry",      contract.expiry,
+        "--contracts",   str(n_contracts),
+        "--max-cost",    f"{max_debit:.2f}",
+    ]
+    if EXECUTION_MODE == "auto":
+        cmd.append("--confirm")
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     output = (result.stdout + result.stderr).strip()
     log(f"[buy-option] {output[:800]}")
-    if result.returncode == 0 and "ORDER_RESULT_JSON:" in output:
-        return "review"
-    return "failed"
+    if result.returncode != 0 or "ORDER_RESULT_JSON:" not in output:
+        return "failed"
+    return _order_state(_parse_order_result(output))
 
 
 def execute_sell_option(contract: OptionContract, n_contracts: int) -> str:
@@ -572,20 +595,22 @@ def execute_sell_option(contract: OptionContract, n_contracts: int) -> str:
             f"${contract.strike:.0f} {contract.option_type.upper()}"
         )
         return "dry"
-    result = subprocess.run(
-        [
-            PYTHON, str(AUTO), "sell-option",
-            "--symbol",      "SPY",
-            "--option-type", contract.option_type,
-            "--strike",      str(int(contract.strike)),
-            "--expiry",      contract.expiry,
-            "--contracts",   str(n_contracts),
-        ],
-        capture_output=True, text=True, timeout=300,
-    )
+    cmd = [
+        PYTHON, str(AUTO), "sell-option",
+        "--symbol",      "SPY",
+        "--option-type", contract.option_type,
+        "--strike",      str(int(contract.strike)),
+        "--expiry",      contract.expiry,
+        "--contracts",   str(n_contracts),
+    ]
+    if EXECUTION_MODE == "auto":
+        cmd.append("--confirm")
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     output = (result.stdout + result.stderr).strip()
     log(f"[sell-option] {output[:800]}")
-    return "review" if result.returncode == 0 and "ORDER_RESULT_JSON:" in output else "failed"
+    if result.returncode != 0 or "ORDER_RESULT_JSON:" not in output:
+        return "failed"
+    return _order_state(_parse_order_result(output))
 
 
 # ── Telegram report messages ──────────────────────────────────────────────────
@@ -595,7 +620,7 @@ def _plan_report_msg(bias: "PreMarketBias", today: str, mins_to_entry: int) -> s
     from kzer_bot.spy_options_strategy import REGIME_BIAS, TARGET_PREMIUM_MIN, TARGET_PREMIUM_MAX
     regime_label = "bearish" if REGIME_BIAS < 0 else "bullish" if REGIME_BIAS > 0 else "neutral"
     lines = [
-        f"📊 <b>0DTE SPY OPTIONS | {today} | {'DRY RUN' if _DRY_RUN else 'ORDER REVIEW'}</b>",
+        f"📊 <b>0DTE SPY OPTIONS | {today} | {'DRY RUN' if _DRY_RUN else EXECUTION_LABEL}</b>",
         f"{direction_emoji} <b>Playing {bias.fade_with.upper()}S today</b> (gap-fade + {regime_label} regime)",
         f"   SPY PM: {bias.pm_pct:+.2f}%  VIX: {bias.vix:.1f}  ES 1h: {bias.es_pct:+.2f}%",
         f"   Contract rule: strictly OTM | ${TARGET_PREMIUM_MIN:.2f}–${TARGET_PREMIUM_MAX:.2f} ask",
@@ -674,7 +699,8 @@ def _five_minute_target_message() -> str:
             f"SPY ${contract.strike:.0f} {contract.option_type.upper()} exp {contract.expiry} | "
             f"ask ${contract.ask:.2f} | contract score {score:.1f}/100\n"
             f"Direction: {total}\nWhy: {why}\n"
-            "Status: candidate only; reversal/liquidity/cash gates and manual broker review still apply"
+            "Status: candidate only; reversal/liquidity/cash gates still apply; "
+            "entry is " + ("auto-submitted" if EXECUTION_MODE == "auto" else "prepared for manual review")
         )
     preview = estimate_target_contract(bias.fade_with, spy_price, bias.vix, n)
     if not preview:
@@ -897,6 +923,12 @@ def hold_loop(pos: OptionsPosition) -> None:
             log(reason)
             continue
 
+        if not pos.reconciled:
+            # Only reachable in auto mode with a provisional ledger (see run_today).
+            # Never sell a position whose fill is not yet confirmed by the broker.
+            log("Sell blocked — fill not yet confirmed; retrying next cycle")
+            continue
+
         if action == "close_half":
             if pos.contracts < 2:
                 action = "close_all"
@@ -907,7 +939,7 @@ def hold_loop(pos: OptionsPosition) -> None:
                 if sell_state == "review":
                     notify(f"👀 PARTIAL EXIT READY FOR MANUAL REVIEW | {half} contract(s) | {reason}")
                     return
-                if sell_state == "dry":
+                if sell_state in {"dry", "submitted"}:
                     remaining       = pos.contracts - half
                     pos.cost_basis *= remaining / pos.contracts
                     pos.contracts   = remaining
@@ -930,7 +962,7 @@ def hold_loop(pos: OptionsPosition) -> None:
             if sell_state == "review":
                 notify(f"👀 FULL EXIT READY FOR MANUAL REVIEW | {pos.contracts} contract(s) | {reason}")
                 return
-            if sell_state == "dry":
+            if sell_state in {"dry", "submitted"}:
                 result_emoji = "🚀" if pnl_pct > 100 else "✅" if pnl_pct > 0 else "🔻"
                 notify(
                     f"{result_emoji} <b>CLOSED</b> | SPY ${int(pos.contract.strike)} "
@@ -961,7 +993,7 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
         notify(f"NO TRADE: {event_reason}")
         audit("event_blackout", reason=event_reason)
         return
-    notify(f"=== 0DTE SPY OPTIONS BOT | {today} | {'DRY RUN' if _DRY_RUN else 'ORDER REVIEW'} ===")
+    notify(f"=== 0DTE SPY OPTIONS BOT | {today} | {'DRY RUN' if _DRY_RUN else EXECUTION_LABEL} ===")
     if STOP_FILE.exists():
         notify("NO TRADE: emergency stop is active. Send /resume to clear it.")
         return
@@ -1132,7 +1164,7 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
         expiry=contract.expiry, option_type=contract.option_type, strike=contract.strike,
         contracts=n_contracts, entry_bid=contract.bid, entry_ask=contract.ask,
         assumed_entry=contract.ask, model_score=model_score,
-        live_mode="dry" if _DRY_RUN else "review",
+        live_mode="dry" if _DRY_RUN else EXECUTION_MODE,
     ))
     audit("shadow_entry", strike=contract.strike, contracts=n_contracts, score=model_score)
 
@@ -1153,6 +1185,14 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
         )
         audit("order_review_ready", strike=contract.strike, contracts=n_contracts)
         return
+    if order_state == "submitted":
+        notify(
+            f"✅ <b>BUY SUBMITTED</b> | SPY ${contract.strike:.0f} "
+            f"{contract.option_type.upper()} 0DTE | {n_contracts} contract(s) "
+            f"@ ${entry_ask:.2f} | cost ${cost_total:.0f} | awaiting broker fill"
+        )
+        audit("order_submitted", strike=contract.strike, option_type=contract.option_type,
+              contracts=n_contracts, entry_premium=entry_ask, cost_basis=cost_total)
 
     pos = OptionsPosition(
         contract=contract,
@@ -1169,6 +1209,13 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
 
     # ── Hold loop until exit condition ────────────────────────────────────────
     pos = _reconcile_position(pos)
+    if not pos.reconciled and EXECUTION_MODE == "auto":
+        # Never auto-cancel a real order we already submitted. Enter the hold
+        # loop with the provisional ledger; it re-attempts reconciliation
+        # every cycle and refuses sells until the fill is confirmed.
+        log("Fill not yet visible after submit — keeping provisional ledger in auto mode")
+        hold_loop(pos)
+        return
     if not pos.reconciled:
         cancelled = _cancel_pending_option(pos)
         notify(f"Unconfirmed order {'cancelled automatically' if cancelled else 'must be checked manually in Activity'}")
@@ -1197,6 +1244,9 @@ def main() -> None:
     _DRY_RUN = args.dry
     if _DRY_RUN:
         log("[DRY RUN] No orders will be placed — strategy logic only")
+    else:
+        log(f"Execution mode: {EXECUTION_LABEL} "
+            f"({'submits orders automatically' if EXECUTION_MODE == 'auto' else 'stops at broker review' if EXECUTION_MODE == 'review' else 'no broker tickets'} )")
     log(f"Strategy config: {config_summary(STRATEGY_CONFIG)}")
     notify(_startup_health())
 
