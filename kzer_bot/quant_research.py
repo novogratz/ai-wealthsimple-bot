@@ -70,6 +70,38 @@ class ShadowLedger:
 
 
 @dataclass(frozen=True)
+class ShadowEquity:
+    starting_balance: float
+    realized_pnl: float
+    unrealized_pnl: float
+
+    @property
+    def balance(self) -> float:
+        return self.starting_balance + self.realized_pnl + self.unrealized_pnl
+
+    @property
+    def total_pnl(self) -> float:
+        return self.realized_pnl + self.unrealized_pnl
+
+
+def shadow_equity(path: Path, unrealized_pnl: float = 0.0, starting_balance: float = 10_000.0) -> ShadowEquity:
+    """Rebuild simulated equity from append-only modeled exits and an optional open-position mark."""
+    realized = 0.0
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                    if row.get("event") == "exit":
+                        realized += float(row.get("pnl", 0.0))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+    except FileNotFoundError:
+        pass
+    return ShadowEquity(float(starting_balance), realized, float(unrealized_pnl))
+
+
+@dataclass(frozen=True)
 class Performance:
     trades: int
     win_rate: float

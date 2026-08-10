@@ -188,6 +188,8 @@ neighborhood of historical scores and remains uncalibrated below the minimum sam
 
 Each half-hour shadow mark records P&L, maximum favorable excursion, maximum adverse
 excursion and configured profit/loss levels crossed for later exit-policy comparison.
+Telegram also rebuilds a persistent simulated equity curve from the append-only exits and
+current shadow mark. The curve starts at $10,000 USD and remains separate from broker cash.
 
 When no current exact-0DTE chain exists, `contract_preview.py` estimates the next-session
 strike nearest the premium midpoint with Black–Scholes. It assumes the last SPY price and VIX
