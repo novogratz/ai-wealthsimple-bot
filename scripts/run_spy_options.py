@@ -224,9 +224,26 @@ def _load_daily_bias_override(today: str) -> str | None:
         return None
 
 
+def _load_daily_cash_cap(today: str) -> float | None:
+    """Return a positive date-scoped cash cap explicitly supplied by the operator."""
+    try:
+        data = json.loads(DAILY_BIAS_FILE.read_text(encoding="utf-8"))
+        if data.get("date") != today:
+            return None
+        value = float(data.get("cash_cap_usd", 0))
+        return value if value > 0 else None
+    except Exception:
+        return None
+
+
 def _daily_override_can_replace(direction: str, skip_reason: str) -> bool:
     """Allow an operator direction to replace model choice, never hard risk gates."""
     return direction != "skip" or skip_reason.startswith("Opening gap unavailable")
+
+
+def _day_attempt_completed(stopped_at_start: bool) -> bool:
+    """An emergency-stopped startup must remain retryable after /resume."""
+    return not stopped_at_start
 
 
 def _save_risk_state(state: dict) -> None:
@@ -1134,9 +1151,15 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
         log("Fetching live balance from Wealthsimple...")
         balance = get_available_balance()
         if balance <= 0:
-            log("[WARN] Balance fetch failed — retrying once...")
-            time.sleep(15)
-            balance = get_available_balance()
+            operator_cap = _load_daily_cash_cap(today)
+            if operator_cap is not None:
+                balance = operator_cap
+                log(f"Using date-scoped operator cash cap: ${balance:.2f} USD")
+                notify(f"⚠️ Cash read unavailable | using today's operator cap ${balance:.2f} USD")
+            else:
+                log("[WARN] Balance fetch failed — retrying once...")
+                time.sleep(15)
+                balance = get_available_balance()
         if balance <= 0:
             notify("ERROR: Could not fetch balance from Wealthsimple — aborting. Use --balance X to override.")
             return
@@ -1306,8 +1329,13 @@ def main() -> None:
             if is_early_close(n.date()):
                 log("NYSE early-close session detected — mandatory exit moves to 12:45 ET")
             _sleep_until(PREMARKET_SCAN_HOUR, PREMARKET_SCAN_MINUTE, "SPY pre-market scan start")
+            # A stopped startup is not a completed trading decision. Keep the
+            # date eligible so /resume (or removal of the local stop file) can
+            # trigger the entry path without requiring a second process.
+            stopped_at_start = STOP_FILE.exists()
             run_today(now_flag=False, balance_override=args.balance)
-            completed_date = n.date()
+            if _day_attempt_completed(stopped_at_start):
+                completed_date = n.date()
     finally:
         _reporter_stop.set()
         reporter.join(timeout=2)

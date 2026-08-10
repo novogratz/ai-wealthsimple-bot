@@ -70,9 +70,23 @@ class PositionSizingTests(unittest.TestCase):
             with patch.object(bot, "DAILY_BIAS_FILE", path):
                 self.assertIsNone(bot._load_daily_bias_override("2026-08-10"))
 
+    def test_daily_cash_cap_is_positive_and_date_scoped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bias.json"
+            path.write_text(json.dumps({
+                "date": "2026-08-10", "force": "put", "cash_cap_usd": 118,
+            }))
+            with patch.object(bot, "DAILY_BIAS_FILE", path):
+                self.assertEqual(bot._load_daily_cash_cap("2026-08-10"), 118)
+                self.assertIsNone(bot._load_daily_cash_cap("2026-08-11"))
+
     def test_opening_gap_unavailable_is_the_only_replaceable_skip(self):
         self.assertTrue(bot._daily_override_can_replace("skip", "Opening gap unavailable — waiting"))
         self.assertFalse(bot._daily_override_can_replace("skip", "VIX 45 > 40 — market in panic"))
+
+    def test_emergency_stopped_startup_remains_retryable(self):
+        self.assertFalse(bot._day_attempt_completed(stopped_at_start=True))
+        self.assertTrue(bot._day_attempt_completed(stopped_at_start=False))
 
     def test_next_report_is_clock_aligned(self):
         n = datetime(2026, 8, 10, 10, 7, 30, tzinfo=bot.TZ)
