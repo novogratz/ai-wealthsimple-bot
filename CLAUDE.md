@@ -15,7 +15,9 @@ implementation below the early delegation is inactive.
 
 ## Current behavior
 
-- Immediate Telegram plan at startup; reports at exact `:00` and `:30` ET, 24/7.
+- Immediate Telegram plan, concise named contract target every five minutes, and full reports
+  at exact `:00` and `:30` ET, 24/7.
+- Closed-market targets are theoretical next-session previews and never order inputs.
 - One potential SPY call/put ticket per NYSE day during 9:45–10:00 ET.
 - Contrarian directional score: SPY gap, RSI, weekly extension, ES, VIX, regime bias.
 - Reversal confirmation of 0.05% away from the opening extreme.

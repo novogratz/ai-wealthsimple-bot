@@ -31,7 +31,7 @@ Primary sources:
 ```text
 startup
   → immediate Telegram scan
-  → wait/report through nights, weekends and holidays
+  → five-minute target previews plus full half-hour reports through nights/weekends/holidays
   → valid NYSE day at 09:00
   → directional plan
   → 09:45–10:00 reversal confirmation
@@ -185,6 +185,11 @@ neighborhood of historical scores and remains uncalibrated below the minimum sam
 
 Each half-hour shadow mark records P&L, maximum favorable excursion, maximum adverse
 excursion and configured profit/loss levels crossed for later exit-policy comparison.
+
+When no current exact-0DTE chain exists, `contract_preview.py` estimates the next-session
+strike nearest the premium midpoint with Black–Scholes. It assumes the last SPY price and VIX
+remain unchanged until 9:45 ET. The estimate is explanatory only and cannot enter the broker
+path; live chain, reversal, liquidity, cash and review gates remain mandatory.
 
 ## 10. Known limitations
 

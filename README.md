@@ -10,7 +10,8 @@ its hand-set weights and exit thresholds do not constitute proven positive expec
 
 ## Strategy in one minute
 
-1. At startup and every `:00`/`:30` ET, refresh the SPY plan and Telegram report.
+1. At startup and every `:00`/`:30` ET, publish the full SPY quant report. At the intervening
+   five-minute boundaries, publish a concise named contract target and rationale.
 2. From 9:00 ET, calculate a directional score using the SPY opening gap, RSI(14),
    five-session extension, one-hour ES move, VIX level, and configured regime bias.
 3. A negative score proposes puts; a positive score proposes calls. Ambiguous flat sessions
@@ -123,7 +124,8 @@ The score ranks contracts; it is not a calibrated probability of profit.
 | Time ET | Behavior |
 |---|---|
 | Startup | Immediate quant scan and Telegram plan |
-| Every `:00`/`:30` | Plan, market state, or position/shadow update |
+| Every five minutes | Live target, or next-session theoretical target when the chain is closed |
+| Every `:00`/`:30` | Full factors, plan, market state, or position/shadow report; replaces duplicate five-minute message |
 | 9:00 | Begin premarket planning loop |
 | 9:45–10:00 | Reversal confirmation and potential ticket preparation |
 | 3:25 | Mandatory modeled close |
@@ -148,6 +150,11 @@ weekends and its built-in NYSE holiday calendar.
 Telegram accepts `/status`, `/stop`, and `/resume` only from the configured chat. `/stop`
 blocks new entries and prepares an exact close ticket for a reconciled bot-owned position.
 All securities tickets require final human confirmation in Wealthsimple.
+
+Outside market hours, the target is a Black–Scholes preview for the next NYSE session using
+the last SPY price, current VIX as volatility, a 9:45 ET entry assumption and unchanged market
+inputs. It includes expiry, call/put, strike and theoretical premium. It is always labeled
+`NOT ACTIONABLE`; the live exact-0DTE chain replaces it before any ticket can be prepared.
 
 ## Architecture
 

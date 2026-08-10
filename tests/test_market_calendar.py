@@ -1,7 +1,7 @@
 import unittest
 from datetime import date
 
-from kzer_bot.market_calendar import is_early_close, is_trading_day, market_close_time
+from kzer_bot.market_calendar import is_early_close, is_trading_day, market_close_time, next_trading_day
 
 
 class MarketCalendarTests(unittest.TestCase):
@@ -14,4 +14,4 @@ class MarketCalendarTests(unittest.TestCase):
         self.assertTrue(is_trading_day(date(2026, 8, 10)))
         self.assertTrue(is_early_close(date(2026, 11, 27)))
         self.assertEqual(market_close_time(date(2026, 11, 27)), (13, 0))
-
+        self.assertEqual(next_trading_day(date(2026, 8, 9)), date(2026, 8, 10))
