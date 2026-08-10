@@ -1,3 +1,9 @@
+# v3.5.1 — Immediate next-session estimate
+
+- Publishes the live target or next-session theoretical estimate immediately at startup
+- Does not wait for the slower Wealthsimple balance fetch before showing the plan
+- Keeps live-chain replacement, reversal, liquidity, cash, and market-hour order gates intact
+
 # v3.5.0 — Half-hour live and dry-run balances
 
 - Every `:00`/`:30` Telegram update shows Wealthsimple available USD cash

@@ -32,7 +32,7 @@ Primary sources:
 
 ```text
 startup
-  → immediate Telegram scan
+  → immediate live target or next-session theoretical Telegram estimate
   → five-minute target previews plus full half-hour reports through nights/weekends/holidays
   → valid NYSE day at 09:00
   → directional plan

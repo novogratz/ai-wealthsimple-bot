@@ -123,7 +123,7 @@ The score ranks contracts; it is not a calibrated probability of profit.
 
 | Time ET | Behavior |
 |---|---|
-| Startup | Immediate quant scan and Telegram plan |
+| Startup | Immediate live target or clearly labeled next-session theoretical estimate |
 | Every five minutes | Live target, or next-session theoretical target when the chain is closed |
 | Every `:00`/`:30` | Wealthsimple available USD cash, $10,000 dry-run equity/P&L, and full market or position state |
 | 9:00 | Begin premarket planning loop |

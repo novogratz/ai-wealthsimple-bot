@@ -797,7 +797,12 @@ def _half_hour_reporter_loop() -> None:
 
 
 def _five_minute_target_loop() -> None:
-    """Publish target at :05 increments; :00/:30 are handled by the full report."""
+    """Publish immediately, then at :05 increments; :00/:30 use the full report."""
+    try:
+        notify(_five_minute_target_message())
+    except Exception as exc:
+        log(f"[reporter] Startup target failed: {exc}")
+
     while not _reporter_stop.is_set():
         n = now_et()
         seconds_into_five = (n.minute % 5) * 60 + n.second + n.microsecond / 1_000_000
