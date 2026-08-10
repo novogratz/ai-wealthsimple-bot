@@ -57,7 +57,8 @@ runner's background keepalive refreshes Wealthsimple every two minutes. Run one 
 
 ## 3. Expected schedule
 
-- Startup: immediate scan/report.
+- Startup: immediate live target or next-session theoretical estimate; the balance/full-state
+  report may complete afterward without blocking the target.
 - Every five minutes: concise live or theoretical named contract target and rationale.
 - Exact `:00` and `:30` ET: Wealthsimple available USD cash, $10,000 dry-run equity/P&L,
   and full Telegram state instead of a duplicate target message.

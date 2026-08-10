@@ -28,6 +28,18 @@ def contract(ask: float = 0.50) -> OptionContract:
 
 
 class PositionSizingTests(unittest.TestCase):
+    def test_target_reporter_publishes_immediately_before_scheduled_loop(self):
+        was_set = bot._reporter_stop.is_set()
+        bot._reporter_stop.set()
+        try:
+            with patch.object(bot, "_five_minute_target_message", return_value="tomorrow estimate"), \
+                 patch.object(bot, "notify") as notify:
+                bot._five_minute_target_loop()
+            notify.assert_called_once_with("tomorrow estimate")
+        finally:
+            if not was_set:
+                bot._reporter_stop.clear()
+
     def test_never_forces_an_unaffordable_contract(self):
         self.assertEqual(bot.calc_max_contracts(0.60, 50.0), 0)
 
