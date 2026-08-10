@@ -72,6 +72,7 @@ TG_OFFSET_FILE = ROOT / "data" / "telegram_offset.json"
 SHADOW_FILE = ROOT / "data" / "options_shadow.jsonl"
 SHADOW_POS_FILE = ROOT / "data" / "options_shadow_position.json"
 SHADOW_MARKS_FILE = ROOT / "data" / "options_shadow_marks.jsonl"
+DAILY_BIAS_FILE = ROOT / "data" / "options_daily_bias.json"
 OUTCOMES_FILE = ROOT / "data" / "spy_outcomes.csv"
 BOT_ID    = "spy-0dte-long-v1"
 SHADOW_STARTING_BALANCE = 10_000.0
@@ -209,6 +210,18 @@ def _load_risk_state() -> dict:
     if state.get("date") != today:
         state = {"date": today, "entries": 0, "realized_pnl": 0.0, "starting_balance": None}
     return state
+
+
+def _load_daily_bias_override(today: str) -> str | None:
+    """Return a date-scoped operator direction; stale or malformed files are ignored."""
+    try:
+        data = json.loads(DAILY_BIAS_FILE.read_text(encoding="utf-8"))
+        if data.get("date") != today:
+            return None
+        direction = str(data.get("force", "")).strip().lower()
+        return direction if direction in {"put", "call"} else None
+    except Exception:
+        return None
 
 
 def _save_risk_state(state: dict) -> None:
@@ -1019,6 +1032,20 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
     bias = get_premarket_bias() if now_flag or now_et().hour >= 9 and now_et().minute >= 30 else premarket_plan_loop(today)
     for r in bias.reasons:
         log(f"  {r}")
+
+    daily_override = _load_daily_bias_override(today)
+    if daily_override and bias.fade_with != "skip":
+        original_direction = bias.fade_with
+        bias.fade_with = daily_override
+        bias.direction = "operator"
+        bias.reasons.append(
+            f"OPERATOR OVERRIDE {today}: {original_direction.upper()} -> {daily_override.upper()}"
+        )
+        audit(
+            "daily_bias_override", date=today, original=original_direction,
+            forced=daily_override,
+        )
+        notify(f"⚠️ <b>DAILY OVERRIDE</b> | {today} | force {daily_override.upper()} | expires tonight")
 
     if bias.fade_with == "skip":
         notify(f"SKIP TODAY: {bias.skip_reason}")

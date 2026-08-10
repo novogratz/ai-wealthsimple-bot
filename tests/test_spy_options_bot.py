@@ -55,6 +55,21 @@ class PositionSizingTests(unittest.TestCase):
     def test_clearly_red_open_selects_reversal_call(self):
         self.assertEqual(option_strategy.select_opening_play(-0.16), ("call", "9:45 reversal"))
 
+    def test_daily_bias_override_is_date_scoped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bias.json"
+            path.write_text(json.dumps({"date": "2026-08-10", "force": "put"}))
+            with patch.object(bot, "DAILY_BIAS_FILE", path):
+                self.assertEqual(bot._load_daily_bias_override("2026-08-10"), "put")
+                self.assertIsNone(bot._load_daily_bias_override("2026-08-11"))
+
+    def test_daily_bias_override_rejects_invalid_direction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bias.json"
+            path.write_text(json.dumps({"date": "2026-08-10", "force": "short"}))
+            with patch.object(bot, "DAILY_BIAS_FILE", path):
+                self.assertIsNone(bot._load_daily_bias_override("2026-08-10"))
+
     def test_next_report_is_clock_aligned(self):
         n = datetime(2026, 8, 10, 10, 7, 30, tzinfo=bot.TZ)
         self.assertEqual(bot._seconds_until_next_report(n), 450)

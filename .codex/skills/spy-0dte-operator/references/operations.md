@@ -95,6 +95,7 @@ used for order sizing; CAD or portfolio-value conversions are display-only.
 | `data/options_shadow_position.json` | Open simulated position |
 | `data/options_shadow_marks.jsonl` | Shadow marks, excursions and exit levels |
 | `data/options_daily_risk.json` | Daily entry/loss lockout |
+| `data/options_daily_bias.json` | Optional date-scoped operator call/put override |
 | `data/options_emergency_stop` | Stop flag |
 | `data/options_runner.lock`, `data/watchdog.lock` | Single-instance locks |
 | `data/telegram_offset.json` | Telegram polling cursor |
