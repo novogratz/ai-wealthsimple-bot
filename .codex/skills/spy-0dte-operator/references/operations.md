@@ -78,6 +78,10 @@ runner's background keepalive refreshes Wealthsimple every two minutes. Run one 
 Commands from any chat other than `TELEGRAM_CHAT_ID` are ignored. Telegram delivery failure
 is logged but does not authorize bypassing safety gates.
 
+Half-hour balance checks use the SPY stock account picker when the home page hides currency
+cash, so they continue working while the options chain is closed. Only confirmed USD cash is
+used for order sizing; CAD or portfolio-value conversions are display-only.
+
 ## 5. Runtime state
 
 | Path | Purpose |

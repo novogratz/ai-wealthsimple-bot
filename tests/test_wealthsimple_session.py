@@ -1,10 +1,18 @@
 import unittest
 from unittest.mock import MagicMock
 
-from scripts.wealthsimple_auto import is_login_page
+from scripts.wealthsimple_auto import _nonregistered_usd_balances, is_login_page
 
 
 class WealthsimpleSessionTests(unittest.TestCase):
+    def test_parses_current_balance_before_account_layout(self):
+        text = "$2.01 CAD · $0.03 USD\nNon-registered\n$0.00 CAD · $118.00 USD\nNon-registered"
+        self.assertEqual(_nonregistered_usd_balances(text), [0.03, 118.0])
+
+    def test_balance_parser_excludes_registered_accounts(self):
+        text = "$0.00 CAD · $118.00 USD\nNon-registered\n$0.00 CAD · $999.00 USD\nRRSP"
+        self.assertEqual(_nonregistered_usd_balances(text), [118.0])
+
     def test_login_url_is_detected_without_password_field(self):
         page = MagicMock()
         page.url = "https://my.wealthsimple.com/app/login?redirect=home"

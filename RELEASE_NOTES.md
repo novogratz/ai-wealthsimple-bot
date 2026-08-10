@@ -1,3 +1,9 @@
+# Unreleased — Closed-market Wealthsimple balance recovery
+
+- Reads the Non-registered account picker from a harmless SPY stock draft on weekends
+- Supports Wealthsimple's current balance-before-account-name layout
+- Keeps converted CAD separate from broker-confirmed spendable USD used for option sizing
+
 # v3.5.1 — Immediate next-session estimate
 
 - Publishes the live target or next-session theoretical estimate immediately at startup
