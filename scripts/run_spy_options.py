@@ -52,7 +52,7 @@ from kzer_bot.market_events import event_blackout, load_events
 from kzer_bot.contract_preview import estimate_target_contract
 from kzer_bot.quant_research import (
     ShadowLedger, ShadowTrade, calibrated_probability, decision_id,
-    load_replay_csv, validate_quote,
+    load_replay_csv, shadow_equity, validate_quote,
 )
 from kzer_bot.strategy_config import config_summary, load_strategy_config
 from kzer_bot.telegram import get_commands, send_message
@@ -73,6 +73,7 @@ SHADOW_POS_FILE = ROOT / "data" / "options_shadow_position.json"
 SHADOW_MARKS_FILE = ROOT / "data" / "options_shadow_marks.jsonl"
 OUTCOMES_FILE = ROOT / "data" / "spy_outcomes.csv"
 BOT_ID    = "spy-0dte-long-v1"
+SHADOW_STARTING_BALANCE = 10_000.0
 STRATEGY_CONFIG = load_strategy_config()
 EXECUTION_MODE = str(STRATEGY_CONFIG.get("execution", "execution_mode")).strip().lower()
 EXECUTION_LABEL = {
@@ -717,11 +718,12 @@ def _five_minute_target_message() -> str:
 
 def _half_hour_report() -> None:
     """Send current SPY state at an exact :00/:30 ET boundary."""
+    live_balance = get_available_balance()
     position = load_position()
     if position and position.contract.expiry == now_et().date().isoformat():
         quote = _broker_option_quote(position.contract) or get_option_mid(position.contract)
         if quote > 0:
-            notify(_position_report_msg(position, quote))
+            notify(_balance_report_msg(live_balance) + "\n\n" + _position_report_msg(position, quote))
             return
 
     shadow = _load_shadow_position()
@@ -732,7 +734,7 @@ def _half_hour_report() -> None:
             action, reason = check_exit(shadow_pos, quote)
             pnl = (quote - shadow_pos.entry_premium) * shadow_pos.contracts * 100
             mark = _record_shadow_mark(shadow_pos, quote, reason)
-            notify("🧪 <b>SHADOW</b> | " + _position_report_msg(shadow_pos, quote) + f"\n   Model score: {model_score:.1f} | {reason}")
+            notify(_balance_report_msg(live_balance, pnl) + "\n\n🧪 <b>SHADOW</b> | " + _position_report_msg(shadow_pos, quote) + f"\n   Model score: {model_score:.1f} | {reason}")
             if action != "hold":
                 audit("shadow_exit", action=action, pnl=pnl, reason=reason,
                       max_favorable_pct=mark["max_favorable_pct"],
@@ -753,7 +755,26 @@ def _half_hour_report() -> None:
     elif trading:
         session = "AFTER HOURS"
     report = _scored_plan_report(bias, n.date().isoformat(), 0)
-    notify(f"🕒 <b>HALF-HOUR QUANT UPDATE | {n:%H:%M} ET | {session}</b>\n" + report)
+    notify(_balance_report_msg(live_balance) + f"\n\n🕒 <b>HALF-HOUR QUANT UPDATE | {n:%H:%M} ET | {session}</b>\n" + report)
+
+
+def _balance_report_msg(live_balance: float, unrealized_shadow_pnl: float = 0.0) -> str:
+    """Build the live-cash and simulated-equity block included in every half-hour report."""
+    equity = shadow_equity(
+        SHADOW_FILE,
+        unrealized_pnl=unrealized_shadow_pnl,
+        starting_balance=SHADOW_STARTING_BALANCE,
+    )
+    live = f"${live_balance:,.2f}" if live_balance > 0 else "unavailable"
+    pnl_emoji = "📈" if equity.total_pnl > 0 else "📉" if equity.total_pnl < 0 else "➖"
+    return (
+        "💰 <b>30-MIN BALANCE CHECK</b>\n"
+        f"• Wealthsimple available cash: <b>{live} USD</b>\n"
+        f"• Dry-run equity: <b>${equity.balance:,.2f} USD</b> "
+        f"(started ${equity.starting_balance:,.2f})\n"
+        f"• {pnl_emoji} Dry-run P&amp;L: <b>${equity.total_pnl:+,.2f}</b> "
+        f"({equity.total_pnl / equity.starting_balance:+.2%})"
+    )
 
 
 def _half_hour_reporter_loop() -> None:

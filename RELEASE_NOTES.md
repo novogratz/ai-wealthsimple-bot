@@ -1,3 +1,11 @@
+# v3.5.0 — Half-hour live and dry-run balances
+
+- Every `:00`/`:30` Telegram update shows Wealthsimple available USD cash
+- Added persistent dry-run equity starting at exactly `$10,000.00 USD`
+- Dry-run P&L includes all modeled exits plus the current marked shadow position
+- Equity is rebuilt from the append-only shadow ledger, so restarts preserve performance
+- Failed broker balance reads are labeled unavailable instead of being treated as zero cash
+
 # v3.4.0 — Fully autonomous Wealthsimple execution
 
 - New `execution_mode` in `config/spy_0dte.toml` (schema v2):

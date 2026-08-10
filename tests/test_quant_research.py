@@ -1,10 +1,11 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from kzer_bot.quant_research import (
     ShadowLedger, ShadowTrade, calibrated_probability, performance,
-    promotion_decision, validate_quote, walk_forward,
+    promotion_decision, shadow_equity, validate_quote, walk_forward,
 )
 
 
@@ -35,6 +36,28 @@ class QuantResearchTests(unittest.TestCase):
             trade = ShadowTrade("now", "id", "2026-08-10", "call", 640, 1, .3, .4, .4, 70, "review")
             ledger.append(trade); ledger.append(trade)
             self.assertEqual(len(ledger.path.read_text().splitlines()), 2)
+
+    def test_shadow_equity_starts_at_ten_thousand_and_accumulates_pnl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "shadow.jsonl"
+            rows = [
+                {"event": "entry", "status": "open"},
+                {"event": "exit", "pnl": 250.25},
+                {"event": "exit", "pnl": -100.00},
+            ]
+            path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            equity = shadow_equity(path, unrealized_pnl=49.75)
+            self.assertEqual(equity.starting_balance, 10_000)
+            self.assertEqual(equity.realized_pnl, 150.25)
+            self.assertEqual(equity.unrealized_pnl, 49.75)
+            self.assertEqual(equity.balance, 10_200)
+
+    def test_shadow_equity_handles_missing_or_malformed_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "shadow.jsonl"
+            self.assertEqual(shadow_equity(path).balance, 10_000)
+            path.write_text("not-json\n{\"event\": \"exit\", \"pnl\": \"bad\"}\n")
+            self.assertEqual(shadow_equity(path).balance, 10_000)
 
     def test_walk_forward_does_not_use_future_to_select_threshold(self):
         rows = [{"timestamp": str(i), "score": str(10 + i), "return": str(1 if i % 2 else -1)} for i in range(40)]

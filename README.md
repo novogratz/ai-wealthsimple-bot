@@ -125,7 +125,7 @@ The score ranks contracts; it is not a calibrated probability of profit.
 |---|---|
 | Startup | Immediate quant scan and Telegram plan |
 | Every five minutes | Live target, or next-session theoretical target when the chain is closed |
-| Every `:00`/`:30` | Full factors, plan, market state, or position/shadow report; replaces duplicate five-minute message |
+| Every `:00`/`:30` | Wealthsimple available USD cash, $10,000 dry-run equity/P&L, and full market or position state |
 | 9:00 | Begin premarket planning loop |
 | 9:45–10:00 | Reversal confirmation and potential ticket preparation |
 | 3:25 | Mandatory modeled close |
@@ -146,6 +146,10 @@ weekends and its built-in NYSE holiday calendar.
 - `data/browser_profile/`: persistent Chrome profile; never commit it.
 - `data/options_emergency_stop`: local emergency-stop flag.
 - `data/options_runner.lock` / `data/watchdog.lock`: duplicate-instance protection.
+
+Every half-hour Telegram report rebuilds the dry-run equity curve from the append-only shadow
+ledger. It starts at `$10,000.00 USD` and includes realized modeled exits plus the current
+marked shadow position. This simulated balance is separate from Wealthsimple available cash.
 
 Telegram accepts `/status`, `/stop`, and `/resume` only from the configured chat. `/stop`
 blocks new entries and prepares an exact close ticket for a reconciled bot-owned position.
