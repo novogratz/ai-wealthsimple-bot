@@ -28,17 +28,28 @@ def contract(ask: float = 0.50) -> OptionContract:
 
 
 class PositionSizingTests(unittest.TestCase):
-    def test_target_reporter_publishes_immediately_before_scheduled_loop(self):
+    def test_telegram_reporter_publishes_immediately_before_scheduled_loop(self):
         was_set = bot._reporter_stop.is_set()
         bot._reporter_stop.set()
         try:
-            with patch.object(bot, "_five_minute_target_message", return_value="tomorrow estimate"), \
+            with patch.object(bot, "_target_message", return_value="tomorrow estimate"), \
                  patch.object(bot, "notify") as notify:
-                bot._five_minute_target_loop()
+                bot._telegram_reporter_loop()
             notify.assert_called_once_with("tomorrow estimate")
         finally:
             if not was_set:
                 bot._reporter_stop.clear()
+
+    def test_report_cadence_tracks_market_phase(self):
+        self.assertEqual(bot._report_interval_minutes(datetime(2026, 8, 10, 8, 45, tzinfo=bot.TZ)), 30)
+        self.assertEqual(bot._report_interval_minutes(datetime(2026, 8, 10, 9, 15, tzinfo=bot.TZ)), 15)
+        self.assertEqual(bot._report_interval_minutes(datetime(2026, 8, 10, 9, 45, tzinfo=bot.TZ)), 5)
+        self.assertEqual(bot._report_interval_minutes(datetime(2026, 8, 10, 10, 0, tzinfo=bot.TZ)), 15)
+        self.assertEqual(bot._report_interval_minutes(datetime(2026, 8, 10, 16, 0, tzinfo=bot.TZ)), 30)
+
+    def test_next_report_is_clock_aligned(self):
+        n = datetime(2026, 8, 10, 10, 7, 30, tzinfo=bot.TZ)
+        self.assertEqual(bot._seconds_until_next_report(n), 450)
 
     def test_never_forces_an_unaffordable_contract(self):
         self.assertEqual(bot.calc_max_contracts(0.60, 50.0), 0)

@@ -95,7 +95,6 @@ _keepalive_proc: "subprocess.Popen | None" = None
 _last_report_t: float = 0.0
 REPORT_INTERVAL_SECS = 30 * 60
 POSITION_REPORT_SECS = 30 * 60
-TARGET_REPORT_SECS = 5 * 60
 MAX_DAILY_LOSS_PCT = 0.50
 _reporter_stop = threading.Event()
 _instance_lock_handle = None
@@ -128,7 +127,12 @@ def _startup_health() -> str:
     checks.append(f"Economic events: {len(load_events(event_path))} configured")
     checks.append(f"Config: {STRATEGY_CONFIG.raw.get('strategy_version')} / {STRATEGY_CONFIG.hash}")
     checks.append(f"Mode: {'dry' if _DRY_RUN else EXECUTION_LABEL}")
-    return "🩺 <b>STARTUP HEALTH</b>\n" + "\n".join(f"• {item}" for item in checks)
+    chrome = "OK" if "connected" in checks[0] else "DOWN"
+    stop = "ON" if STOP_FILE.exists() else "off"
+    return (
+        f"🟢 <b>SPY BOT ONLINE</b> | {'DRY' if _DRY_RUN else EXECUTION_LABEL}\n"
+        f"Chrome {chrome} | stop {stop} | cfg {STRATEGY_CONFIG.hash}"
+    )
 
 
 # ── Keepalive ─────────────────────────────────────────────────────────────────
@@ -617,34 +621,26 @@ def execute_sell_option(contract: OptionContract, n_contracts: int) -> str:
 # ── Telegram report messages ──────────────────────────────────────────────────
 
 def _plan_report_msg(bias: "PreMarketBias", today: str, mins_to_entry: int) -> str:
-    direction_emoji = "🔴" if bias.fade_with == "put" else "🟢"
-    from kzer_bot.spy_options_strategy import REGIME_BIAS, TARGET_PREMIUM_MIN, TARGET_PREMIUM_MAX
-    regime_label = "bearish" if REGIME_BIAS < 0 else "bullish" if REGIME_BIAS > 0 else "neutral"
+    total = next((r.strip() for r in reversed(bias.reasons) if "TOTAL SCORE" in r), "score unavailable")
+    score = re.search(r"TOTAL SCORE:\s*([+-]?[0-9.]+)", total)
+    score_text = score.group(1) if score else "n/a"
+    direction = bias.fade_with.upper() if bias.fade_with in {"call", "put"} else "FLAT"
     lines = [
-        f"📊 <b>0DTE SPY OPTIONS | {today} | {'DRY RUN' if _DRY_RUN else EXECUTION_LABEL}</b>",
-        f"{direction_emoji} <b>Playing {bias.fade_with.upper()}S today</b> (gap-fade + {regime_label} regime)",
-        f"   SPY PM: {bias.pm_pct:+.2f}%  VIX: {bias.vix:.1f}  ES 1h: {bias.es_pct:+.2f}%",
-        f"   Contract rule: strictly OTM | ${TARGET_PREMIUM_MIN:.2f}–${TARGET_PREMIUM_MAX:.2f} ask",
-        f"   Sizing: maximum affordable whole contracts (up to 100% of USD cash)",
-        f"   Safety: reviewed debit cannot exceed cash | no naked sells",
-        f"   Entry window: 9:45–10:00 AM ET",
-        f"   Exits: +500% full close | 3:25 PM time close | 3:45 PM nuclear",
+        f"📡 <b>SPY 0DTE | {now_et():%H:%M} ET</b>",
+        f"Bias <b>{direction}</b> | dir score {score_text} | SPY move {bias.pm_pct:+.2f}%",
+        f"VIX {bias.vix:.1f} | ES 1h {bias.es_pct:+.2f}%",
     ]
     if mins_to_entry > 0:
-        lines.append(f"   ⏰ {mins_to_entry} min to entry window")
+        lines.append(f"Entry window in {mins_to_entry}m")
     return "\n".join(lines)
 
 
 def _scored_plan_report(bias: "PreMarketBias", today: str, mins_to_entry: int) -> str:
-    """Build a directional plan with an auditable factor and contract board."""
+    """Build a compact directional plan while retaining detailed scores in the audit log."""
     base = _plan_report_msg(bias, today, mins_to_entry)
-    factor_lines = [r.strip() for r in bias.reasons if r.strip()]
-    factors = "\n".join(f"   {line}" for line in factor_lines)
-    if factors:
-        base += "\n\n<b>Directional factor model</b>\n" + factors
     spy_price = get_spy_price()
     if spy_price <= 0 or bias.fade_with not in {"call", "put"}:
-        return base + "\n   Contract board: waiting for a valid SPY quote"
+        return base + f"\nState <b>NO TARGET</b> | {bias.skip_reason or 'SPY quote unavailable'}"
     candidates = get_otm_contracts_in_range(
         bias.fade_with, spy_price, expiry=now_et().date().isoformat()
     )
@@ -652,13 +648,11 @@ def _scored_plan_report(bias: "PreMarketBias", today: str, mins_to_entry: int) -
         preview = estimate_target_contract(bias.fade_with, spy_price, bias.vix, now_et())
         if preview:
             return base + (
-                "\n\n<b>Next-session theoretical target — NOT ACTIONABLE</b>"
-                f"\n   SPY ${preview.strike:.0f} {preview.option_type.upper()} exp {preview.expiry}"
-                f"\n   Estimated premium: ${preview.theoretical_premium:.2f} | assumed SPY ${preview.spot:.2f}"
-                f" | IV {preview.volatility:.1%}"
-                f"\n   Why: {preview.assumptions}; live chain replaces this estimate"
+                f"\nEstimate <b>{preview.expiry} ${preview.strike:.0f}{preview.option_type[0].upper()}</b>"
+                f" ~${preview.theoretical_premium:.2f}"
+                "\nState <b>ESTIMATE ONLY</b> | live chain replaces it"
             )
-        return base + "\n   Contract target: unavailable — no live chain or theoretical estimate"
+        return base + "\nState <b>NO TARGET</b> | chain/estimate unavailable"
     board = _contract_leaderboard(candidates, spy_price)
     planned, score = _rank_contracts(candidates, spy_price)[0]
     plan = (
@@ -666,11 +660,7 @@ def _scored_plan_report(bias: "PreMarketBias", today: str, mins_to_entry: int) -
         f"at entry confirmation | score {score:.1f}/100"
     )
     calibration = calibrated_probability(load_replay_csv(OUTCOMES_FILE), score) if OUTCOMES_FILE.exists() else None
-    probability_line = (
-        f"Empirical P(profit): {calibration.probability:.0%} from {calibration.samples} nearby outcomes"
-        if calibration and calibration.calibrated
-        else "Empirical P(profit): uncalibrated — insufficient historical outcomes"
-    )
+    probability_line = f" | empirical {calibration.probability:.0%}" if calibration and calibration.calibrated else ""
     chosen_parts = _contract_quant_score(planned, spy_price)[1]
     breakdown = (
         f"Execution score → spread {chosen_parts['spread']:.1f}/30 | "
@@ -678,46 +668,47 @@ def _scored_plan_report(bias: "PreMarketBias", today: str, mins_to_entry: int) -
         f"premium fit {chosen_parts['premium']:.1f}/33 | "
         f"IV sanity {chosen_parts['iv']:.1f}/5"
     )
-    log("[30-MIN QUANT PLAN]\n" + board + "\n" + breakdown + "\n" + probability_line + "\n" + plan)
-    return base + "\n\n<b>Quant contract board</b>\n" + board + "\n" + breakdown + "\n" + probability_line + "\n<b>" + plan + "</b>"
+    log("[QUANT PLAN]\n" + board + "\n" + breakdown + "\n" + plan)
+    return (
+        base
+        + f"\nTarget <b>${planned.strike:.0f}{planned.option_type[0].upper()}</b> "
+        + f"@ ${planned.ask:.2f} | quality {score:.0f}/100{probability_line}"
+        + "\nState <b>WATCH</b> | reversal + cash gates pending"
+    )
 
 
-def _five_minute_target_message() -> str:
-    """Concise actionable/live or theoretical target with directional rationale."""
+def _target_message() -> str:
+    """Compact live or theoretical target snapshot."""
     bias = get_premarket_bias()
     n = now_et()
     spy_price = get_spy_price()
     total = next((r.strip() for r in reversed(bias.reasons) if "TOTAL SCORE" in r), "TOTAL SCORE unavailable")
-    why_parts = [r.strip() for r in bias.reasons if any(k in r for k in ("Gap fade", "RSI(14)", "Week return", "ES fade", "VIX "))]
-    why = " | ".join(why_parts[-4:]) or "directional inputs awaiting market data"
     if spy_price <= 0 or bias.fade_with not in {"call", "put"}:
-        return f"🎯 <b>5-MIN TARGET | {n:%H:%M} ET</b>\nNo contract target | {bias.skip_reason or 'SPY data unavailable'}"
+        return f"📡 <b>SPY | {n:%H:%M} ET</b>\nState <b>NO TARGET</b> | {bias.skip_reason or 'SPY unavailable'}"
     candidates = get_otm_contracts_in_range(bias.fade_with, spy_price, expiry=n.date().isoformat())
     if candidates:
         contract, score = _rank_contracts(candidates, spy_price)[0]
         return (
-            f"🎯 <b>5-MIN LIVE TARGET | {n:%H:%M} ET</b>\n"
-            f"SPY ${contract.strike:.0f} {contract.option_type.upper()} exp {contract.expiry} | "
-            f"ask ${contract.ask:.2f} | contract score {score:.1f}/100\n"
-            f"Direction: {total}\nWhy: {why}\n"
-            "Status: candidate only; reversal/liquidity/cash gates still apply; "
-            "entry is " + ("auto-submitted" if EXECUTION_MODE == "auto" else "prepared for manual review")
+            f"⚡ <b>SPY 0DTE | {n:%H:%M} ET</b>\n"
+            f"Bias <b>{bias.fade_with.upper()}</b> | {total.replace('TOTAL SCORE:', 'dir')}\n"
+            f"Target <b>${contract.strike:.0f}{contract.option_type[0].upper()}</b> "
+            f"@ ${contract.ask:.2f} | quality {score:.0f}/100\n"
+            "State <b>WATCH</b> | reversal + cash gates pending"
         )
     preview = estimate_target_contract(bias.fade_with, spy_price, bias.vix, n)
     if not preview:
-        return f"🎯 <b>5-MIN TARGET | {n:%H:%M} ET</b>\nNo contract estimate available\nDirection: {total}\nWhy: {why}"
+        return f"📡 <b>SPY | {n:%H:%M} ET</b>\nBias {bias.fade_with.upper()} | {total}\nState <b>NO ESTIMATE</b>"
     return (
-        f"🧮 <b>5-MIN THEORETICAL TARGET | {n:%H:%M} ET</b>\n"
-        f"SPY ${preview.strike:.0f} {preview.option_type.upper()} exp {preview.expiry} | "
-        f"estimated ${preview.theoretical_premium:.2f}\n"
-        f"Assumptions: SPY ${preview.spot:.2f}, IV {preview.volatility:.1%}, unchanged into 9:45 ET\n"
-        f"Direction: {total}\nWhy: {why}\n"
-        "Status: NOT ACTIONABLE — live 0DTE chain replaces this estimate"
+        f"🧮 <b>SPY NEXT SESSION | {n:%H:%M} ET</b>\n"
+        f"Bias <b>{bias.fade_with.upper()}</b> | {total.replace('TOTAL SCORE:', 'dir')}\n"
+        f"Estimate <b>{preview.expiry} ${preview.strike:.0f}{preview.option_type[0].upper()}</b> "
+        f"~${preview.theoretical_premium:.2f}\n"
+        "State <b>ESTIMATE ONLY</b> | live chain replaces it"
     )
 
 
-def _half_hour_report() -> None:
-    """Send current SPY state at an exact :00/:30 ET boundary."""
+def _periodic_report() -> None:
+    """Send the current compact SPY, balance, and position state."""
     live_balance = get_available_balance()
     position = load_position()
     if position and position.contract.expiry == now_et().date().isoformat():
@@ -734,7 +725,7 @@ def _half_hour_report() -> None:
             action, reason = check_exit(shadow_pos, quote)
             pnl = (quote - shadow_pos.entry_premium) * shadow_pos.contracts * 100
             mark = _record_shadow_mark(shadow_pos, quote, reason)
-            notify(_balance_report_msg(live_balance, pnl) + "\n\n🧪 <b>SHADOW</b> | " + _position_report_msg(shadow_pos, quote) + f"\n   Model score: {model_score:.1f} | {reason}")
+            notify(_balance_report_msg(live_balance, pnl) + "\n" + _position_report_msg(shadow_pos, quote) + f"\nShadow | quality {model_score:.0f} | {reason}")
             if action != "hold":
                 audit("shadow_exit", action=action, pnl=pnl, reason=reason,
                       max_favorable_pct=mark["max_favorable_pct"],
@@ -746,76 +737,57 @@ def _half_hour_report() -> None:
 
     bias = get_premarket_bias()
     n = now_et()
-    trading = is_trading_day(n.date())
-    session = "MARKET CLOSED"
-    if trading and (n.hour, n.minute) < (9, 30):
-        session = "PREMARKET"
-    elif trading and (n.hour, n.minute) < (16, 0):
-        session = "REGULAR SESSION"
-    elif trading:
-        session = "AFTER HOURS"
     report = _scored_plan_report(bias, n.date().isoformat(), 0)
-    notify(_balance_report_msg(live_balance) + f"\n\n🕒 <b>HALF-HOUR QUANT UPDATE | {n:%H:%M} ET | {session}</b>\n" + report)
+    notify(_balance_report_msg(live_balance) + "\n" + report)
 
 
 def _balance_report_msg(live_balance: float, unrealized_shadow_pnl: float = 0.0) -> str:
-    """Build the live-cash and simulated-equity block included in every half-hour report."""
+    """Build one compact live-cash and simulated-equity line."""
     equity = shadow_equity(
         SHADOW_FILE,
         unrealized_pnl=unrealized_shadow_pnl,
         starting_balance=SHADOW_STARTING_BALANCE,
     )
     live = f"${live_balance:,.2f}" if live_balance > 0 else "unavailable"
-    pnl_emoji = "📈" if equity.total_pnl > 0 else "📉" if equity.total_pnl < 0 else "➖"
     return (
-        "💰 <b>30-MIN BALANCE CHECK</b>\n"
-        f"• Wealthsimple available cash: <b>{live} USD</b>\n"
-        f"• Dry-run equity: <b>${equity.balance:,.2f} USD</b> "
-        f"(started ${equity.starting_balance:,.2f})\n"
-        f"• {pnl_emoji} Dry-run P&amp;L: <b>${equity.total_pnl:+,.2f}</b> "
+        f"💰 Cash <b>{live}</b> | Paper <b>${equity.balance:,.2f}</b> "
         f"({equity.total_pnl / equity.starting_balance:+.2%})"
     )
 
 
-def _half_hour_reporter_loop() -> None:
-    """Publish once at startup, then align reports to wall-clock :00/:30 ET."""
+def _report_interval_minutes(n: datetime) -> int:
+    """Return Telegram cadence for the current ET market phase."""
+    clock = (n.hour, n.minute)
+    if clock >= (16, 0) or clock < (9, 0):
+        return 30
+    if (9, 30) <= clock < (10, 0):
+        return 5
+    return 15
+
+
+def _seconds_until_next_report(n: datetime) -> float:
+    interval = _report_interval_minutes(n)
+    seconds = n.minute * 60 + n.second + n.microsecond / 1_000_000
+    interval_seconds = interval * 60
+    return interval_seconds - (seconds % interval_seconds)
+
+
+def _telegram_reporter_loop() -> None:
+    """Publish immediately, then follow the clock-aligned market-phase cadence."""
     try:
-        _half_hour_report()
-    except Exception as exc:
-        log(f"[reporter] Startup report failed: {exc}")
-
-    while not _reporter_stop.is_set():
-        n = now_et()
-        minute_target = 30 if n.minute < 30 else 60
-        wait = (minute_target - n.minute) * 60 - n.second - n.microsecond / 1_000_000
-        if _reporter_stop.wait(max(wait, 0.1)):
-            return
-        try:
-            _half_hour_report()
-        except Exception as exc:
-            log(f"[reporter] Half-hour report failed: {exc}")
-
-
-def _five_minute_target_loop() -> None:
-    """Publish immediately, then at :05 increments; :00/:30 use the full report."""
-    try:
-        notify(_five_minute_target_message())
+        notify(_target_message())
     except Exception as exc:
         log(f"[reporter] Startup target failed: {exc}")
 
     while not _reporter_stop.is_set():
         n = now_et()
-        seconds_into_five = (n.minute % 5) * 60 + n.second + n.microsecond / 1_000_000
-        wait = TARGET_REPORT_SECS - seconds_into_five
+        wait = _seconds_until_next_report(n)
         if _reporter_stop.wait(max(wait, 0.1)):
             return
-        n = now_et()
-        if n.minute in {0, 30}:
-            continue
         try:
-            notify(_five_minute_target_message())
+            _periodic_report()
         except Exception as exc:
-            log(f"[reporter] Five-minute target failed: {exc}")
+            log(f"[reporter] Periodic report failed: {exc}")
 
 
 def _position_report_msg(pos: "OptionsPosition", current_mid: float) -> str:
@@ -831,18 +803,13 @@ def _position_report_msg(pos: "OptionsPosition", current_mid: float) -> str:
     trend_emoji = "📈" if pnl_pct > 5 else "📉" if pnl_pct < -5 else "⚡"
     direction_emoji = "🔴" if pos.contract.option_type == "put" else "🟢"
     lines = [
-        f"{direction_emoji}{trend_emoji} <b>SPY ${int(pos.contract.strike)} {pos.contract.option_type.upper()} 0DTE</b>",
-        f"   Entry: ${pos.entry_premium:.2f}  Now: ${current_mid:.2f}",
-        f"   P&L: <b>{pnl_pct:+.0f}%</b> / ${pnl_usd:+.0f}",
-        f"   Contracts: {pos.contracts}  Cost basis: ${pos.cost_basis:.0f}",
+        f"{direction_emoji}{trend_emoji} <b>${int(pos.contract.strike)}{pos.contract.option_type[0].upper()} × {pos.contracts}</b> | ${pos.entry_premium:.2f} → ${current_mid:.2f}",
+        f"P&amp;L <b>{pnl_pct:+.0f}%</b> | ${pnl_usd:+.0f} | cost ${pos.cost_basis:.0f}",
     ]
     if pos.partial_closed:
-        lines.append(f"   ✅ Partial close taken")
-        lines.append(f"   Next target: +{PROFIT_TARGET_PCT:.0f}% (${pos.entry_premium * (1 + PROFIT_TARGET_PCT / 100):.2f}/contract)")
+        lines.append(f"State <b>PARTIAL CLOSED</b> | next +{PROFIT_TARGET_PCT:.0f}%")
     else:
-        lines.append(f"   Exit plan: full close at +{PROFIT_TARGET_PCT:.0f}% or mandatory time close")
-    lines.append(f"   ⏰ Hard close {close_label} ET  ({mins_to_close} min)")
-    lines.append(f"   📅 Tomorrow 9:45 AM: fade PM gap (50% allocation)")
+        lines.append(f"State <b>HOLD</b> | hard close {close_label} ({mins_to_close}m)")
     return "\n".join(lines)
 
 
@@ -1019,7 +986,7 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
         notify(f"NO TRADE: {event_reason}")
         audit("event_blackout", reason=event_reason)
         return
-    notify(f"=== 0DTE SPY OPTIONS BOT | {today} | {'DRY RUN' if _DRY_RUN else EXECUTION_LABEL} ===")
+    log(f"0DTE session start | {today} | {'DRY RUN' if _DRY_RUN else EXECUTION_LABEL}")
     if STOP_FILE.exists():
         notify("NO TRADE: emergency stop is active. Send /resume to clear it.")
         return
@@ -1059,7 +1026,7 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
     # Send initial game plan to Telegram
     notify(_scored_plan_report(bias, today, 0))
 
-    # ── Wait for 9:45 AM entry window; reporter publishes at :00/:30 ────────
+    # ── Wait for 9:45 AM entry window; Telegram reporter follows market cadence ──
     if not now_flag:
         _sleep_until(
             ENTRY_HOUR, ENTRY_MINUTE_START,
@@ -1276,12 +1243,10 @@ def main() -> None:
     log(f"Strategy config: {config_summary(STRATEGY_CONFIG)}")
     notify(_startup_health())
 
-    # The normal runner is a persistent service: half-hour reports continue on
-    # nights, weekends, and holidays while trading remains NYSE-session-only.
-    reporter = threading.Thread(target=_half_hour_reporter_loop, name="spy-quant-reporter", daemon=True)
-    target_reporter = threading.Thread(target=_five_minute_target_loop, name="spy-target-reporter", daemon=True)
+    # The normal runner is persistent: cadence adapts by market phase while
+    # trading remains NYSE-session-only.
+    reporter = threading.Thread(target=_telegram_reporter_loop, name="spy-telegram-reporter", daemon=True)
     reporter.start()
-    target_reporter.start()
     _start_keepalive()
     try:
         if args.now:
@@ -1312,7 +1277,6 @@ def main() -> None:
     finally:
         _reporter_stop.set()
         reporter.join(timeout=2)
-        target_reporter.join(timeout=2)
         _stop_keepalive()
 
 

@@ -10,8 +10,8 @@ its hand-set weights and exit thresholds do not constitute proven positive expec
 
 ## Strategy in one minute
 
-1. At startup and every `:00`/`:30` ET, publish the full SPY quant report. At the intervening
-   five-minute boundaries, publish a concise named contract target and rationale.
+1. Publish compact Telegram snapshots every 30 minutes overnight, every 15 minutes during
+   the active day, and every five minutes during the 9:30–10:00 opening/entry window.
 2. From 9:00 ET, calculate a directional score using the SPY opening gap, RSI(14),
    five-session extension, one-hour ES move, VIX level, and configured regime bias.
 3. A negative score proposes puts; a positive score proposes calls. Ambiguous flat sessions
@@ -124,8 +124,10 @@ The score ranks contracts; it is not a calibrated probability of profit.
 | Time ET | Behavior |
 |---|---|
 | Startup | Immediate live target or clearly labeled next-session theoretical estimate |
-| Every five minutes | Live target, or next-session theoretical target when the chain is closed |
-| Every `:00`/`:30` | Wealthsimple available USD cash, $10,000 dry-run equity/P&L, and full market or position state |
+| 4:00 PM–9:00 AM | Compact balance/target snapshot every 30 minutes |
+| 9:00–9:30 AM | Compact snapshot every 15 minutes |
+| 9:30–10:00 AM | Five-minute opening/entry monitoring |
+| 10:00 AM–4:00 PM | Compact snapshot every 15 minutes |
 | 9:00 | Begin premarket planning loop |
 | 9:45–10:00 | Reversal confirmation and potential ticket preparation |
 | 3:25 | Mandatory modeled close |
@@ -139,7 +141,7 @@ weekends and its built-in NYSE holiday calendar.
 - `data/options_position.json`: broker-reconciled, bot-owned position ledger.
 - `data/options_shadow.jsonl`: append-only shadow decisions and exits.
 - `data/options_shadow_position.json`: currently open shadow position.
-- `data/options_shadow_marks.jsonl`: half-hour P&L, MFE, MAE and exit levels.
+- `data/options_shadow_marks.jsonl`: periodic P&L, MFE, MAE and exit levels.
 - `data/options_daily_risk.json`: one-entry/day and daily-loss state.
 - `data/options_audit.jsonl`: structured decisions and lifecycle events.
 - `data/options.log`: human-readable runtime log.
@@ -147,7 +149,7 @@ weekends and its built-in NYSE holiday calendar.
 - `data/options_emergency_stop`: local emergency-stop flag.
 - `data/options_runner.lock` / `data/watchdog.lock`: duplicate-instance protection.
 
-Every half-hour Telegram report rebuilds the dry-run equity curve from the append-only shadow
+Every periodic Telegram report rebuilds the dry-run equity curve from the append-only shadow
 ledger. It starts at `$10,000.00 USD` and includes realized modeled exits plus the current
 marked shadow position. This simulated balance is separate from Wealthsimple available cash.
 

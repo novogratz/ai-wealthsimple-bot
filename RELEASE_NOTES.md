@@ -3,6 +3,9 @@
 - Reads the Non-registered account picker from a harmless SPY stock draft on weekends
 - Supports Wealthsimple's current balance-before-account-name layout
 - Keeps converted CAD separate from broker-confirmed spendable USD used for option sizing
+- Replaces overlapping Telegram streams with one market-phase cadence
+- Uses 30-minute overnight, 15-minute daytime, and five-minute opening-window updates
+- Compresses routine messages to bias, target/position, cash, paper equity, and state
 
 # v3.5.1 — Immediate next-session estimate
 

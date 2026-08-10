@@ -33,7 +33,7 @@ Primary sources:
 ```text
 startup
   → immediate live target or next-session theoretical Telegram estimate
-  → five-minute target previews plus full half-hour reports through nights/weekends/holidays
+  → one compact reporter: 30-minute overnight, 15-minute daytime, 5-minute opening window
   → valid NYSE day at 09:00
   → directional plan
   → 09:45–10:00 reversal confirmation
@@ -168,7 +168,7 @@ mode they require manual broker confirmation.
 ## 9. Shadow and validation model
 
 Every eligible decision is appended to `data/options_shadow.jsonl`; the current simulated
-position lives in `data/options_shadow_position.json`. Half-hour reports mark the shadow
+position lives in `data/options_shadow_position.json`. Periodic reports mark the shadow
 position and append a modeled exit when an exit rule fires.
 
 `scripts/run_walk_forward.py` consumes chronological outcome rows. For each window it:
@@ -186,7 +186,7 @@ The promotion gate requires minimum out-of-sample trade count, profitable-window
 profit factor and bounded drawdown. Empirical probability uses a Laplace-smoothed
 neighborhood of historical scores and remains uncalibrated below the minimum sample count.
 
-Each half-hour shadow mark records P&L, maximum favorable excursion, maximum adverse
+Each periodic shadow mark records P&L, maximum favorable excursion, maximum adverse
 excursion and configured profit/loss levels crossed for later exit-policy comparison.
 Telegram also rebuilds a persistent simulated equity curve from the append-only exits and
 current shadow mark. The curve starts at $10,000 USD and remains separate from broker cash.

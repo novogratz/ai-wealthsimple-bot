@@ -59,9 +59,10 @@ runner's background keepalive refreshes Wealthsimple every two minutes. Run one 
 
 - Startup: immediate live target or next-session theoretical estimate; the balance/full-state
   report may complete afterward without blocking the target.
-- Every five minutes: concise live or theoretical named contract target and rationale.
-- Exact `:00` and `:30` ET: Wealthsimple available USD cash, $10,000 dry-run equity/P&L,
-  and full Telegram state instead of a duplicate target message.
+- 16:00–09:00: compact cash, paper-equity and target/position snapshots every 30 minutes.
+- 09:00–09:30 and 10:00–16:00: compact snapshots every 15 minutes.
+- 09:30–10:00: five-minute opening and entry-gate monitoring.
+- Orders, fills, skips, exits, errors and emergency controls: immediate alerts.
 - 09:00: trading-day planning begins.
 - 09:45–10:00: reversal check and potential auto-submitted ticket (review mode stops for a human).
 - 15:25: regular modeled time exit.
