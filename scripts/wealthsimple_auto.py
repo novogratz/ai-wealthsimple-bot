@@ -580,52 +580,22 @@ def get_live_balance(page) -> float | None:
                 return val
 
     # The home page often hides per-currency balances. Open a harmless SPY
-    # option draft, read the account picker, then leave without clicking Next.
+    # stock draft, read the account picker, then leave without clicking Next.
+    # Unlike the options-chain fallback, this works while the market is closed.
     try:
-        print("  USD balance hidden on home — reading options account picker...")
-        page = navigate_to_spy_options(page)
-        clicked = page.evaluate(r"""
-            () => {
-                const strikes = [...document.querySelectorAll('*')].filter(el =>
-                    el.children.length === 0 && /^\$[0-9]{3,4}$/.test((el.textContent || '').trim())
-                );
-                for (const strike of strikes) {
-                    let row = strike.parentElement;
-                    for (let i = 0; i < 8 && row; i++, row = row.parentElement) {
-                        const prices = [...row.querySelectorAll('button')].filter(b =>
-                            /^\$[0-9]/.test((b.textContent || '').trim())
-                        );
-                        if (prices.length >= 2) {
-                            const ask = parseFloat((prices[prices.length - 1].textContent || '').replace('$', ''));
-                            if (ask >= 0.10 && ask <= 0.60) {
-                                prices[prices.length - 1].click(); return true;
-                            }
-                        }
-                    }
-                }
-                return false;
-            }
-        """)
-        if not clicked:
-            raise RuntimeError("No option Ask button found")
-        page.wait_for_timeout(1500)
-        _dismiss_options_overlays(page)
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        page.wait_for_timeout(800)
+        print("  USD balance hidden on home — reading SPY account picker...")
+        page = navigate_to_stock(page, "SPY")
+        buy = page.get_by_role("button", name="Buy", exact=True).first
+        if buy.is_visible(timeout=2500):
+            buy.click(timeout=3000)
+            page.wait_for_timeout(1000)
         account_trigger = page.get_by_text("Select an account to continue", exact=False).first
         if not account_trigger.is_visible(timeout=1200):
             account_trigger = page.get_by_text("Select account", exact=False).first
         account_trigger.click(timeout=3000)
         page.wait_for_timeout(1500)
         picker_text = page.locator("body").inner_text(timeout=5000)
-        balances = []
-        for match in re.finditer(
-            r"(?:Non-registered|Unregistered|Personal)\s+"
-            r"\$[0-9][0-9,.]*\s*CAD\s*[·•-]\s*\$([0-9][0-9,.]*)\s*USD",
-            picker_text,
-            re.IGNORECASE,
-        ):
-            balances.append(float(match.group(1).replace(",", "")))
+        balances = _nonregistered_usd_balances(picker_text)
         page.keyboard.press("Escape")
         if balances and max(balances) > 0:
             best = max(balances)
@@ -635,6 +605,27 @@ def get_live_balance(page) -> float | None:
         safe_print(f"  Options balance fallback failed: {exc}")
 
     return None
+
+
+def _nonregistered_usd_balances(text: str) -> list[float]:
+    """Parse account-picker rows across Wealthsimple's old and current render order."""
+    account = re.compile(r"^(?:Non-registered|Unregistered|Personal)$", re.IGNORECASE)
+    pair = re.compile(
+        r"^\$[0-9][0-9,.]*\s*CAD\s*[·•-]\s*\$([0-9][0-9,.]*)\s*USD$",
+        re.IGNORECASE,
+    )
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    balances: list[float] = []
+    for index, line in enumerate(lines):
+        if not account.fullmatch(line):
+            continue
+        adjacent = lines[index - 1] if index > 0 and pair.fullmatch(lines[index - 1]) else None
+        if adjacent is None and index + 1 < len(lines) and pair.fullmatch(lines[index + 1]):
+            adjacent = lines[index + 1]
+        if adjacent is not None:
+            match = pair.fullmatch(adjacent)
+            balances.append(float(match.group(1).replace(",", "")))
+    return balances
 
 
 def is_login_page(page) -> bool:
