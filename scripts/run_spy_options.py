@@ -2,11 +2,11 @@
 """
 0DTE SPY Options Bot — contrarian gap-fade strategy.
 
-Pre-market green → buy OTM puts  at 9:45 AM (fade the gap up)
-Pre-market red   → buy OTM calls at 9:45 AM (fade the gap down)
+Flatish/green open → buy OTM puts at 9:31 AM
+Clearly red open  → buy OTM calls after 9:45 AM reversal confirmation
 
 Usage:
-  python scripts/run_spy_options.py              # normal mode — waits for 9:45 AM
+  python scripts/run_spy_options.py              # normal mode — follows configured entry path
   python scripts/run_spy_options.py --now        # skip wait, enter immediately
   python scripts/run_spy_options.py --dry        # paper mode — no real orders placed
   python scripts/run_spy_options.py --balance 150  # override cash (skips WS fetch)
@@ -31,6 +31,7 @@ sys.path.insert(0, str(ROOT))
 
 from kzer_bot.spy_options_strategy import (
     ENTRY_HOUR,
+    EARLY_PUT_ENTRY_MINUTE,
     ENTRY_MINUTE_END,
     ENTRY_MINUTE_START,
     TARGET_PREMIUM_MAX,
@@ -673,7 +674,7 @@ def _scored_plan_report(bias: "PreMarketBias", today: str, mins_to_entry: int) -
         base
         + f"\nTarget <b>${planned.strike:.0f}{planned.option_type[0].upper()}</b> "
         + f"@ ${planned.ask:.2f} | quality {score:.0f}/100{probability_line}"
-        + "\nState <b>WATCH</b> | reversal + cash gates pending"
+        + "\nState <b>WATCH</b> | entry + cash gates pending"
     )
 
 
@@ -693,7 +694,7 @@ def _target_message() -> str:
             f"Bias <b>{bias.fade_with.upper()}</b> | {total.replace('TOTAL SCORE:', 'dir')}\n"
             f"Target <b>${contract.strike:.0f}{contract.option_type[0].upper()}</b> "
             f"@ ${contract.ask:.2f} | quality {score:.0f}/100\n"
-            "State <b>WATCH</b> | reversal + cash gates pending"
+            "State <b>WATCH</b> | entry + cash gates pending"
         )
     preview = estimate_target_contract(bias.fade_with, spy_price, bias.vix, n)
     if not preview:
@@ -1026,11 +1027,12 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
     # Send initial game plan to Telegram
     notify(_scored_plan_report(bias, today, 0))
 
-    # ── Wait for 9:45 AM entry window; Telegram reporter follows market cadence ──
+    # ── Asymmetric entry timing; Telegram reporter follows market cadence ─────
+    early_put = bias.fade_with == "put"
     if not now_flag:
         _sleep_until(
-            ENTRY_HOUR, ENTRY_MINUTE_START,
-            "entry window 9:45 AM",
+            ENTRY_HOUR, EARLY_PUT_ENTRY_MINUTE if early_put else ENTRY_MINUTE_START,
+            "flat/green put entry 9:31 AM" if early_put else "red-open call reversal 9:45 AM",
         )
 
     if not now_flag and _past_cutoff():
@@ -1038,11 +1040,11 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
         return
 
     # ── Reversal confirmation ─────────────────────────────────────────────────
-    confirmed = False
-    rev_msg = ""
+    confirmed = early_put
+    rev_msg = "flatish/green opening rule — 9:31 put path" if early_put else ""
     while not confirmed and not _past_cutoff():
         confirmed, rev_msg = check_reversal_starting(bias)
-        log(f"Reversal check: {rev_msg}")
+        log(f"Call reversal check: {rev_msg}")
         if not confirmed:
             time.sleep(60)
     if not confirmed:

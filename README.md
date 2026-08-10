@@ -14,9 +14,9 @@ its hand-set weights and exit thresholds do not constitute proven positive expec
    the active day, and every five minutes during the 9:30–10:00 opening/entry window.
 2. From 9:00 ET, calculate a directional score using the SPY opening gap, RSI(14),
    five-session extension, one-hour ES move, VIX level, and configured regime bias.
-3. A negative score proposes puts; a positive score proposes calls. Ambiguous flat sessions
-   are skipped.
-4. Between 9:45 and 10:00 ET, require a 0.05% reversal away from the opening extreme.
+3. A flatish or green open (gap at least −0.15%) selects the 9:31 put path. A clearly red
+   open (below −0.15%) selects calls and waits for reversal confirmation.
+4. The red-open call path requires a 0.05% reversal between 9:45 and 10:00 ET.
 5. Rank strictly OTM exact-0DTE contracts with asks between $0.25 and $0.70. Strike
    distance is informational and is not an eligibility rule.
 6. Reject contracts without a valid two-sided quote, spread ≤25%, volume ≥100, and open
@@ -100,9 +100,9 @@ Positive contributions lean toward calls; negative contributions lean toward put
 | VIX | +5 below 12; −5 above 20; −10 above 25; skip above 40 |
 | Regime bias | Configured additive constant; currently 0 |
 
-The 9:45 reversal gate prevents an entry proposal while SPY remains pinned at the opening
-high for puts or opening low for calls. When market data cannot validate that reversal, the
-system waits rather than assuming success.
+The 9:45 reversal gate applies to red-open calls and prevents entry while SPY remains pinned
+at the opening low. Flatish/green puts use the 9:31 path. Missing opening data, invalid quotes,
+or failed safety gates always fail closed.
 
 ## Contract score
 
@@ -129,7 +129,8 @@ The score ranks contracts; it is not a calibrated probability of profit.
 | 9:30–10:00 AM | Five-minute opening/entry monitoring |
 | 10:00 AM–4:00 PM | Compact snapshot every 15 minutes |
 | 9:00 | Begin premarket planning loop |
-| 9:45–10:00 | Reversal confirmation and potential ticket preparation |
+| 9:31 | Flatish/green-open put path; live chain and all execution gates required |
+| 9:45–10:00 | Red-open call reversal and potential ticket preparation |
 | 3:25 | Mandatory modeled close |
 | 3:45 | Nuclear fallback close |
 

@@ -1,5 +1,5 @@
 schema_version = 2
-strategy_version = "3.4.0"
+strategy_version = "4.0.0"
 
 [execution]
 # auto: submit the prepared order and close the position without human clicks.
@@ -24,6 +24,7 @@ regime_bias = 0.0
 
 [schedule]
 entry_hour = 9
+early_put_entry_minute = 31
 entry_minute_start = 45
 entry_minute_end = 60
 time_close_hour = 15

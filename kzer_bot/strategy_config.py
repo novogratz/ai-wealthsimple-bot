@@ -38,6 +38,9 @@ def load_strategy_config(path: Path = DEFAULT_PATH) -> StrategyConfig:
     mode = str(raw["execution"]["execution_mode"]).strip().lower()
     if mode not in {"auto", "review", "shadow"}:
         raise ValueError("execution_mode must be one of: auto, review, shadow")
+    early_minute = int(raw["schedule"]["early_put_entry_minute"])
+    if not 30 <= early_minute < int(raw["schedule"]["entry_minute_start"]):
+        raise ValueError("early_put_entry_minute must be between 30 and the standard entry minute")
     digest = hashlib.sha256(raw_bytes).hexdigest()[:12]
     return StrategyConfig(raw=raw, path=path, hash=digest)
 

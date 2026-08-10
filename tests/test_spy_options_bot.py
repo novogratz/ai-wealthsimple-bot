@@ -47,6 +47,14 @@ class PositionSizingTests(unittest.TestCase):
         self.assertEqual(bot._report_interval_minutes(datetime(2026, 8, 10, 10, 0, tzinfo=bot.TZ)), 15)
         self.assertEqual(bot._report_interval_minutes(datetime(2026, 8, 10, 16, 0, tzinfo=bot.TZ)), 30)
 
+    def test_flatish_and_green_open_select_early_puts(self):
+        self.assertEqual(option_strategy.select_opening_play(0.20), ("put", "9:31"))
+        self.assertEqual(option_strategy.select_opening_play(0.00), ("put", "9:31"))
+        self.assertEqual(option_strategy.select_opening_play(-0.15), ("put", "9:31"))
+
+    def test_clearly_red_open_selects_reversal_call(self):
+        self.assertEqual(option_strategy.select_opening_play(-0.16), ("call", "9:45 reversal"))
+
     def test_next_report_is_clock_aligned(self):
         n = datetime(2026, 8, 10, 10, 7, 30, tzinfo=bot.TZ)
         self.assertEqual(bot._seconds_until_next_report(n), 450)

@@ -6,6 +6,9 @@
 - Replaces overlapping Telegram streams with one market-phase cadence
 - Uses 30-minute overnight, 15-minute daytime, and five-minute opening-window updates
 - Compresses routine messages to bias, target/position, cash, paper equity, and state
+- Strategy v4.0.0: flatish/green opens select puts at 9:31 ET
+- Clearly red opens select calls through the existing 9:45–10:00 reversal gate
+- Missing opening bars now fail closed instead of entering on bias alone
 
 # v3.5.1 — Immediate next-session estimate
 

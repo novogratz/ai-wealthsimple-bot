@@ -35,14 +35,14 @@ startup
   → immediate live target or next-session theoretical Telegram estimate
   → one compact reporter: 30-minute overnight, 15-minute daytime, 5-minute opening window
   → valid NYSE day at 09:00
-  → directional plan
-  → 09:45–10:00 reversal confirmation
+  → asymmetric opening plan
+  → flatish/green: 09:31 put path; clearly red: 09:45–10:00 call reversal
   → exact-0DTE candidate collection
   → quote/liquidity gates
   → contract ranking and affordability
   → append shadow entry
   → prepare broker ticket (auto-submit or manual review per execution_mode)
-  → shadow marking at each half hour
+  → shadow marking at each periodic report
   → modeled profit/time exit
 ```
 
@@ -98,17 +98,17 @@ ES_points = -5 × ES_one_hour_move_percent
 VIX contributes +5 below 12, −5 above 20, and −10 above 25. VIX above 40 is a hard skip.
 `REGIME_BIAS` is an additive operator-controlled constant and is currently neutral at zero.
 
-If the absolute SPY move is below 0.15%, the absolute total score is below 5, and regime bias
-is weak, the system skips the day. Otherwise total <0 selects puts and total ≥0 selects calls.
+The score remains an audited research signal. Execution direction follows strategy v4.0.0:
+an opening gap at or above −0.15% selects puts at 09:31; a gap below −0.15% selects calls
+through the later reversal gate. Missing opening-gap data fails closed.
 
 These weights are hand-set hypotheses, not fitted or calibrated probabilities.
 
 ## 4. Reversal gate
 
-From 9:45 to 10:00:
-
-- Put plan: current SPY must be at least 0.05% below the session high.
-- Call plan: current SPY must be at least 0.05% above the session low.
+From 9:45 to 10:00, the red-open call plan requires SPY to be at least 0.05% above the
+session low. The flatish/green put path enters at 09:31 without this reversal gate, but still
+requires a valid exact-0DTE chain plus all quote, liquidity, event and cash gates.
 
 Missing data fails closed. No confirmation by 10:00 means no ticket that day.
 

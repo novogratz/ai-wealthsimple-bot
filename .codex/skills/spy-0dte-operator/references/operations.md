@@ -64,7 +64,8 @@ runner's background keepalive refreshes Wealthsimple every two minutes. Run one 
 - 09:30–10:00: five-minute opening and entry-gate monitoring.
 - Orders, fills, skips, exits, errors and emergency controls: immediate alerts.
 - 09:00: trading-day planning begins.
-- 09:45–10:00: reversal check and potential auto-submitted ticket (review mode stops for a human).
+- 09:31: flatish/green-open put path and potential ticket after all execution gates.
+- 09:45–10:00: red-open call reversal and potential ticket.
 - 15:25: regular modeled time exit.
 - 15:45: fallback exit.
 - Nights/weekends/holidays: reporting continues, ordering remains disabled.

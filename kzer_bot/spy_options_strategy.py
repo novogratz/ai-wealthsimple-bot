@@ -1,8 +1,8 @@
 """
 0DTE SPY Options — Contrarian Gap-Fade Strategy
 
-Logic: SPY gaps up pre-market → buy OTM puts at 9:45 AM (fade the green)
-       SPY gaps down pre-market → buy OTM calls at 9:45 AM (fade the red)
+Logic: SPY opens flatish/green → buy OTM puts at 9:31 AM
+       SPY opens clearly red → buy OTM calls after 9:45 AM reversal confirmation
 
 Big money sells into the retail FOMO open; bots and algos fade the gap.
 OTM options are cheap — small account, large leverage, defined risk.
@@ -46,6 +46,7 @@ NOON_CLOSE_MINUTE    = int(CONFIG.get("schedule", "time_close_minute"))
 HARD_CLOSE_HOUR      = int(CONFIG.get("schedule", "hard_close_hour"))
 HARD_CLOSE_MINUTE    = int(CONFIG.get("schedule", "hard_close_minute"))
 ENTRY_HOUR           = int(CONFIG.get("schedule", "entry_hour"))
+EARLY_PUT_ENTRY_MINUTE = int(CONFIG.get("schedule", "early_put_entry_minute"))
 ENTRY_MINUTE_START   = int(CONFIG.get("schedule", "entry_minute_start"))
 ENTRY_MINUTE_END     = int(CONFIG.get("schedule", "entry_minute_end"))
 MAX_VIX              = float(CONFIG.get("signal", "maximum_vix"))
@@ -154,8 +155,9 @@ def get_premarket_bias() -> PreMarketBias:
       5. VIX level  — high VIX → lean puts (fear = puts outperform)
       6. REGIME_BIAS — user-set constant (currently bearish = -12)
 
-    Positive total → buy CALLS  |  Negative total → buy PUTS
-    On flat gaps (< MIN_PM_PCT), regime + technicals decide.
+    Execution direction is asymmetric: flatish/green opens select puts at 9:31;
+    clearly red opens select calls after the standard reversal gate. The score
+    remains an audited research signal and does not override this opening rule.
     """
     reasons: list[str] = []
     score          = 0.0
@@ -238,6 +240,15 @@ def get_premarket_bias() -> PreMarketBias:
             skip_reason=f"VIX {vix:.1f} > {MAX_VIX} — market in panic, skip today",
         )
 
+    if spy_prev_close <= 0 or spy_pm_price <= 0:
+        return PreMarketBias(
+            direction="skip", fade_with="skip",
+            pm_pct=spy_pm_pct, vix=vix,
+            spy_prev_close=spy_prev_close, spy_pm_price=spy_pm_price,
+            es_pct=es_pct, reasons=reasons,
+            skip_reason="Opening gap unavailable — refusing to infer a 9:31 direction",
+        )
+
     # ── Scoring: 1. Gap fade (primary signal, max ~±30 pts) ──────────────────
     # Green gap → market likely to pull back → puts → negative contribution
     gap_pts = -spy_pm_pct * 25
@@ -309,23 +320,11 @@ def get_premarket_bias() -> PreMarketBias:
 
     reasons.append(f"  TOTAL SCORE: {score:+.1f}  ({'PUTS' if score < 0 else 'CALLS'})")
 
-    # ── Skip flat days (score near zero AND tiny gap AND no strong regime bias) ─
-    abs_pm = abs(spy_pm_pct)
-    if abs_pm < MIN_PM_PCT and abs(score) < 5 and abs(REGIME_BIAS) < 8:
-        return PreMarketBias(
-            direction="flat", fade_with="skip",
-            pm_pct=spy_pm_pct, vix=vix,
-            spy_prev_close=spy_prev_close, spy_pm_price=spy_pm_price,
-            es_pct=es_pct, reasons=reasons,
-            skip_reason=f"Score {score:+.1f} + PM {abs_pm:.2f}% — too ambiguous, skip today",
-        )
-
-    # ── Direction decision ────────────────────────────────────────────────────
-    fade_with = "put" if score < 0 else "call"
+    # ── Asymmetric opening rule ───────────────────────────────────────────────
+    fade_with, entry_style = select_opening_play(spy_pm_pct)
     direction = "green" if spy_pm_pct > 0 else "red" if spy_pm_pct < 0 else "flat"
     reasons.append(
-        f"-> {'GREEN' if spy_pm_pct >= 0 else 'RED'} PM + score {score:+.1f} "
-        f"-> {'OTM PUTS' if fade_with == 'put' else 'OTM CALLS'}"
+        f"-> gap {spy_pm_pct:+.2f}% -> {fade_with.upper()} via {entry_style} entry"
     )
 
     return PreMarketBias(
@@ -334,6 +333,13 @@ def get_premarket_bias() -> PreMarketBias:
         spy_prev_close=spy_prev_close, spy_pm_price=spy_pm_price,
         es_pct=es_pct, reasons=reasons,
     )
+
+
+def select_opening_play(spy_open_gap_pct: float) -> tuple[str, str]:
+    """Map the opening gap to the configured asymmetric entry path."""
+    if spy_open_gap_pct >= -MIN_PM_PCT:
+        return "put", "9:31"
+    return "call", "9:45 reversal"
 
 
 # ── Live price + reversal check ──────────────────────────────────────────────
@@ -360,7 +366,7 @@ def check_reversal_starting(bias: PreMarketBias) -> tuple[bool, str]:
     try:
         hist = yf.Ticker("SPY").history(period="1d", interval="1m", prepost=False)
         if len(hist) < 5:
-            return True, "Not enough bars — entering on bias alone"
+            return False, "Not enough one-minute bars to confirm reversal"
 
         open_price   = float(hist["Open"].iloc[0])
         current      = float(hist["Close"].iloc[-1])
