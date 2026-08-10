@@ -74,3 +74,10 @@ def is_early_close(day: date) -> bool:
 
 def market_close_time(day: date) -> tuple[int, int]:
     return (13, 0) if is_early_close(day) else (16, 0)
+
+
+def next_trading_day(day: date, include_today: bool = False) -> date:
+    candidate = day if include_today else day + timedelta(days=1)
+    while not is_trading_day(candidate):
+        candidate += timedelta(days=1)
+    return candidate

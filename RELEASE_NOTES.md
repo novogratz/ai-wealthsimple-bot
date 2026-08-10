@@ -1,3 +1,12 @@
+# v3.3.0 — Five-minute named contract targets
+
+- Sends a named SPY contract target and rationale every five minutes
+- Keeps full quant reports at exact `:00` and `:30` without duplicate messages
+- Uses live eligible exact-0DTE quotes whenever available
+- Adds next-NYSE-session Black–Scholes previews when the live chain is closed
+- Labels every theoretical preview non-actionable and replaces it with the live chain
+- Includes assumed SPY, VIX-derived IV, strike, expiry and theoretical premium
+
 # v3.2.2 — macOS virtualenv bootstrap repair
 
 - Detects the project virtualenv with `sys.prefix` instead of resolved symlink paths

@@ -49,6 +49,7 @@ from kzer_bot.spy_options_strategy import (
 )
 from kzer_bot.market_calendar import is_early_close, is_trading_day
 from kzer_bot.market_events import event_blackout, load_events
+from kzer_bot.contract_preview import estimate_target_contract
 from kzer_bot.quant_research import (
     ShadowLedger, ShadowTrade, calibrated_probability, decision_id,
     load_replay_csv, validate_quote,
@@ -87,6 +88,7 @@ _keepalive_proc: "subprocess.Popen | None" = None
 _last_report_t: float = 0.0
 REPORT_INTERVAL_SECS = 30 * 60
 POSITION_REPORT_SECS = 30 * 60
+TARGET_REPORT_SECS = 5 * 60
 MAX_DAILY_LOSS_PCT = 0.50
 _reporter_stop = threading.Event()
 _instance_lock_handle = None
@@ -621,7 +623,16 @@ def _scored_plan_report(bias: "PreMarketBias", today: str, mins_to_entry: int) -
         bias.fade_with, spy_price, expiry=now_et().date().isoformat()
     )
     if not candidates:
-        return base + "\n   Contract board: exact 0DTE quotes unavailable pre-open"
+        preview = estimate_target_contract(bias.fade_with, spy_price, bias.vix, now_et())
+        if preview:
+            return base + (
+                "\n\n<b>Next-session theoretical target — NOT ACTIONABLE</b>"
+                f"\n   SPY ${preview.strike:.0f} {preview.option_type.upper()} exp {preview.expiry}"
+                f"\n   Estimated premium: ${preview.theoretical_premium:.2f} | assumed SPY ${preview.spot:.2f}"
+                f" | IV {preview.volatility:.1%}"
+                f"\n   Why: {preview.assumptions}; live chain replaces this estimate"
+            )
+        return base + "\n   Contract target: unavailable — no live chain or theoretical estimate"
     board = _contract_leaderboard(candidates, spy_price)
     planned, score = _rank_contracts(candidates, spy_price)[0]
     plan = (
@@ -643,6 +654,39 @@ def _scored_plan_report(bias: "PreMarketBias", today: str, mins_to_entry: int) -
     )
     log("[30-MIN QUANT PLAN]\n" + board + "\n" + breakdown + "\n" + probability_line + "\n" + plan)
     return base + "\n\n<b>Quant contract board</b>\n" + board + "\n" + breakdown + "\n" + probability_line + "\n<b>" + plan + "</b>"
+
+
+def _five_minute_target_message() -> str:
+    """Concise actionable/live or theoretical target with directional rationale."""
+    bias = get_premarket_bias()
+    n = now_et()
+    spy_price = get_spy_price()
+    total = next((r.strip() for r in reversed(bias.reasons) if "TOTAL SCORE" in r), "TOTAL SCORE unavailable")
+    why_parts = [r.strip() for r in bias.reasons if any(k in r for k in ("Gap fade", "RSI(14)", "Week return", "ES fade", "VIX "))]
+    why = " | ".join(why_parts[-4:]) or "directional inputs awaiting market data"
+    if spy_price <= 0 or bias.fade_with not in {"call", "put"}:
+        return f"🎯 <b>5-MIN TARGET | {n:%H:%M} ET</b>\nNo contract target | {bias.skip_reason or 'SPY data unavailable'}"
+    candidates = get_otm_contracts_in_range(bias.fade_with, spy_price, expiry=n.date().isoformat())
+    if candidates:
+        contract, score = _rank_contracts(candidates, spy_price)[0]
+        return (
+            f"🎯 <b>5-MIN LIVE TARGET | {n:%H:%M} ET</b>\n"
+            f"SPY ${contract.strike:.0f} {contract.option_type.upper()} exp {contract.expiry} | "
+            f"ask ${contract.ask:.2f} | contract score {score:.1f}/100\n"
+            f"Direction: {total}\nWhy: {why}\n"
+            "Status: candidate only; reversal/liquidity/cash gates and manual broker review still apply"
+        )
+    preview = estimate_target_contract(bias.fade_with, spy_price, bias.vix, n)
+    if not preview:
+        return f"🎯 <b>5-MIN TARGET | {n:%H:%M} ET</b>\nNo contract estimate available\nDirection: {total}\nWhy: {why}"
+    return (
+        f"🧮 <b>5-MIN THEORETICAL TARGET | {n:%H:%M} ET</b>\n"
+        f"SPY ${preview.strike:.0f} {preview.option_type.upper()} exp {preview.expiry} | "
+        f"estimated ${preview.theoretical_premium:.2f}\n"
+        f"Assumptions: SPY ${preview.spot:.2f}, IV {preview.volatility:.1%}, unchanged into 9:45 ET\n"
+        f"Direction: {total}\nWhy: {why}\n"
+        "Status: NOT ACTIONABLE — live 0DTE chain replaces this estimate"
+    )
 
 
 def _half_hour_report() -> None:
@@ -703,6 +747,23 @@ def _half_hour_reporter_loop() -> None:
             _half_hour_report()
         except Exception as exc:
             log(f"[reporter] Half-hour report failed: {exc}")
+
+
+def _five_minute_target_loop() -> None:
+    """Publish target at :05 increments; :00/:30 are handled by the full report."""
+    while not _reporter_stop.is_set():
+        n = now_et()
+        seconds_into_five = (n.minute % 5) * 60 + n.second + n.microsecond / 1_000_000
+        wait = TARGET_REPORT_SECS - seconds_into_five
+        if _reporter_stop.wait(max(wait, 0.1)):
+            return
+        n = now_et()
+        if n.minute in {0, 30}:
+            continue
+        try:
+            notify(_five_minute_target_message())
+        except Exception as exc:
+            log(f"[reporter] Five-minute target failed: {exc}")
 
 
 def _position_report_msg(pos: "OptionsPosition", current_mid: float) -> str:
@@ -1142,7 +1203,9 @@ def main() -> None:
     # The normal runner is a persistent service: half-hour reports continue on
     # nights, weekends, and holidays while trading remains NYSE-session-only.
     reporter = threading.Thread(target=_half_hour_reporter_loop, name="spy-quant-reporter", daemon=True)
+    target_reporter = threading.Thread(target=_five_minute_target_loop, name="spy-target-reporter", daemon=True)
     reporter.start()
+    target_reporter.start()
     _start_keepalive()
     try:
         if args.now:
@@ -1173,6 +1236,7 @@ def main() -> None:
     finally:
         _reporter_stop.set()
         reporter.join(timeout=2)
+        target_reporter.join(timeout=2)
         _stop_keepalive()
 
 

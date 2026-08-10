@@ -52,7 +52,8 @@ runner's background keepalive refreshes Wealthsimple every two minutes. Run one 
 ## 3. Expected schedule
 
 - Startup: immediate scan/report.
-- Exact `:00` and `:30` ET: recurring Telegram state.
+- Every five minutes: concise live or theoretical named contract target and rationale.
+- Exact `:00` and `:30` ET: full Telegram state instead of a duplicate target message.
 - 09:00: trading-day planning begins.
 - 09:45–10:00: reversal check and potential review ticket.
 - 15:25: regular modeled time exit.
