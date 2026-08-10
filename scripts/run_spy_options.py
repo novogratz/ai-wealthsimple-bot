@@ -224,6 +224,11 @@ def _load_daily_bias_override(today: str) -> str | None:
         return None
 
 
+def _daily_override_can_replace(direction: str, skip_reason: str) -> bool:
+    """Allow an operator direction to replace model choice, never hard risk gates."""
+    return direction != "skip" or skip_reason.startswith("Opening gap unavailable")
+
+
 def _save_risk_state(state: dict) -> None:
     RISK_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
@@ -1034,7 +1039,7 @@ def run_today(now_flag: bool = False, balance_override: float | None = None) -> 
         log(f"  {r}")
 
     daily_override = _load_daily_bias_override(today)
-    if daily_override and bias.fade_with != "skip":
+    if daily_override and _daily_override_can_replace(bias.fade_with, bias.skip_reason):
         original_direction = bias.fade_with
         bias.fade_with = daily_override
         bias.direction = "operator"

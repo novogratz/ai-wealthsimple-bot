@@ -70,6 +70,10 @@ class PositionSizingTests(unittest.TestCase):
             with patch.object(bot, "DAILY_BIAS_FILE", path):
                 self.assertIsNone(bot._load_daily_bias_override("2026-08-10"))
 
+    def test_opening_gap_unavailable_is_the_only_replaceable_skip(self):
+        self.assertTrue(bot._daily_override_can_replace("skip", "Opening gap unavailable — waiting"))
+        self.assertFalse(bot._daily_override_can_replace("skip", "VIX 45 > 40 — market in panic"))
+
     def test_next_report_is_clock_aligned(self):
         n = datetime(2026, 8, 10, 10, 7, 30, tzinfo=bot.TZ)
         self.assertEqual(bot._seconds_until_next_report(n), 450)
