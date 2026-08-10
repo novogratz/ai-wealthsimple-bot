@@ -9,6 +9,9 @@
 - Strategy v4.0.0: flatish/green opens select puts at 9:31 ET
 - Clearly red opens select calls through the existing 9:45–10:00 reversal gate
 - Missing opening bars now fail closed instead of entering on bias alone
+- Removed the balance fallback that opened a SPY stock Buy ticket
+- Added hard option-surface guards: reject Shares and require exact strike/type at review
+- Returned execution to review mode after the stock-ticket incident
 
 # v3.5.1 — Immediate next-session estimate
 

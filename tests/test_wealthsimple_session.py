@@ -1,7 +1,9 @@
 import unittest
 from unittest.mock import MagicMock
 
-from scripts.wealthsimple_auto import _nonregistered_usd_balances, is_login_page
+from scripts.wealthsimple_auto import (
+    _nonregistered_usd_balances, is_login_page, validate_option_order_surface,
+)
 
 
 class WealthsimpleSessionTests(unittest.TestCase):
@@ -12,6 +14,15 @@ class WealthsimpleSessionTests(unittest.TestCase):
     def test_balance_parser_excludes_registered_accounts(self):
         text = "$0.00 CAD · $118.00 USD\nNon-registered\n$0.00 CAD · $999.00 USD\nRRSP"
         self.assertEqual(_nonregistered_usd_balances(text), [118.0])
+
+    def test_option_guard_rejects_stock_share_ticket(self):
+        with self.assertRaisesRegex(RuntimeError, "Stock/share"):
+            validate_option_order_surface("Market buy\nBuy in\nShares\nShares\n0", "put", 767)
+
+    def test_option_guard_requires_exact_contract(self):
+        validate_option_order_surface("Review order\nContracts\nBuy Aug 10 $767 Put", "put", 767)
+        with self.assertRaisesRegex(RuntimeError, "Exact option"):
+            validate_option_order_surface("Review order\nContracts\nBuy Aug 10 $768 Put", "put", 767)
 
     def test_login_url_is_detected_without_password_field(self):
         page = MagicMock()

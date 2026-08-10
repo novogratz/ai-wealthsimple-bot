@@ -5,7 +5,7 @@ strategy_version = "4.0.0"
 # auto: submit the prepared order and close the position without human clicks.
 # review: fill the Wealthsimple ticket and stop at the final review screen.
 # shadow: never open a Wealthsimple ticket (simulation only).
-execution_mode = "auto"
+execution_mode = "review"
 
 [contract]
 premium_min = 0.25

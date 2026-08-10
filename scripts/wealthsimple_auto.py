@@ -579,31 +579,9 @@ def get_live_balance(page) -> float | None:
                 print(f"  Found explicitly available balance: ${val:.2f}")
                 return val
 
-    # The home page often hides per-currency balances. Open a harmless SPY
-    # stock draft, read the account picker, then leave without clicking Next.
-    # Unlike the options-chain fallback, this works while the market is closed.
-    try:
-        print("  USD balance hidden on home — reading SPY account picker...")
-        page = navigate_to_stock(page, "SPY")
-        buy = page.get_by_role("button", name="Buy", exact=True).first
-        if buy.is_visible(timeout=2500):
-            buy.click(timeout=3000)
-            page.wait_for_timeout(1000)
-        account_trigger = page.get_by_text("Select an account to continue", exact=False).first
-        if not account_trigger.is_visible(timeout=1200):
-            account_trigger = page.get_by_text("Select account", exact=False).first
-        account_trigger.click(timeout=3000)
-        page.wait_for_timeout(1500)
-        picker_text = page.locator("body").inner_text(timeout=5000)
-        balances = _nonregistered_usd_balances(picker_text)
-        page.keyboard.press("Escape")
-        if balances and max(balances) > 0:
-            best = max(balances)
-            print(f"  Found best Non-registered USD cash: ${best:.2f}")
-            return best
-    except Exception as exc:
-        safe_print(f"  Options balance fallback failed: {exc}")
-
+    # Never open an order ticket to discover cash. A diagnostic stock ticket can
+    # be mistaken for an intended order and can contaminate the later option flow.
+    print("  USD cash is not visible on the read-only home surface")
     return None
 
 
@@ -1728,7 +1706,24 @@ def cmd_cancel_option(args) -> None:
         sys.exit(1)
 
 
-def place_option_order(page, side: str, n_contracts: int, confirm: bool, max_cost: float | None = None) -> dict:
+def validate_option_order_surface(
+    text: str, option_type: str, strike: float, require_exact: bool = True,
+) -> None:
+    """Fail closed unless the visible ticket is the exact intended option, never shares."""
+    if re.search(r"Buy in\s+Shares|Sell in\s+Shares", text, re.IGNORECASE):
+        raise RuntimeError("Stock/share order surface detected — refusing option workflow")
+    type_label = "Put" if option_type.lower() == "put" else "Call"
+    contract = rf"\${int(strike)}\s*{type_label}\b"
+    if not re.search(r"\bContracts?\b", text, re.IGNORECASE):
+        raise RuntimeError("Option contract quantity field is not visible — refusing workflow")
+    if require_exact and not re.search(contract, text, re.IGNORECASE):
+        raise RuntimeError(f"Exact option ${int(strike)} {type_label} is not visible — refusing workflow")
+
+
+def place_option_order(
+    page, side: str, n_contracts: int, confirm: bool,
+    option_type: str, strike: float, max_cost: float | None = None,
+) -> dict:
     """
     Interact with the WS options order ticket (slides up as a drawer from the bottom).
     Handles the one-time 'Writing options' consent screen if present.
@@ -1743,6 +1738,9 @@ def place_option_order(page, side: str, n_contracts: int, confirm: bool, max_cos
     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
     page.wait_for_timeout(1500)
     snap(page, f"option_{side}_ticket")
+
+    ticket_text = page.locator("body").inner_text(timeout=3000)
+    validate_option_order_surface(ticket_text, option_type, strike, require_exact=False)
 
     # Handle one-time 'Writing options' / options-enablement consent screen
     for consent_text in ["Continue", "I understand", "Enable options", "Agree"]:
@@ -1865,6 +1863,8 @@ def place_option_order(page, side: str, n_contracts: int, confirm: bool, max_cos
     except Exception:
         pass
 
+    validate_option_order_surface(_review_text, option_type, strike)
+
     review = parse_review_details(page, side, False, review_text=_review_text)
     if side == "buy" and max_cost is not None:
         estimated = review.get("estimated_value")
@@ -1945,7 +1945,10 @@ def cmd_buy_option(args) -> None:
                         f"Contract not found: {args.option_type.upper()} ${args.strike} "
                         f"exp {args.expiry} — see screenshots in data/"
                     )
-                result = place_option_order(page, "buy", args.contracts, confirm=args.confirm, max_cost=args.max_cost)
+                result = place_option_order(
+                    page, "buy", args.contracts, confirm=args.confirm,
+                    option_type=args.option_type, strike=float(args.strike), max_cost=args.max_cost,
+                )
                 result.update({
                     "symbol": args.symbol, "option_type": args.option_type,
                     "strike": args.strike, "expiry": args.expiry,
@@ -2053,7 +2056,10 @@ def sell_option_from_portfolio(
 
     page.wait_for_timeout(2000)
     snap(page, "sell_option_ticket_opened")
-    return place_option_order(page, "sell", n_contracts, confirm)
+    return place_option_order(
+        page, "sell", n_contracts, confirm,
+        option_type=option_type, strike=float(strike),
+    )
 
 
 def cmd_sell_option(args) -> None:
