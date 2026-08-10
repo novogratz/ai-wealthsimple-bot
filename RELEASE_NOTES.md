@@ -1,3 +1,9 @@
+# v3.2.2 — macOS virtualenv bootstrap repair
+
+- Detects the project virtualenv with `sys.prefix` instead of resolved symlink paths
+- Reliably re-executes `python3 scripts/watchdog.py` under `.venv/bin/python`
+- Adds `--check-runtime` interpreter diagnostics
+
 # v3.2.1 — macOS Wealthsimple reconnect repair
 
 - Detects Wealthsimple login by URL, password chooser, email field or password field

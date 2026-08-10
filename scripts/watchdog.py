@@ -22,7 +22,10 @@ sys.path.insert(0, str(ROOT))
 # the project virtualenv, restart it with the interpreter that owns the bot's
 # dependencies. This makes `python3 scripts/watchdog.py` a reliable command.
 VENV_PYTHON = ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-if VENV_PYTHON.exists() and Path(sys.executable).resolve() != VENV_PYTHON.resolve():
+PROJECT_VENV = ROOT / ".venv"
+# On macOS `.venv/bin/python` is commonly a symlink to the framework binary,
+# so resolved executable paths cannot distinguish system Python from the venv.
+if VENV_PYTHON.exists() and Path(sys.prefix).resolve() != PROJECT_VENV.resolve():
     os.execv(str(VENV_PYTHON), [str(VENV_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]])
 
 PYTHON    = sys.executable
@@ -34,6 +37,10 @@ PROFILE   = ROOT / "data" / "browser_profile"
 CDP_URL   = "http://localhost:9222"
 WS_HOME   = "https://my.wealthsimple.com/app/home"
 TZ        = ZoneInfo("America/Toronto")
+
+if "--check-runtime" in sys.argv:
+    print(f"WATCHDOG_RUNTIME_OK:{sys.executable}|prefix={sys.prefix}")
+    raise SystemExit(0)
 
 
 def log(msg: str) -> None:
