@@ -103,7 +103,8 @@ def refresh_wealthsimple_once() -> bool:
         output = (result.stdout + result.stderr).strip()
         if output:
             log(f"Startup refresh: {output.splitlines()[-1]}")
-        if result.returncode != 0 or "Session active OK" not in output:
+        confirmed = "Session active OK" in output or "Auto-login: OK" in output
+        if result.returncode != 0 or not confirmed:
             log("WARNING: startup Wealthsimple refresh was not confirmed")
             return False
         return True
@@ -148,7 +149,10 @@ def main() -> None:
 
     while True:
         ensure_edge_and_session()
-        refresh_wealthsimple_once()
+        if not refresh_wealthsimple_once():
+            log("Wealthsimple is not authenticated — retrying in 30s; bot not started")
+            time.sleep(30)
+            continue
 
         log(f"Starting bot (run #{restart_count + 1})...")
         proc = subprocess.Popen(

@@ -637,6 +637,20 @@ def get_live_balance(page) -> float | None:
     return None
 
 
+def is_login_page(page) -> bool:
+    """Detect current and legacy Wealthsimple login surfaces."""
+    try:
+        if "/login" in page.url.lower():
+            return True
+        selectors = [
+            'input[type="password"]', 'input[name="email"]',
+            'button:has-text("Log in with a password")',
+        ]
+        return any(page.locator(selector).first.is_visible(timeout=500) for selector in selectors)
+    except Exception:
+        return False
+
+
 def try_auto_login(page) -> bool:
     """
     Auto-login when session has expired back to the login page.
@@ -669,11 +683,23 @@ def try_auto_login(page) -> bool:
     snap(page, "login_page")
 
     try:
+        # Current macOS/web flow initially shows only passkey/password choices.
+        if first_visible(page, [
+            'input[type="email"]', 'input[name="email"]',
+            'input[autocomplete*="email"]', 'input[autocomplete="username"]',
+        ], timeout=1000) is None:
+            try:
+                page.get_by_text("Log in with a password", exact=True).click(timeout=3000)
+                page.wait_for_timeout(1000)
+            except Exception:
+                pass
+
         # Fill email
         email_input = first_visible(page, [
             'input[type="email"]',
             'input[name="email"]',
             'input[autocomplete*="email"]',
+            'input[autocomplete="username"]',
             'input[placeholder*="email" i]',
         ], timeout=4000)
         if email_input is None:
@@ -725,9 +751,7 @@ def try_auto_login(page) -> bool:
         page.wait_for_timeout(8000)
         snap(page, "after_auto_login")
 
-        still_on_login = page.locator(
-            'input[type="password"], input[placeholder*="Password" i]'
-        ).first.is_visible(timeout=2000)
+        still_on_login = is_login_page(page)
 
         if still_on_login:
             print("  Auto-login: still on login page — check credentials or 2FA required")
@@ -751,7 +775,7 @@ def cmd_balance(_args) -> None:
             page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
             page.wait_for_timeout(2000)
 
-            if page.locator('input[type="password"], input[placeholder*="Password" i]').first.is_visible(timeout=1500):
+            if is_login_page(page):
                 if not try_auto_login(page):
                     print("SESSION_EXPIRED: Wealthsimple session expired — run: python scripts/wealthsimple_auto.py setup")
                     sys.exit(1)
@@ -815,7 +839,7 @@ def navigate_to_stock(page, ws_symbol: str):
     page.wait_for_timeout(3000)
     snap(page, "home")
 
-    if page.locator('input[type="password"], input[placeholder*="Password" i]').first.is_visible(timeout=1000):
+    if is_login_page(page):
         if not try_auto_login(page):
             raise RuntimeError("Wealthsimple session expired — run: python scripts/wealthsimple_auto.py setup")
         page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
@@ -1218,7 +1242,7 @@ def cmd_position(args) -> None:
             page.goto(WS_HOME, wait_until="domcontentloaded", timeout=30_000)
             page.wait_for_timeout(2000)
 
-            if page.locator('input[type="password"], input[placeholder*="Password" i]').first.is_visible(timeout=1500):
+            if is_login_page(page):
                 if not try_auto_login(page):
                     print("SESSION_EXPIRED: Wealthsimple session expired")
                     sys.exit(1)
@@ -2119,9 +2143,7 @@ def cmd_keepalive(args) -> None:
                             page.wait_for_timeout(3000)
 
                             try:
-                                on_login = page.locator(
-                                    'input[type="password"], input[placeholder*="Password" i]'
-                                ).first.is_visible(timeout=2000)
+                                on_login = is_login_page(page)
                             except Exception:
                                 on_login = False
 

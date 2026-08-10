@@ -49,6 +49,12 @@ WS_PASSWORD=<Wealthsimple password>
 
 Rotate any token that has appeared in chat, terminal history, screenshots, or logs.
 
+On a new Mac, the bot-specific Chrome profile does not inherit the Wealthsimple session from
+Windows or from normal Chrome. Complete login and any 2FA once in the window opened by
+`wealthsimple_auto.py setup`. The reconnect detector recognizes Wealthsimple's current
+passkey/password chooser and legacy password form. If neither a valid session nor local
+credentials exist, watchdog stays stopped and retries instead of reporting a false success.
+
 ## Commands
 
 Safe research mode:

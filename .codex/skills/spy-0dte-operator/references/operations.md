@@ -23,6 +23,9 @@ python scripts/wealthsimple_auto.py setup
 
 Use Chrome or Edge discovered by `wealthsimple_auto.py`. The persistent profile is
 `data/browser_profile`, and CDP listens on port 9222. Keep secrets only in gitignored `.env`.
+Sessions are profile-specific and do not migrate from Windows or normal Chrome. Complete
+login/2FA once in the bot-profile window. Watchdog must not launch the scanner until the
+Wealthsimple home session is positively confirmed.
 
 ## 2. Launch modes
 
@@ -118,6 +121,8 @@ Wealthsimple directly for actual orders and positions; local ledgers are not bro
 
 Leave the persistent profile intact. Let watchdog relaunch Chrome. If login recovery fails,
 run `python scripts/wealthsimple_auto.py setup` and authenticate in the opened window.
+The login detector must check the `/login` URL and the current “Log in with a password”
+chooser; checking only for a visible password field is insufficient.
 
 ### Suspected duplicate process
 

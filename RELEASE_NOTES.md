@@ -1,3 +1,11 @@
+# v3.2.1 — macOS Wealthsimple reconnect repair
+
+- Detects Wealthsimple login by URL, password chooser, email field or password field
+- Supports the current “Log in with a password” step before filling credentials
+- Removes the false “session active” result on email/passkey-first login pages
+- Prevents watchdog from launching the bot until authentication is positively confirmed
+- Exits failed auto-login checks nonzero and leaves manual login/2FA visible
+
 # v3.2.0 — Professional research controls
 
 - Replaced fixed strike distance with strict OTM $0.25–$0.70 premium eligibility
