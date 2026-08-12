@@ -82,6 +82,7 @@ EXECUTION_LABEL = {
     "auto": "AUTO EXECUTION",
     "review": "ORDER REVIEW",
     "shadow": "SHADOW ONLY",
+    "report": "QUANT SIGNALS ONLY",
 }.get(EXECUTION_MODE, EXECUTION_MODE.upper())
 
 # Deploy the largest whole-contract amount affordable by the live USD cash.
@@ -724,12 +725,33 @@ def _target_message() -> str:
     candidates = get_otm_contracts_in_range(bias.fade_with, spy_price, expiry=n.date().isoformat())
     if candidates:
         contract, score = _rank_contracts(candidates, spy_price)[0]
+        quality = validate_quote(
+            bid=contract.bid, ask=contract.ask, volume=contract.volume,
+            open_interest=contract.open_interest,
+            max_spread_pct=float(STRATEGY_CONFIG.get("contract", "max_spread_pct")),
+            min_volume=int(STRATEGY_CONFIG.get("contract", "min_volume")),
+            min_open_interest=int(STRATEGY_CONFIG.get("contract", "min_open_interest")),
+            quote_age_seconds=(n - contract.quote_time).total_seconds() if contract.quote_time else None,
+            max_quote_age_seconds=float(STRATEGY_CONFIG.get("contract", "max_quote_age_seconds")),
+            source=contract.quote_source,
+        )
+        if not quality.valid:
+            return (
+                f"⚪ <b>SPY 0DTE SIGNAL | {n:%H:%M} ET</b>\n"
+                f"Bias <b>{bias.fade_with.upper()}</b> | {total.replace('TOTAL SCORE:', 'direction')}\n"
+                "Signal <b>NO TRADE</b> | quote/liquidity gates failed\n"
+                "Mode <b>REPORT ONLY</b>"
+            )
+        spread = (contract.ask - contract.bid) / contract.ask * 100
+        signal = "BEARISH" if contract.option_type == "put" else "BULLISH"
         return (
-            f"⚡ <b>SPY 0DTE | {n:%H:%M} ET</b>\n"
-            f"Bias <b>{bias.fade_with.upper()}</b> | {total.replace('TOTAL SCORE:', 'dir')}\n"
-            f"Target <b>${contract.strike:.0f}{contract.option_type[0].upper()}</b> "
-            f"@ ${contract.ask:.2f} | quality {score:.0f}/100\n"
-            "State <b>WATCH</b> | entry + cash gates pending"
+            f"📊 <b>SPY 0DTE SIGNAL | {n:%H:%M} ET</b>\n"
+            f"<b>{signal}</b> | direction {total.replace('TOTAL SCORE:', '').strip()}\n"
+            f"Contract <b>${contract.strike:.0f}{contract.option_type[0].upper()}</b> "
+            f"| bid ${contract.bid:.2f} / ask ${contract.ask:.2f}\n"
+            f"Quant <b>{score:.0f}/100</b> | spread {spread:.0f}% | "
+            f"vol {contract.volume:,} | OI {contract.open_interest:,}\n"
+            "Mode <b>REPORT ONLY</b> | no order"
         )
     preview = estimate_target_contract(bias.fade_with, spy_price, bias.vix, n)
     if not preview:
@@ -745,6 +767,10 @@ def _target_message() -> str:
 
 def _periodic_report() -> None:
     """Send the current compact SPY, balance, and position state."""
+    if EXECUTION_MODE == "report":
+        notify(_target_message())
+        return
+
     live_balance = get_available_balance()
     position = load_position()
     if position and position.contract.expiry == now_et().date().isoformat():
@@ -793,6 +819,8 @@ def _balance_report_msg(live_balance: float, unrealized_shadow_pnl: float = 0.0)
 
 def _report_interval_minutes(n: datetime) -> int:
     """Return Telegram cadence for the current ET market phase."""
+    if EXECUTION_MODE == "report":
+        return 30
     clock = (n.hour, n.minute)
     if clock >= (16, 0) or clock < (9, 0):
         return 30
@@ -1306,6 +1334,11 @@ def main() -> None:
     reporter.start()
     _start_keepalive()
     try:
+        if EXECUTION_MODE == "report":
+            while True:
+                _poll_control_commands()
+                time.sleep(60)
+
         if args.now:
             run_today(now_flag=True, balance_override=args.balance)
             return

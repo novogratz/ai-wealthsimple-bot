@@ -1,5 +1,8 @@
 # Unreleased — Closed-market Wealthsimple balance recovery
 
+- Strategy v4.1.0 adds report-only professional SPY signals every 30 minutes
+- Report mode never creates an entry, shadow position, or broker ticket
+- Signals include direction, exact contract, bid/ask, quant score, spread, volume, and OI
 - Reads the Non-registered account picker from a harmless SPY stock draft on weekends
 - Supports Wealthsimple's current balance-before-account-name layout
 - Keeps converted CAD separate from broker-confirmed spendable USD used for option sizing

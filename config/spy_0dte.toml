@@ -1,11 +1,12 @@
 schema_version = 2
-strategy_version = "4.0.0"
+strategy_version = "4.1.0"
 
 [execution]
 # auto: submit the prepared order and close the position without human clicks.
 # review: fill the Wealthsimple ticket and stop at the final review screen.
-# shadow: never open a Wealthsimple ticket (simulation only).
-execution_mode = "review"
+# shadow: model entries without opening a Wealthsimple ticket.
+# report: publish quant signals only; never create entries or broker tickets.
+execution_mode = "report"
 
 [contract]
 premium_min = 0.25

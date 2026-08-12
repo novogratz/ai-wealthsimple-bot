@@ -41,11 +41,17 @@ class PositionSizingTests(unittest.TestCase):
                 bot._reporter_stop.clear()
 
     def test_report_cadence_tracks_market_phase(self):
-        self.assertEqual(bot._report_interval_minutes(datetime(2026, 8, 10, 8, 45, tzinfo=bot.TZ)), 30)
-        self.assertEqual(bot._report_interval_minutes(datetime(2026, 8, 10, 9, 15, tzinfo=bot.TZ)), 15)
-        self.assertEqual(bot._report_interval_minutes(datetime(2026, 8, 10, 9, 45, tzinfo=bot.TZ)), 5)
-        self.assertEqual(bot._report_interval_minutes(datetime(2026, 8, 10, 10, 0, tzinfo=bot.TZ)), 15)
-        self.assertEqual(bot._report_interval_minutes(datetime(2026, 8, 10, 16, 0, tzinfo=bot.TZ)), 30)
+        with patch.object(bot, "EXECUTION_MODE", "review"):
+            self.assertEqual(bot._report_interval_minutes(datetime(2026, 8, 10, 8, 45, tzinfo=bot.TZ)), 30)
+            self.assertEqual(bot._report_interval_minutes(datetime(2026, 8, 10, 9, 15, tzinfo=bot.TZ)), 15)
+            self.assertEqual(bot._report_interval_minutes(datetime(2026, 8, 10, 9, 45, tzinfo=bot.TZ)), 5)
+            self.assertEqual(bot._report_interval_minutes(datetime(2026, 8, 10, 10, 0, tzinfo=bot.TZ)), 15)
+
+    def test_report_mode_always_uses_thirty_minute_cadence(self):
+        with patch.object(bot, "EXECUTION_MODE", "report"):
+            for hour, minute in ((8, 45), (9, 15), (9, 45), (14, 7), (23, 59)):
+                self.assertEqual(bot._report_interval_minutes(
+                    datetime(2026, 8, 10, hour, minute, tzinfo=bot.TZ)), 30)
 
     def test_flatish_and_green_open_select_early_puts(self):
         self.assertEqual(option_strategy.select_opening_play(0.20), ("put", "9:31"))
@@ -90,7 +96,7 @@ class PositionSizingTests(unittest.TestCase):
 
     def test_next_report_is_clock_aligned(self):
         n = datetime(2026, 8, 10, 10, 7, 30, tzinfo=bot.TZ)
-        self.assertEqual(bot._seconds_until_next_report(n), 450)
+        self.assertEqual(bot._seconds_until_next_report(n), 1350)
 
     def test_never_forces_an_unaffordable_contract(self):
         self.assertEqual(bot.calc_max_contracts(0.60, 50.0), 0)

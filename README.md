@@ -1,17 +1,15 @@
 # SPY 0DTE Quant Research Service
 
 This macOS service researches one intraday SPY option setup per NYSE trading day,
-publishes its reasoning to Telegram, maintains an independent shadow ledger, and prepares
-an exact Wealthsimple order ticket for manual review. It never sells an option that is not
-represented by its bot-owned position ledger.
+publishes its reasoning to Telegram and can operate as a report-only contract scanner. In
+the default report mode it never creates an entry, shadow position, or Wealthsimple ticket.
 
 The current model is a contrarian opening-gap fade. It is deterministic and auditable, but
 its hand-set weights and exit thresholds do not constitute proven positive expectancy.
 
 ## Strategy in one minute
 
-1. Publish compact Telegram snapshots every 30 minutes overnight, every 15 minutes during
-   the active day, and every five minutes during the 9:30–10:00 opening/entry window.
+1. Publish the highest-quality eligible SPY contract to Telegram every 30 minutes.
 2. From 9:00 ET, calculate a directional score using the SPY opening gap, RSI(14),
    five-session extension, one-hour ES move, VIX level, and configured regime bias.
 3. A flatish or green open (gap at least −0.15%) selects the 9:31 put path. A clearly red
@@ -124,10 +122,7 @@ The score ranks contracts; it is not a calibrated probability of profit.
 | Time ET | Behavior |
 |---|---|
 | Startup | Immediate live target or clearly labeled next-session theoretical estimate |
-| 4:00 PM–9:00 AM | Compact balance/target snapshot every 30 minutes |
-| 9:00–9:30 AM | Compact snapshot every 15 minutes |
-| 9:30–10:00 AM | Five-minute opening/entry monitoring |
-| 10:00 AM–4:00 PM | Compact snapshot every 15 minutes |
+| All day | Report-only best-contract signal every 30 minutes |
 | 9:00 | Begin premarket planning loop |
 | 9:31 | Flatish/green-open put path; live chain and all execution gates required |
 | 9:45–10:00 | Red-open call reversal and potential ticket preparation |
@@ -156,9 +151,9 @@ marked shadow position. This simulated balance is separate from Wealthsimple ava
 
 Telegram accepts `/status`, `/stop`, and `/resume` only from the configured chat. `/stop`
 blocks new entries and prepares an exact close ticket for a reconciled bot-owned position.
-Execution is controlled by `execution_mode` in `config/spy_0dte.toml`: `auto` (default)
-submits buy and sell tickets automatically; `review` stops at the final review screen for a
-human click; `shadow` models the trade without opening a broker ticket.
+Execution is controlled by `execution_mode` in `config/spy_0dte.toml`: `report` (default)
+only publishes the best quant-ranked contract; `review` stops at final review; `shadow`
+models without a broker ticket; and `auto` is the legacy automatic execution mode.
 
 Outside market hours, the target is a Black–Scholes preview for the next NYSE session using
 the last SPY price, current VIX as volatility, a 9:45 ET entry assumption and unchanged market

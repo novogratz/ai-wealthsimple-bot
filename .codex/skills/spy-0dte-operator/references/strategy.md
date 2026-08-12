@@ -33,7 +33,7 @@ Primary sources:
 ```text
 startup
   → immediate live target or next-session theoretical Telegram estimate
-  → one compact reporter: 30-minute overnight, 15-minute daytime, 5-minute opening window
+  → report mode: best eligible contract every 30 minutes, with no entry creation
   → valid NYSE day at 09:00
   → asymmetric opening plan
   → flatish/green: 09:31 put path; clearly red: 09:45–10:00 call reversal

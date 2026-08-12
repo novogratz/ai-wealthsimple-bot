@@ -14,7 +14,7 @@ class StrategyConfigTests(unittest.TestCase):
         cfg = load_strategy_config()
         self.assertEqual(cfg.get("contract", "premium_min"), 0.25)
         self.assertEqual(cfg.get("schedule", "early_put_entry_minute"), 31)
-        self.assertEqual(cfg.raw["strategy_version"], "4.0.0")
+        self.assertEqual(cfg.raw["strategy_version"], "4.1.0")
         self.assertEqual(len(cfg.hash), 12)
 
     def test_event_blackout_window(self):
