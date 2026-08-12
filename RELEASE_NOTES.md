@@ -1,6 +1,9 @@
 # Unreleased — Closed-market Wealthsimple balance recovery
 
-- Strategy v4.1.0 adds report-only professional SPY signals every 30 minutes
+- Strategy v5.0.0 replaces the default contrarian direction rule with opening-range,
+  VWAP and five-minute momentum confirmation
+- Publishes exact-expiry SPY signals every 10 minutes during regular market hours
+- Expands the premium band to $0.50–$3.00 and rewards nearer-money exposure separately
 - Report mode never creates an entry, shadow position, or broker ticket
 - Signals include direction, exact contract, bid/ask, quant score, spread, volume, and OI
 - Reads the Non-registered account picker from a harmless SPY stock draft on weekends

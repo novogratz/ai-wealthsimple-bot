@@ -4,19 +4,20 @@ This macOS service researches one intraday SPY option setup per NYSE trading day
 publishes its reasoning to Telegram and can operate as a report-only contract scanner. In
 the default report mode it never creates an entry, shadow position, or Wealthsimple ticket.
 
-The current model is a contrarian opening-gap fade. It is deterministic and auditable, but
-its hand-set weights and exit thresholds do not constitute proven positive expectancy.
+The default report model is a deterministic intraday trend-confirmation score. It combines
+the five-minute opening range, session VWAP displacement and five-minute momentum, then
+separately ranks executable exact-0DTE contracts. Its weights require walk-forward validation
+and do not constitute proven positive expectancy.
 
 ## Strategy in one minute
 
-1. Publish the highest-quality eligible SPY contract to Telegram every 30 minutes.
+1. Publish the highest-quality eligible SPY 0DTE contract every 10 minutes during market hours.
 2. From 9:00 ET, calculate a directional score using the SPY opening gap, RSI(14),
    five-session extension, one-hour ES move, VIX level, and configured regime bias.
-3. A flatish or green open (gap at least −0.15%) selects the 9:31 put path. A clearly red
-   open (below −0.15%) selects calls and waits for reversal confirmation.
-4. The red-open call path requires a 0.05% reversal between 9:45 and 10:00 ET.
-5. Rank strictly OTM exact-0DTE contracts with asks between $0.25 and $0.70. Strike
-   distance is informational and is not an eligibility rule.
+3. Require aligned opening-range breakout, VWAP position and five-minute momentum; weak or
+   conflicting evidence is `NO TRADE`.
+4. Positive scores select calls and negative scores select puts.
+5. Rank strictly OTM exact-0DTE contracts with asks between $0.50 and $3.00.
 6. Reject contracts without a valid two-sided quote, spread ≤25%, volume ≥100, and open
    interest ≥250.
 7. Size the largest affordable whole-contract quantity, using as close to 100% of available
@@ -111,7 +112,8 @@ Eligible contracts receive a 0–100 execution/convexity score:
 | Relative bid/ask tightness | 30 |
 | Same-day volume | 20 |
 | Open interest | 12 |
-| Fit to $0.475 target premium | 33 |
+| Premium execution band | 18 |
+| Near-the-money exposure | 15 |
 | IV sanity range | 5 |
 
 The leaderboard explains every component in Telegram and `data/options_audit.jsonl`.
@@ -122,7 +124,8 @@ The score ranks contracts; it is not a calibrated probability of profit.
 | Time ET | Behavior |
 |---|---|
 | Startup | Immediate live target or clearly labeled next-session theoretical estimate |
-| All day | Report-only best-contract signal every 30 minutes |
+| 9:30 AM–4:00 PM | Report-only best-contract signal every 10 minutes |
+| Outside market hours | Non-actionable status every 30 minutes |
 | 9:00 | Begin premarket planning loop |
 | 9:31 | Flatish/green-open put path; live chain and all execution gates required |
 | 9:45–10:00 | Red-open call reversal and potential ticket preparation |

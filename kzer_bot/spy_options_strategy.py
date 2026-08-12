@@ -1,11 +1,7 @@
-"""
-0DTE SPY Options — Contrarian Gap-Fade Strategy
+"""SPY 0DTE research signals and exact-expiry contract selection.
 
-Logic: SPY opens flatish/green → buy OTM puts at 9:31 AM
-       SPY opens clearly red → buy OTM calls after 9:45 AM reversal confirmation
-
-Big money sells into the retail FOMO open; bots and algos fade the gap.
-OTM options are cheap — small account, large leverage, defined risk.
+The report model uses observable opening-window price/volume confirmation. It does not
+assume that a green open must reverse or that a red open must bounce.
 
 Exit rules (in priority order):
   1. +500% on premium → close all
@@ -57,6 +53,8 @@ REVERSAL_CONFIRM_PCT = float(CONFIG.get("signal", "reversal_confirmation_pct"))
 # Magnitude guide: ±10 is a gentle tilt; ±20 overrides all but the largest gap signals.
 # Current: 0 → neutral (direction driven entirely by intraday SPY move vs open).
 REGIME_BIAS          = float(CONFIG.get("signal", "regime_bias"))
+OPENING_RANGE_MINUTES = int(CONFIG.get("signal", "opening_range_minutes"))
+MIN_INTRADAY_SCORE = float(CONFIG.get("signal", "minimum_intraday_score"))
 
 
 @dataclass
@@ -98,6 +96,63 @@ class OptionsPosition:
     partial_closed: bool = False   # True once 50% partial has been taken
     cost_basis: float    = 0.0     # total dollars spent (entry_premium * contracts * 100)
     reconciled: bool     = False   # True after broker confirms actual fill details
+
+
+@dataclass(frozen=True)
+class OpeningSignal:
+    option_type: str
+    score: float
+    state: str
+    reason: str
+    spy_price: float = 0.0
+    vwap: float = 0.0
+    opening_high: float = 0.0
+    opening_low: float = 0.0
+
+
+def get_opening_signal() -> OpeningSignal:
+    """Score opening-range, VWAP and short-horizon momentum; abstain on conflict."""
+    n = now_et()
+    if (n.hour, n.minute) < (9, 30) or (n.hour, n.minute) >= (16, 0):
+        return OpeningSignal("skip", 0.0, "CLOSED", "signal window is 09:30–16:00 ET")
+    try:
+        bars = yf.Ticker("SPY").history(period="2d", interval="1m", prepost=False)
+        today = bars[bars.index.map(lambda x: x.date() == n.date())]
+        if len(today) <= OPENING_RANGE_MINUTES:
+            return OpeningSignal("skip", 0.0, "WAIT", f"need {OPENING_RANGE_MINUTES} completed one-minute bars")
+        opening = today.iloc[:OPENING_RANGE_MINUTES]
+        current = float(today["Close"].iloc[-1])
+        opening_high = float(opening["High"].max())
+        opening_low = float(opening["Low"].min())
+        opening_range = max(opening_high - opening_low, current * 0.0002)
+        volume = today["Volume"].astype(float)
+        typical = (today["High"] + today["Low"] + today["Close"]) / 3
+        total_volume = float(volume.sum())
+        if current <= 0 or total_volume <= 0:
+            raise ValueError("invalid price or volume")
+        vwap = float((typical * volume).sum() / total_volume)
+        momentum = (current / float(today["Close"].iloc[-6]) - 1) * 100
+        score = 0.0
+        evidence: list[str] = []
+        if current > opening_high:
+            score += min(40.0, 25.0 + (current - opening_high) / opening_range * 15.0)
+            evidence.append("above 5m range")
+        elif current < opening_low:
+            score -= min(40.0, 25.0 + (opening_low - current) / opening_range * 15.0)
+            evidence.append("below 5m range")
+        else:
+            evidence.append("inside 5m range")
+        vwap_distance = (current / vwap - 1) * 100
+        score += max(-25.0, min(25.0, vwap_distance * 250.0))
+        score += max(-25.0, min(25.0, momentum * 125.0))
+        score = max(-100.0, min(100.0, score))
+        evidence.extend([f"VWAP {vwap_distance:+.2f}%", f"5m momentum {momentum:+.2f}%"])
+        if abs(score) < MIN_INTRADAY_SCORE:
+            return OpeningSignal("skip", score, "NO TRADE", "; ".join(evidence), current, vwap, opening_high, opening_low)
+        option_type = "call" if score > 0 else "put"
+        return OpeningSignal(option_type, score, "CONFIRMED", "; ".join(evidence), current, vwap, opening_high, opening_low)
+    except Exception as exc:
+        return OpeningSignal("skip", 0.0, "NO DATA", f"opening signal unavailable: {exc}")
 
 
 def is_strike_within_otm_bounds(option_type: str, strike: float, spy_price: float) -> bool:

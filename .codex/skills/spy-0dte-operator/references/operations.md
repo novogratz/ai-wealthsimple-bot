@@ -48,8 +48,8 @@ Execution behavior is selected by `execution_mode` in `config/spy_0dte.toml`:
 - `auto`: buys and sells are submitted automatically; no human clicks required.
 - `review`: tickets are filled and stop at the final review screen for a human confirm.
 - `shadow`: the bot models the trade but never opens a Wealthsimple ticket.
-- `report`: the bot publishes only the best eligible quant-ranked SPY contract every 30
-  minutes and never creates a modeled entry or broker ticket.
+- `report`: the bot publishes only the best eligible quant-ranked SPY 0DTE contract every
+  10 minutes during market hours and never creates a modeled entry or broker ticket.
 
 `watchdog.py` enables `caffeinate`, restores Chrome/CDP, synchronously refreshes Wealthsimple
 and verifies the session, starts the SPY runner, and restarts it after abnormal exit. The
@@ -61,7 +61,8 @@ runner's background keepalive refreshes Wealthsimple every two minutes. Run one 
 
 - Startup: immediate live target or next-session theoretical estimate; the balance/full-state
   report may complete afterward without blocking the target.
-- In report mode: professional best-contract signals every 30 minutes, all day.
+- In report mode: professional best-contract signals every 10 minutes from 09:30–16:00 ET;
+  30-minute non-actionable status outside regular hours.
 - In trading modes: 30-minute overnight, 15-minute daytime and five-minute opening updates.
 - Orders, fills, skips, exits, errors and emergency controls: immediate alerts.
 - 09:00: trading-day planning begins.

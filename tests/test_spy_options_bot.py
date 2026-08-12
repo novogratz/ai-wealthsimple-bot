@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+import pandas as pd
 from subprocess import CompletedProcess
 from types import SimpleNamespace
 from datetime import datetime
@@ -28,6 +29,23 @@ def contract(ask: float = 0.50) -> OptionContract:
 
 
 class PositionSizingTests(unittest.TestCase):
+    def test_intraday_quant_signal_requires_confirmed_breakout(self):
+        index = pd.date_range("2026-08-10 09:30", periods=6, freq="1min", tz=bot.TZ)
+        bars = pd.DataFrame({
+            "Open": [100, 100, 100, 100, 100, 101],
+            "High": [100.4, 100.5, 100.6, 100.7, 100.8, 102.2],
+            "Low": [99.8, 99.9, 99.9, 100.0, 100.0, 101.0],
+            "Close": [100.1, 100.2, 100.3, 100.4, 100.5, 102.0],
+            "Volume": [1000, 1000, 1000, 1000, 1000, 2000],
+        }, index=index)
+        fake = SimpleNamespace(history=lambda **kwargs: bars)
+        with patch.object(option_strategy, "now_et", return_value=datetime(2026, 8, 10, 9, 36, tzinfo=bot.TZ)), \
+             patch.object(option_strategy.yf, "Ticker", return_value=fake):
+            signal = option_strategy.get_opening_signal()
+        self.assertEqual(signal.option_type, "call")
+        self.assertEqual(signal.state, "CONFIRMED")
+        self.assertGreaterEqual(signal.score, 55)
+
     def test_telegram_reporter_publishes_immediately_before_scheduled_loop(self):
         was_set = bot._reporter_stop.is_set()
         bot._reporter_stop.set()
@@ -47,11 +65,12 @@ class PositionSizingTests(unittest.TestCase):
             self.assertEqual(bot._report_interval_minutes(datetime(2026, 8, 10, 9, 45, tzinfo=bot.TZ)), 5)
             self.assertEqual(bot._report_interval_minutes(datetime(2026, 8, 10, 10, 0, tzinfo=bot.TZ)), 15)
 
-    def test_report_mode_always_uses_thirty_minute_cadence(self):
+    def test_report_mode_uses_ten_minutes_during_market(self):
         with patch.object(bot, "EXECUTION_MODE", "report"):
-            for hour, minute in ((8, 45), (9, 15), (9, 45), (14, 7), (23, 59)):
-                self.assertEqual(bot._report_interval_minutes(
-                    datetime(2026, 8, 10, hour, minute, tzinfo=bot.TZ)), 30)
+            self.assertEqual(bot._report_interval_minutes(datetime(2026, 8, 10, 8, 45, tzinfo=bot.TZ)), 30)
+            self.assertEqual(bot._report_interval_minutes(datetime(2026, 8, 10, 9, 45, tzinfo=bot.TZ)), 10)
+            self.assertEqual(bot._report_interval_minutes(datetime(2026, 8, 10, 14, 7, tzinfo=bot.TZ)), 10)
+            self.assertEqual(bot._report_interval_minutes(datetime(2026, 8, 10, 16, 0, tzinfo=bot.TZ)), 30)
 
     def test_flatish_and_green_open_select_early_puts(self):
         self.assertEqual(option_strategy.select_opening_play(0.20), ("put", "9:31"))
@@ -96,7 +115,7 @@ class PositionSizingTests(unittest.TestCase):
 
     def test_next_report_is_clock_aligned(self):
         n = datetime(2026, 8, 10, 10, 7, 30, tzinfo=bot.TZ)
-        self.assertEqual(bot._seconds_until_next_report(n), 1350)
+        self.assertEqual(bot._seconds_until_next_report(n), 150)
 
     def test_never_forces_an_unaffordable_contract(self):
         self.assertEqual(bot.calc_max_contracts(0.60, 50.0), 0)
@@ -147,9 +166,9 @@ class PositionSizingTests(unittest.TestCase):
     def test_contract_candidates_are_strictly_otm_and_in_premium_band(self):
         import pandas as pd
         calls = pd.DataFrame([
-            {"strike": 772, "bid": .39, "ask": .40, "lastPrice": .40, "impliedVolatility": .2, "volume": 1000, "openInterest": 1000},
+            {"strike": 772, "bid": .99, "ask": 1.00, "lastPrice": 1.00, "impliedVolatility": .2, "volume": 1000, "openInterest": 1000},
             {"strike": 774, "bid": .19, "ask": .20, "lastPrice": .20, "impliedVolatility": .2, "volume": 1000, "openInterest": 1000},
-            {"strike": 775, "bid": .39, "ask": .40, "lastPrice": .40, "impliedVolatility": .2, "volume": 1000, "openInterest": 1000},
+            {"strike": 775, "bid": .99, "ask": 1.00, "lastPrice": 1.00, "impliedVolatility": .2, "volume": 1000, "openInterest": 1000},
         ])
         fake = SimpleNamespace(options=["2026-08-10"], option_chain=lambda expiry: SimpleNamespace(calls=calls, puts=calls))
         with patch.object(option_strategy.yf, "Ticker", return_value=fake):

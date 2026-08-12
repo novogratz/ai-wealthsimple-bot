@@ -33,7 +33,7 @@ Primary sources:
 ```text
 startup
   → immediate live target or next-session theoretical Telegram estimate
-  → report mode: best eligible contract every 30 minutes, with no entry creation
+  → report mode: best eligible contract every 10 market minutes, with no entry creation
   → valid NYSE day at 09:00
   → asymmetric opening plan
   → flatish/green: 09:31 put path; clearly red: 09:45–10:00 call reversal
@@ -50,6 +50,18 @@ The emergency-stop flag prevents new tickets. The daily risk file limits the mod
 entry per day and retains realized-loss state.
 
 ## 3. Directional model
+
+The default v5 report model uses the first five regular-session one-minute bars as the
+opening range. From 09:35–16:00 ET it combines three contemporaneous measurements:
+
+- breakout position above/below the opening range: up to ±40 points;
+- distance from session volume-weighted average price: up to ±25 points;
+- trailing five-minute return: up to ±25 points.
+
+Scores above +55 select calls; scores below −55 select puts; weaker or conflicting scores
+produce `NO TRADE`. Positive and negative scores are directional strength indices, not
+probabilities. The older gap/RSI/weekly-extension model below remains only in non-report
+legacy trading modes.
 
 Sign convention: positive selects calls; negative selects puts.
 
@@ -119,7 +131,7 @@ Candidate requirements:
 - SPY only.
 - Expiration equals today in ET.
 - Put strike is below SPY and call strike is above SPY; there is no fixed distance band.
-- Ask must be $0.25–$0.70, centered on $0.475.
+- Ask must be $0.50–$3.00 in the default report configuration.
 - Bid and ask are positive and not crossed.
 - Relative spread `(ask − bid) / ask` is at most 25%.
 - Same-day volume is at least 100.
@@ -133,7 +145,8 @@ Eligible candidates receive a bounded 0–100 score:
 spread    = 30 × (1 − min(relative_spread, 1))
 volume    = 20 × min(volume / 10,000, 1)
 OI        = 12 × min(open_interest / 5,000, 1)
-premium   = max(0, 33 − abs(ask − 0.475) / 0.225 × 33)
+premium   = up to 18 points for fit within the configured premium band
+moneyness = up to 15 points, declining to zero at 0.5% OTM
 IV        = 5 when 0.10 ≤ IV ≤ 1.50, otherwise 1
 total     = clamp(sum, 0, 100)
 ```

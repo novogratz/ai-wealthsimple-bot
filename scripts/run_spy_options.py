@@ -42,6 +42,7 @@ from kzer_bot.spy_options_strategy import (
     PreMarketBias,
     check_exit,
     check_reversal_starting,
+    get_opening_signal,
     get_option_mid,
     get_otm_contracts_in_range,
     get_premarket_bias,
@@ -514,12 +515,15 @@ def _contract_quant_score(contract: OptionContract, spy_price: float) -> tuple[f
     spread_score = max(0.0, 30.0 * (1.0 - min(spread_pct, 1.0)))
     volume_score = min(contract.volume / 10_000, 1.0) * 20.0
     oi_score = min(contract.open_interest / 5_000, 1.0) * 12.0
-    premium_score = max(0.0, 33.0 - abs(ask - TARGET_PREMIUM_MID) / 0.225 * 33.0)
+    premium_half_range = max((TARGET_PREMIUM_MAX - TARGET_PREMIUM_MIN) / 2, 0.01)
+    premium_score = max(0.0, 18.0 - abs(ask - TARGET_PREMIUM_MID) / premium_half_range * 18.0)
+    moneyness_pct = abs(contract.strike - spy_price) / spy_price if spy_price > 0 else 1.0
+    moneyness_score = max(0.0, 15.0 * (1.0 - min(moneyness_pct / 0.005, 1.0)))
     iv_score = 5.0 if 0.10 <= contract.iv <= 1.50 else 1.0
-    total = max(0.0, min(100.0, spread_score + volume_score + oi_score + premium_score + iv_score))
+    total = max(0.0, min(100.0, spread_score + volume_score + oi_score + premium_score + moneyness_score + iv_score))
     return total, {
         "spread": spread_score, "volume": volume_score, "oi": oi_score,
-        "premium": premium_score, "iv": iv_score,
+        "premium": premium_score, "moneyness": moneyness_score, "iv": iv_score,
     }
 
 
@@ -716,8 +720,51 @@ def _scored_plan_report(bias: "PreMarketBias", today: str, mins_to_entry: int) -
 
 def _target_message() -> str:
     """Compact live or theoretical target snapshot."""
-    bias = get_premarket_bias()
     n = now_et()
+    if EXECUTION_MODE == "report":
+        signal = get_opening_signal()
+        if signal.option_type not in {"call", "put"}:
+            return (
+                f"⚪ <b>SPY OPENING SIGNAL | {n:%H:%M} ET</b>\n"
+                f"State <b>{signal.state}</b> | score {signal.score:+.0f}/100\n"
+                f"{signal.reason}\nMode <b>REPORT ONLY</b>"
+            )
+        candidates = get_otm_contracts_in_range(signal.option_type, signal.spy_price, expiry=n.date().isoformat())
+        eligible = []
+        for contract in candidates:
+            quality = validate_quote(
+                bid=contract.bid, ask=contract.ask, volume=contract.volume,
+                open_interest=contract.open_interest,
+                max_spread_pct=float(STRATEGY_CONFIG.get("contract", "max_spread_pct")),
+                min_volume=int(STRATEGY_CONFIG.get("contract", "min_volume")),
+                min_open_interest=int(STRATEGY_CONFIG.get("contract", "min_open_interest")),
+                quote_age_seconds=(n - contract.quote_time).total_seconds() if contract.quote_time else None,
+                max_quote_age_seconds=float(STRATEGY_CONFIG.get("contract", "max_quote_age_seconds")),
+                source=contract.quote_source,
+            )
+            if quality.valid:
+                eligible.append(contract)
+        if not eligible:
+            return (
+                f"⚪ <b>SPY OPENING SIGNAL | {n:%H:%M} ET</b>\n"
+                f"Direction <b>{signal.option_type.upper()}</b> | score {signal.score:+.0f}/100\n"
+                "Contract <b>NO TRADE</b> | no executable quote passed\nMode <b>REPORT ONLY</b>"
+            )
+        contract, contract_score = _rank_contracts(eligible, signal.spy_price)[0]
+        spread = (contract.ask - contract.bid) / contract.ask * 100
+        return (
+            f"📊 <b>SPY OPENING SIGNAL | {n:%H:%M} ET</b>\n"
+            f"Direction <b>{'BULLISH CALL' if signal.option_type == 'call' else 'BEARISH PUT'}</b> "
+            f"| signal {signal.score:+.0f}/100\n"
+            f"Contract <b>${contract.strike:.0f}{contract.option_type[0].upper()}</b> "
+            f"| bid ${contract.bid:.2f} / ask ${contract.ask:.2f}\n"
+            f"Execution <b>{contract_score:.0f}/100</b> | spread {spread:.0f}% | "
+            f"vol {contract.volume:,} | OI {contract.open_interest:,}\n"
+            f"SPY ${signal.spy_price:.2f} | VWAP ${signal.vwap:.2f} | {signal.reason}\n"
+            "Mode <b>REPORT ONLY</b> | 0DTE can lose 100%"
+        )
+
+    bias = get_premarket_bias()
     spy_price = get_spy_price()
     total = next((r.strip() for r in reversed(bias.reasons) if "TOTAL SCORE" in r), "TOTAL SCORE unavailable")
     if spy_price <= 0 or bias.fade_with not in {"call", "put"}:
@@ -820,7 +867,7 @@ def _balance_report_msg(live_balance: float, unrealized_shadow_pnl: float = 0.0)
 def _report_interval_minutes(n: datetime) -> int:
     """Return Telegram cadence for the current ET market phase."""
     if EXECUTION_MODE == "report":
-        return 30
+        return 10 if (9, 30) <= (n.hour, n.minute) < (16, 0) else 30
     clock = (n.hour, n.minute)
     if clock >= (16, 0) or clock < (9, 0):
         return 30
