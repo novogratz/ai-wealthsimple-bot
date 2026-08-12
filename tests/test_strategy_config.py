@@ -15,6 +15,8 @@ class StrategyConfigTests(unittest.TestCase):
         self.assertEqual(cfg.get("contract", "premium_min"), 0.50)
         self.assertEqual(cfg.get("schedule", "early_put_entry_minute"), 31)
         self.assertEqual(cfg.raw["strategy_version"], "5.0.0")
+        self.assertFalse(cfg.get("execution", "trading_enabled"))
+        self.assertFalse(cfg.get("execution", "wealthsimple_enabled"))
         self.assertEqual(len(cfg.hash), 12)
 
     def test_event_blackout_window(self):

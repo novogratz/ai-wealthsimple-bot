@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""
-Le Grinder Watchdog — keeps the bot and Edge browser alive 24/7.
-- Restarts the bot if it crashes
-- Re-launches Edge if port 9222 goes down
-- Auto-logins if Wealthsimple session expires
-"""
+"""Watchdog for the persistent SPY signal service and optional broker integration."""
 import subprocess
 import platform
 import os
@@ -37,6 +32,11 @@ PROFILE   = ROOT / "data" / "browser_profile"
 CDP_URL   = "http://localhost:9222"
 WS_HOME   = "https://my.wealthsimple.com/app/home"
 TZ        = ZoneInfo("America/Toronto")
+
+
+def wealthsimple_enabled() -> bool:
+    from kzer_bot.strategy_config import load_strategy_config
+    return bool(load_strategy_config().get("execution", "wealthsimple_enabled"))
 
 if "--check-runtime" in sys.argv:
     print(f"WATCHDOG_RUNTIME_OK:{sys.executable}|prefix={sys.prefix}")
@@ -153,10 +153,14 @@ def main() -> None:
     prevent_sleep()
 
     restart_count = 0
+    broker_enabled = wealthsimple_enabled()
+    if not broker_enabled:
+        log("Telegram-only mode: Wealthsimple, Chrome/CDP, and trading are disabled")
 
     while True:
-        ensure_edge_and_session()
-        if not refresh_wealthsimple_once():
+        if broker_enabled:
+            ensure_edge_and_session()
+        if broker_enabled and not refresh_wealthsimple_once():
             log("Wealthsimple is not authenticated — retrying in 30s; bot not started")
             time.sleep(30)
             continue
@@ -167,10 +171,10 @@ def main() -> None:
             cwd=ROOT,
         )
 
-        # Monitor while bot runs — check Edge every 60s
+        # Monitor while bot runs; broker mode also maintains its browser session.
         while proc.poll() is None:
             time.sleep(60)
-            if not edge_alive():
+            if broker_enabled and not edge_alive():
                 log("Edge went down while bot is running — relaunching...")
                 launch_edge()
                 time.sleep(3)

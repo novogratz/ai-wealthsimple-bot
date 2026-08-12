@@ -150,6 +150,8 @@ class PositionSizingTests(unittest.TestCase):
     def test_auto_buy_passes_confirm_and_returns_submitted(self):
         result = CompletedProcess([], 0, stdout='ORDER_RESULT_JSON:{"submitted": true}', stderr="")
         with patch.object(bot, "EXECUTION_MODE", "auto"), \
+             patch.object(bot, "TRADING_ENABLED", True), \
+             patch.object(bot, "WEALTHSIMPLE_ENABLED", True), \
              patch.object(bot, "_DRY_RUN", False), \
              patch.object(bot.subprocess, "run", return_value=result) as run:
             self.assertEqual(bot.execute_buy_option(contract(), 1, 100), "submitted")
@@ -158,6 +160,8 @@ class PositionSizingTests(unittest.TestCase):
     def test_review_buy_has_no_confirm_and_returns_review(self):
         result = CompletedProcess([], 0, stdout='ORDER_RESULT_JSON:{"submitted": false}', stderr="")
         with patch.object(bot, "EXECUTION_MODE", "review"), \
+             patch.object(bot, "TRADING_ENABLED", True), \
+             patch.object(bot, "WEALTHSIMPLE_ENABLED", True), \
              patch.object(bot, "_DRY_RUN", False), \
              patch.object(bot.subprocess, "run", return_value=result) as run:
             self.assertEqual(bot.execute_buy_option(contract(), 1, 100), "review")
@@ -196,12 +200,19 @@ class OwnershipLedgerTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             ledger = Path(tmp) / "position.json"
-            with patch.object(bot, "POS_FILE", ledger), patch.object(bot, "_DRY_RUN", True):
+            with patch.object(bot, "POS_FILE", ledger), patch.object(bot, "_DRY_RUN", True), \
+                 patch.object(bot, "TRADING_ENABLED", True), \
+                 patch.object(bot, "WEALTHSIMPLE_ENABLED", True):
                 bot.save_position(owned)
                 self.assertEqual(bot.execute_sell_option(owned_contract, 1), "dry")
                 wrong = contract()
                 wrong.strike = 641.0
                 self.assertEqual(bot.execute_sell_option(wrong, 1), "failed")
+
+    def test_disabled_trading_refuses_broker_orders(self):
+        with patch.object(bot, "TRADING_ENABLED", False), \
+             patch.object(bot, "WEALTHSIMPLE_ENABLED", False):
+            self.assertEqual(bot.execute_buy_option(contract(), 1, 100), "failed")
 
 
 if __name__ == "__main__":

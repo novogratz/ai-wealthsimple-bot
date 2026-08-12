@@ -4,6 +4,7 @@
   VWAP and five-minute momentum confirmation
 - Publishes exact-expiry SPY signals every 10 minutes during regular market hours
 - Expands the premium band to $0.50–$3.00 and rewards nearer-money exposure separately
+- Disables trading and Wealthsimple explicitly; report-mode watchdog runs Telegram/data only
 - Report mode never creates an entry, shadow position, or broker ticket
 - Signals include direction, exact contract, bid/ask, quant score, spread, volume, and OI
 - Reads the Non-registered account picker from a harmless SPY stock draft on weekends

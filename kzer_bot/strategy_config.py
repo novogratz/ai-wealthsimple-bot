@@ -38,6 +38,10 @@ def load_strategy_config(path: Path = DEFAULT_PATH) -> StrategyConfig:
     mode = str(raw["execution"]["execution_mode"]).strip().lower()
     if mode not in {"auto", "review", "shadow", "report"}:
         raise ValueError("execution_mode must be one of: auto, review, shadow, report")
+    trading_enabled = bool(raw["execution"].get("trading_enabled", True))
+    wealthsimple_enabled = bool(raw["execution"].get("wealthsimple_enabled", True))
+    if mode == "report" and (trading_enabled or wealthsimple_enabled):
+        raise ValueError("report mode requires trading_enabled=false and wealthsimple_enabled=false")
     early_minute = int(raw["schedule"]["early_put_entry_minute"])
     if not 30 <= early_minute < int(raw["schedule"]["entry_minute_start"]):
         raise ValueError("early_put_entry_minute must be between 30 and the standard entry minute")

@@ -51,6 +51,10 @@ Execution behavior is selected by `execution_mode` in `config/spy_0dte.toml`:
 - `report`: the bot publishes only the best eligible quant-ranked SPY 0DTE contract every
   10 minutes during market hours and never creates a modeled entry or broker ticket.
 
+The default report configuration sets both `trading_enabled = false` and
+`wealthsimple_enabled = false`. Watchdog therefore skips Chrome/CDP, Wealthsimple login,
+session refresh, broker keepalive and balance access.
+
 `watchdog.py` enables `caffeinate`, restores Chrome/CDP, synchronously refreshes Wealthsimple
 and verifies the session, starts the SPY runner, and restarts it after abnormal exit. The
 runner's background keepalive refreshes Wealthsimple every two minutes. Run one instance only.

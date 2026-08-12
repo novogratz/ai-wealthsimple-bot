@@ -79,6 +79,8 @@ BOT_ID    = "spy-0dte-long-v1"
 SHADOW_STARTING_BALANCE = 10_000.0
 STRATEGY_CONFIG = load_strategy_config()
 EXECUTION_MODE = str(STRATEGY_CONFIG.get("execution", "execution_mode")).strip().lower()
+TRADING_ENABLED = bool(STRATEGY_CONFIG.get("execution", "trading_enabled"))
+WEALTHSIMPLE_ENABLED = bool(STRATEGY_CONFIG.get("execution", "wealthsimple_enabled"))
 EXECUTION_LABEL = {
     "auto": "AUTO EXECUTION",
     "review": "ORDER REVIEW",
@@ -119,6 +121,11 @@ def _acquire_instance_lock() -> None:
 
 
 def _startup_health() -> str:
+    if not WEALTHSIMPLE_ENABLED:
+        return (
+            f"🟢 <b>SPY QUANT SIGNALS ONLINE</b> | TELEGRAM ONLY\n"
+            f"Trading OFF | Wealthsimple OFF | cfg {STRATEGY_CONFIG.hash}"
+        )
     checks: list[str] = []
     try:
         urllib.request.urlopen("http://localhost:9222/json", timeout=3)
@@ -145,7 +152,7 @@ def _start_keepalive() -> None:
     """Launch wealthsimple_auto.py keepalive as a background daemon.
     Refreshes the WS Edge session every 2 min so it never expires mid-session."""
     global _keepalive_proc
-    if _DRY_RUN:
+    if _DRY_RUN or not WEALTHSIMPLE_ENABLED:
         return
     try:
         _keepalive_proc = subprocess.Popen(
@@ -594,6 +601,9 @@ def _order_state(result: dict) -> str:
 
 def execute_buy_option(contract: OptionContract, n_contracts: int, max_debit: float) -> str:
     """Place the buy ticket; in auto mode it clicks the broker submit button."""
+    if not TRADING_ENABLED or not WEALTHSIMPLE_ENABLED:
+        log("[SAFETY] Refusing buy: trading or Wealthsimple integration is disabled")
+        return "failed"
     expected_cost = contract.ask * n_contracts * 100
     if n_contracts < 1 or expected_cost > max_debit:
         log(f"[SAFETY] Refusing buy: {n_contracts} contract(s), expected cost ${expected_cost:.2f}")
@@ -624,6 +634,9 @@ def execute_buy_option(contract: OptionContract, n_contracts: int, max_debit: fl
 
 
 def execute_sell_option(contract: OptionContract, n_contracts: int) -> str:
+    if not TRADING_ENABLED or not WEALTHSIMPLE_ENABLED:
+        log("[SAFETY] Refusing sell: trading or Wealthsimple integration is disabled")
+        return "failed"
     owned = load_position()
     if (
         owned is None

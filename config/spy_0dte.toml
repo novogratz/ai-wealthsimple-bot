@@ -2,6 +2,8 @@ schema_version = 2
 strategy_version = "5.0.0"
 
 [execution]
+trading_enabled = false
+wealthsimple_enabled = false
 # auto: submit the prepared order and close the position without human clicks.
 # review: fill the Wealthsimple ticket and stop at the final review screen.
 # shadow: model entries without opening a Wealthsimple ticket.

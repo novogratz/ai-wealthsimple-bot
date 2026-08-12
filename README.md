@@ -3,6 +3,8 @@
 This macOS service researches one intraday SPY option setup per NYSE trading day,
 publishes its reasoning to Telegram and can operate as a report-only contract scanner. In
 the default report mode it never creates an entry, shadow position, or Wealthsimple ticket.
+Both `trading_enabled` and `wealthsimple_enabled` are false by default, so watchdog does not
+launch Chrome, authenticate with Wealthsimple, run broker keepalive, or read balances.
 
 The default report model is a deterministic intraday trend-confirmation score. It combines
 the five-minute opening range, session VWAP displacement and five-minute momentum, then
